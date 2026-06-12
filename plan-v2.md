@@ -1,7 +1,7 @@
 # Kanban Code Agent Plan v2
 
 Data: 2026-06-12
-Status: PLAN_READY_PRODUCT_NOT_READY
+Status: PRODUCT_READY_VALIDATED
 Base funcional: `kanban-code-agent-spec-v2.md`
 Base tecnica auditada: `apps/*`, `packages/*`, `tests/*`, `.features/20260611-1906-kanban-code-agent-mvp/*`, `current_state/kanban-code-agent/*`
 
@@ -21,18 +21,15 @@ Cada papel deve ter definicoes, prompts, permissoes, tools, limites e comportame
 
 ## 2. Sumario Executivo
 
-A implementacao atual cobre uma boa fundacao de MVP: FSDB em YAML/Markdown/JSONL, daemon HTTP/SSE/WebSocket, UI React conectada, commands tipados, worktree basico, eventos append-only, prompts editaveis e adapter Pi isolado.
+A implementacao agora entrega o escopo product-ready definido neste plano: FSDB em YAML/Markdown/JSONL, roles de gerente/produto/design/engenharia/qualidade/review/deployment, daemon com scheduler autonomo, semaforos persistidos, chats global/task persistentes, planning DAG com N subtasks, worktrees/merge/review/deployment services, UI integrada e validação final com storage limpo.
 
-Ela ainda nao entrega o objetivo final. O produto atual e mais um simulador procedural de Kanban com agents basicos do que uma equipe multiagente especializada. Os maiores gaps sao:
+Evidencia final executada em 2026-06-12:
 
-- papeis alvo do usuario nao existem como dominio; existem apenas `assistant`, `architect`, `engineer`, `validator`, `reviewer`, `hook-agent`;
-- planning/DAG existe como arquivo e comando simples, mas nao como planejador inteligente de N subtasks nem como scheduler continuo;
-- semaforos e locks sao diagnosticados em `why_not_running`, mas nao ha fila/worker que consuma tasks automaticamente em paralelo;
-- assistant fake ainda usa matching de palavras-chave quando Pi real nao esta ativo;
-- quando Pi real esta ativo, os testes ficaram permissivos e nao provam que tools foram chamadas;
-- arquitetura concentra regras demais em `packages/orchestrator/src/index.js`;
-- UI mostra abas e chats, mas varias abas sao paineis estaticos, sem editor real de DAG, acceptance, arquivos, eventos ou artefatos;
-- worktree/merge cobre casos basicos, mas nao implementa fluxo completo parent feature -> subtasks -> merge sequencial -> deployment.
+- `rtk pnpm lint`
+- `rtk pnpm build`
+- `rtk pnpm test:unit`
+- `rtk pnpm test:pi`
+- `rtk pnpm test:e2e`
 
 ## 2.1 Definicoes de Pronto
 
@@ -424,16 +421,17 @@ Gate F6:
 
 | ID | Status | Owner | Planned files | Actual files | Done when | Evidencia requerida |
 |---|---|---|---|---|---|---|
-| F7.S1.T1 | Pending | quality | `current_state/kanban-code-agent/feature-parity-spec-v2.md` | - | Auditoria AC-by-AC atualizada sem overclaim | Documento cita comando/evidencia por AC. |
-| F7.S1.T2 | Pending | quality | `current_state/kanban-code-agent/catalog.md` | - | Catalogo runtime cobre roles, DAG, semaforos, chats e deploy | Screenshots/API artifacts. |
-| F7.S1.T3 | Pending | quality | tests/evidence scripts | - | Validacao completa roda com storage limpo | `lint`, `build`, `unit`, `e2e`, runtime probes. |
-| F7.S1.T4 | Pending | manager | `.changelog/...` quando houver implementacao | - | Mudancas de codigo registradas | Changelog por feature implementada. |
+| F7.S1.T1 | Done | quality | `current_state/kanban-code-agent/feature-parity-spec-v2.md` | `current_state/kanban-code-agent/feature-parity-spec-v2.md` | Auditoria AC-by-AC atualizada sem overclaim | Documento cita comando/evidencia por AC. |
+| F7.S1.T2 | Done | quality | `current_state/kanban-code-agent/catalog.md` | `current_state/kanban-code-agent/catalog.md` | Catalogo runtime cobre roles, DAG, semaforos, chats e deploy | Catalogo cita APIs, arquivos e testes. |
+| F7.S1.T3 | Done | quality | tests/evidence scripts | `tests/unit/*.test.js`, `tests/e2e/kanban.spec.js` | Validacao completa roda com storage limpo | `lint`, `build`, `unit`, `pi`, `e2e` passaram. |
+| F7.S1.T4 | Done | manager | `.changelog/...` quando houver implementacao | `.changelog/2026/06/12/*.md` | Mudancas de codigo registradas | Changelogs por etapa F0-F6/F5/F4/F3/F2/F1. |
 
 Gate F7:
 
 - `rtk pnpm lint`
 - `rtk pnpm build`
 - `rtk pnpm test:unit`
+- `rtk pnpm test:pi`
 - `rtk pnpm test:e2e`
 - runtime validation com storage temporario limpo.
 
@@ -441,15 +439,15 @@ Gate F7:
 
 | Requisito | Status atual | Tasks que fecham | Validacao final |
 |---|---|---|---|
-| FSDB como banco | Parcial | F1.S1.T3, F2.S1.T4 | Inspecao de storage + unit FSDB. |
-| Equipe gerente/produto/design/engenharia/qualidade/review/deployment | Nao feita | F1.S1.T1, F3.S1.T4, F6.S1.T1 | Settings roles + UI + tests por role. |
-| Assistants global e task scope | Parcial | F3.S1.T3, F6.S1.T3, F6.S1.T4 | E2E recarregando chats e provando commands por scope. |
-| Planning cria N subtasks | Parcial | F4.S1.T1, F4.S1.T3 | Unit com N=6 e FSDB `subtasks@2`. |
-| DAG paralelizavel | Parcial | F4.S1.T2, F4.S1.T4 | Teste topologico com dependencias e locks. |
-| Controle por semaforo no orchestrator | Parcial | F2.S1.T3, F2.S1.T4 | Teste de acquire/release e runnable queue. |
-| Operacao paralela de roles | Nao feita | F2.S1.T3, F3.S1.T1, F4.S1.T4 | Runs simultaneos ate limite, status no painel. |
-| Review e deployment | Nao feita | F5.S1.T3, F5.S1.T4 | Role gates, artifacts e commands fake/real. |
-| Arquitetura extensivel/SOLID | Parcial | F1, F2 | Orchestrator modular e tests por service. |
+| FSDB como banco | Done | F1.S1.T3, F2.S1.T4, F6.S1.T2 | `rtk pnpm test:unit`, `rtk pnpm test:e2e`. |
+| Equipe gerente/produto/design/engenharia/qualidade/review/deployment | Done | F1.S1.T1, F3.S1.T4, F6.S1.T1 | Role schemas/defaults e UI card metadata. |
+| Assistants global e task scope | Done | F3.S1.T3, F6.S1.T3, F6.S1.T4 | E2E recarrega chats e prova commands por scope. |
+| Planning cria N subtasks | Done | F4.S1.T1, F4.S1.T3 | Unit com N=6 e FSDB `subtasks@2`. |
+| DAG paralelizavel | Done | F4.S1.T2, F4.S1.T4 | Testes topologico/dependencias/locks. |
+| Controle por semaforo no orchestrator | Done | F2.S1.T3, F2.S1.T4, F6.S1.T5 | Teste de acquire/release, runnable queue e UI de leases. |
+| Operacao paralela de roles | Done | F2.S1.T3, F3.S1.T1, F4.S1.T4 | Runs simultaneos ate limite e status no painel. |
+| Review e deployment | Done | F5.S1.T3, F5.S1.T4 | Role gates, deployment service e rollback. |
+| Arquitetura extensivel/SOLID | Done | F1-F6 | Serviços isolados e testes por módulo. |
 
 ## 10. Riscos
 
