@@ -61,7 +61,7 @@ function TString(opts = {}) { return { type: "string", ...opts }; }
 function TOptional(schema) { return { ...schema, optional: true }; }
 function TArray(items, opts = {}) { return { type: "array", items, ...opts }; }
 
-function buildKanbanTools(context) {
+export function buildKanbanTools(context) {
   // context = { root, createTask, moveTask, updateTask, getTask, listTasks, boardSnapshot,
   //             whyNotRunning, decomposeTask, readSettingsScope, updateSettings,
   //             runTask, interruptTask, orchestratorStatus, readAgent }

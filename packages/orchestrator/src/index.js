@@ -406,6 +406,11 @@ export async function handleCommand(input, root) {
         } else {
           reply = `Informe o novo título usando "renomear para ...".`;
         }
+      } else if ((lower.includes("aceite") || lower.includes("criterio")) && current) {
+        const acceptance = command.prompt.split(/para\s+/i).pop()?.trim() || command.prompt.trim();
+        await writeTaskFile(current.id, "acceptance.md", `# Critérios de aceite\n\n- [ ] ${acceptance}\n`, root);
+        action = { type: "acceptance.updated", taskId: current.id };
+        reply = `Atualizei aceite de ${current.id}.`;
       } else if ((lower.includes("decompor") || lower.includes("decomponha") || lower.includes("subtask")) && current) {
         const first = TaskSchema.parse(await createTask({
           id: `${current.id}-01`,

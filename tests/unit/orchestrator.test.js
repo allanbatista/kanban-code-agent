@@ -163,6 +163,37 @@ test("assistant chat can move and rename the selected task", async () => {
   assert.equal(detail.title, "Nome final");
 });
 
+test("task assistant can update acceptance and decompose by task scope", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-chat-task-scope-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-agent-chat-task-create",
+    input: { title: "Task scoped assistant", projectTargets: ["kanban-code-agent"] }
+  }, root);
+  const acceptance = await handleCommand({
+    type: "agent.chat",
+    commandId: "cmd-agent-chat-acceptance",
+    scope: "task",
+    agentId: "assistant",
+    taskId: created.task.id,
+    prompt: "alterar aceite para Validar persistencia do chat"
+  }, root);
+  assert.equal(acceptance.action.type, "acceptance.updated");
+  assert.match(await readFile(join(root, "tasks", created.task.id, "acceptance.md"), "utf8"), /Validar persistencia do chat/);
+
+  const decomposed = await handleCommand({
+    type: "agent.chat",
+    commandId: "cmd-agent-chat-decompose",
+    scope: "task",
+    agentId: "assistant",
+    taskId: created.task.id,
+    prompt: "decompor em subtasks"
+  }, root);
+  assert.equal(decomposed.action.type, "subtasks.spawned");
+  const snapshot = await handleQuery({ type: "board.snapshot" }, root);
+  assert.equal(snapshot.tasks.some((task) => task.id === `${created.task.id}-01`), true);
+});
+
 test("manual override rejects stale agent completion", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-orch-"));
   const created = await handleCommand({

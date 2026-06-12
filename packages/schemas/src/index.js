@@ -44,6 +44,8 @@ export const RoleSettingsSchema = z.object({
   id: z.enum(["manager", "product", "design", "engineering", "quality", "review", "deployment"]),
   label: z.string().min(1),
   agentId: z.string().min(1),
+  scope: z.enum(["board", "task"]).default("task"),
+  promptPath: z.string().min(1).optional(),
   columnIds: z.array(z.string().min(1)).default([]),
   tools: z.object({
     builtin: z.array(z.string()).default([]).optional(),

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { doctorPi, loadPiSdk, startPiSession } from "../../packages/pi-adapter/src/index.js";
+import { buildKanbanTools, doctorPi, loadPiSdk, startPiSession } from "../../packages/pi-adapter/src/index.js";
 
 const realPiEnabled = process.env.KCA_PI_REAL_TESTS === "1";
 
@@ -27,6 +27,30 @@ test("pi adapter fake session is deterministic enough for local runtime tests", 
   else process.env.KCA_PI_SDK_PACKAGE = previous;
   assert.equal(session.mode, "fake");
   assert.equal(session.sessionId, "run_fake");
+});
+
+test("pi adapter tool contracts execute effects through injected context", async () => {
+  const calls = [];
+  const tools = buildKanbanTools({
+    sdkExports: { defineTool: (tool) => tool },
+    createTask: async (input) => {
+      calls.push({ type: "createTask", input });
+      return { id: "KCA-MOCK", title: input.title };
+    },
+    moveTask: async (taskId, column) => {
+      calls.push({ type: "moveTask", taskId, column });
+      return { id: taskId, column };
+    }
+  });
+  const create = tools.find((tool) => tool.name === "kca_create_task");
+  const move = tools.find((tool) => tool.name === "kca_move_task");
+  assert.equal(create.parameters.properties.title.type, "string");
+  await create.execute("call-create", { title: "Mock task", projectTargets: ["kanban-code-agent"] });
+  await move.execute("call-move", { taskId: "KCA-MOCK", column: "build" });
+  assert.deepEqual(calls, [
+    { type: "createTask", input: { title: "Mock task", description: "", column: "inbox", priority: "medium", kind: "task", projectTargets: ["kanban-code-agent"] } },
+    { type: "moveTask", taskId: "KCA-MOCK", column: "build" }
+  ]);
 });
 
 test("pi adapter loads verified SDK and creates a dry-run AgentSession", { skip: realPiEnabled ? false : "set KCA_PI_REAL_TESTS=1 to run Pi SDK smoke tests" }, async () => {
