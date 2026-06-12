@@ -77,7 +77,8 @@ test("kca task run interrupt decompose and why use orchestrator commands", async
 
   const doctorResult = JSON.parse((await run(["doctor"], root)).stdout);
   assert.equal(doctorResult.indexes.taskCount, 3);
-  assert.equal(doctorResult.pi.sdk.packageName, "@earendil-works/pi-coding-agent");
-  assert.equal(doctorResult.pi.dryRun.mode, "real");
+  assert.equal(doctorResult.pi.sdk.mode, "fake");
+  assert.equal(doctorResult.pi.sdk.reason, "forced_by_env");
+  assert.equal(doctorResult.pi.dryRun, null);
   assert.match(await readFile(join(root, "settings", "runtime", "indexes", "tasks.json"), "utf8"), /CLI runtime/);
 });

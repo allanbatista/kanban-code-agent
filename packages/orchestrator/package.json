@@ -10,6 +10,7 @@
     "@kca/agent-runtime": "workspace:*",
     "@kca/fsdb": "workspace:*",
     "@kca/git-worktree": "workspace:*",
+    "@kca/pi-adapter": "workspace:*",
     "@kca/schemas": "workspace:*"
   }
 }

@@ -151,7 +151,8 @@ test("assistant chat can move and rename the selected task", async () => {
     prompt: "renomear para Nome final"
   }, root);
   assert.equal(renamed.action.type, "task.updated");
-  assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).title, "Nome final");
+  const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+  assert.equal(detail.title, "Nome final");
 });
 
 test("manual override rejects stale agent completion", async () => {

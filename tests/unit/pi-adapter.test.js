@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { doctorPi, loadPiSdk, startPiSession } from "../../packages/pi-adapter/src/index.js";
 
+const realPiEnabled = process.env.KCA_PI_REAL_TESTS === "1";
+
 test("pi adapter falls back to fake mode when SDK package is unavailable", async () => {
   const loaded = await loadPiSdk("__missing_pi_sdk_for_kca_tests__");
   assert.equal(loaded.ok, false);
@@ -27,7 +29,7 @@ test("pi adapter fake session is deterministic enough for local runtime tests", 
   assert.equal(session.sessionId, "run_fake");
 });
 
-test("pi adapter loads verified SDK and creates a dry-run AgentSession", async () => {
+test("pi adapter loads verified SDK and creates a dry-run AgentSession", { skip: realPiEnabled ? false : "set KCA_PI_REAL_TESTS=1 to run Pi SDK smoke tests" }, async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-pi-real-"));
   const loaded = await loadPiSdk();
   assert.equal(loaded.ok, true);
@@ -52,7 +54,7 @@ test("pi adapter loads verified SDK and creates a dry-run AgentSession", async (
   assert.equal(session.promptSent, false);
 });
 
-test("pi doctor reports SDK, auth presence and dry-run session without secrets", async () => {
+test("pi doctor reports SDK, auth presence and dry-run session without secrets", { skip: realPiEnabled ? false : "set KCA_PI_REAL_TESTS=1 to run Pi SDK smoke tests" }, async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-pi-doctor-"));
   const doctor = await doctorPi({ cwd: root, sessionDir: join(root, "sessions") });
   assert.equal(doctor.ok, true);
