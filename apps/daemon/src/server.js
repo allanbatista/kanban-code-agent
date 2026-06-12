@@ -8,8 +8,11 @@ const port = Number(process.env.KCA_DAEMON_PORT || 4174);
 const root = process.env.KCA_STORAGE_ROOT;
 const seedFixtures = process.env.KCA_SEED_FIXTURES === "1";
 const fsdbPollMs = Number(process.env.KCA_FSDB_POLL_MS || 1000);
+const schedulerPollMs = Number(process.env.KCA_SCHEDULER_POLL_MS ?? 1000);
 const clients = new Set();
 const sockets = new Set();
+let schedulerTickRunning = false;
+let readyPromise;
 
 function json(res, status, body) {
   res.writeHead(status, {
@@ -79,6 +82,15 @@ async function seedIfEmpty() {
   }
 }
 
+async function ensureReady() {
+  readyPromise ??= (async () => {
+    const storage = await initStorage(root);
+    await seedIfEmpty();
+    return storage;
+  })();
+  return readyPromise;
+}
+
 function stateFingerprint(state) {
   return JSON.stringify({
     columns: state.columns?.map((column) => ({ id: column.id, label: column.label, agent: column.agent, autoStart: column.autoStart, wip: column.wip, wipLimit: column.wipLimit, hooks: column.hooks })),
@@ -89,8 +101,7 @@ function stateFingerprint(state) {
 
 async function startFsdbPoller() {
   if (fsdbPollMs <= 0) return;
-  await initStorage(root);
-  await seedIfEmpty();
+  await ensureReady();
   let last = stateFingerprint(await handleQuery({ type: "board.snapshot" }, root));
   const timer = setInterval(async () => {
     try {
@@ -106,12 +117,38 @@ async function startFsdbPoller() {
   timer.unref?.();
 }
 
+async function runSchedulerTick(source = "loop") {
+  if (schedulerTickRunning) return null;
+  schedulerTickRunning = true;
+  try {
+    await ensureReady();
+    const state = await handleQuery({ type: "board.snapshot" }, root);
+    if (!state.tasks?.some((task) => task.status === "queued")) return null;
+    const result = await handleCommand({ type: "scheduler.tick", commandId: `scheduler-${source}-${Date.now()}` }, root);
+    broadcast({ type: "scheduler.tick", result });
+    return result;
+  } catch (error) {
+    broadcast({ type: "scheduler.error", ts: new Date().toISOString(), message: error.message });
+    return { ok: false, error: error.message };
+  } finally {
+    schedulerTickRunning = false;
+  }
+}
+
+async function startSchedulerLoop() {
+  if (schedulerPollMs <= 0) return;
+  await runSchedulerTick("startup");
+  const timer = setInterval(() => {
+    void runSchedulerTick("loop");
+  }, schedulerPollMs);
+  timer.unref?.();
+}
+
 const server = createServer(async (req, res) => {
   try {
-    const storage = await initStorage(root);
-    await seedIfEmpty();
+    const storage = await ensureReady();
     if (req.method === "OPTIONS") return json(res, 204, {});
-    if (req.url === "/health") return json(res, 200, { ok: true, storageRoot: storage.root, seededFixtures: seedFixtures });
+    if (req.url === "/health") return json(res, 200, { ok: true, storageRoot: storage.root, seededFixtures: seedFixtures, schedulerPollMs });
     if (req.url === "/api/state" && req.method === "GET") return json(res, 200, await handleQuery({ type: "board.snapshot" }, root));
     if (req.url === "/api/query" && req.method === "POST") return json(res, 200, await handleQuery(await body(req), root));
     if (req.url === "/api/events" && req.method === "GET") {
@@ -157,6 +194,7 @@ server.listen(port, "127.0.0.1", () => {
 });
 
 void startFsdbPoller();
+void startSchedulerLoop();
 
 const wss = new WebSocketServer({ server, path: "/api/rpc" });
 
@@ -166,8 +204,7 @@ wss.on("connection", async (socket) => {
   socket.on("close", () => sockets.delete(socket));
   socket.on("message", async (raw) => {
     try {
-      await initStorage(root);
-      await seedIfEmpty();
+      await ensureReady();
       const response = await executeRpcMessage(JSON.parse(raw.toString("utf8")));
       socket.send(JSON.stringify(response));
     } catch (error) {

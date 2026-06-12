@@ -121,6 +121,24 @@ test("task modal exposes tabs and runs the assigned agent", async ({ page, reque
   }).toBe("running");
 });
 
+test("daemon scheduler auto-starts queued runnable tasks", async ({ request }) => {
+  const task = await createTask(request, `Scheduled task ${Date.now()}`, {
+    column: "definition",
+    status: "queued",
+    routing: { currentAgent: "engineer", manualOverride: { active: false } }
+  });
+
+  await expect.poll(async () => {
+    const state = await request.get(`${daemonUrl}/api/state`);
+    return (await state.json()).tasks.find((item) => item.id === task.id)?.status;
+  }, { timeout: 7000 }).toBe("running");
+
+  await expect.poll(async () => {
+    const state = await request.get(`${daemonUrl}/api/state`);
+    return (await state.json()).events.some((event) => event.type === "scheduler.tick" && event.started?.includes(task.id));
+  }).toBe(true);
+});
+
 test("task assistant responds inside the task modal", async ({ page, request }) => {
   const task = await createTask(request, `Task chat ${Date.now()}`);
   await page.goto("/");

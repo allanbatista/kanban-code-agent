@@ -13,7 +13,7 @@ function runtimePath(rootInput, file = "") {
 
 async function writeAtomic(path, content) {
   await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const temp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   await writeFile(temp, content);
   await rename(temp, path);
 }
