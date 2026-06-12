@@ -8,7 +8,7 @@ import { Board } from "./components/Board";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TaskModal } from "./components/TaskModal";
 import { OrchestratorPanel } from "./components/OrchestratorPanel";
-import type { AgentSettings, ChatMessage, Task } from "./types";
+import type { AgentSettings, ChatMessage, Task, TaskFiles } from "./types";
 
 function now() {
   return new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" }).format(new Date());
@@ -41,6 +41,11 @@ function AppShell() {
   const taskChat = useQuery({
     queryKey: ["chat", "task", selectedTaskId],
     queryFn: () => queryDaemon<Array<Record<string, unknown>>>({ type: "chat.history", scope: "task", taskId: selectedTaskId }),
+    enabled: Boolean(selectedTaskId && selectedTaskId !== "new")
+  });
+  const taskFiles = useQuery({
+    queryKey: ["task-files", selectedTaskId],
+    queryFn: () => queryDaemon<TaskFiles>({ type: "task.files", taskId: selectedTaskId }),
     enabled: Boolean(selectedTaskId && selectedTaskId !== "new")
   });
   const tasks = state.data?.tasks || [];
@@ -210,6 +215,8 @@ function AppShell() {
         onSendAssistant={sendAssistant}
         messages={taskMessages}
         allTasks={tasks}
+        files={taskFiles.data}
+        onSaveFile={(taskId, path, content) => runCommand.mutateAsync({ type: "task.file.write", commandId: commandId("task-file-write"), taskId, path, content }).then(() => queryClient.invalidateQueries({ queryKey: ["task-files", taskId] }))}
         onAction={taskAction}
       />
       <SettingsDialog

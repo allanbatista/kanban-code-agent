@@ -3,6 +3,7 @@ import type { OrchestratorStatus } from "../types";
 
 export function OrchestratorPanel({ status, loading }: { status?: OrchestratorStatus; loading: boolean }) {
   const tokenData = Object.entries(status?.capacity.agentTokens || {}).map(([name, tokens]) => ({ name, tokens }));
+  const leases = status?.semaphores?.leases || [];
   return (
     <section aria-label="Orchestrator" className="side-panel ops-panel active">
       <header className="ops-head">
@@ -23,6 +24,13 @@ export function OrchestratorPanel({ status, loading }: { status?: OrchestratorSt
             <Bar dataKey="tokens" fill="var(--info)" radius={[4, 4, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
+      </div>
+      <div className="ops-grid">
+        <div className="metric"><strong>{leases.length}</strong><span>leases</span></div>
+        <div className="metric"><strong>{Object.keys(status?.semaphores?.tokens || {}).length}</strong><span>semaforos</span></div>
+      </div>
+      <div className="ops-list">
+        {leases.slice(0, 6).map((lease) => <span className="pill soft" key={`${lease.name}-${lease.taskId || lease.role}`}>{lease.name} · {lease.taskId || lease.role || "run"}</span>)}
       </div>
     </section>
   );

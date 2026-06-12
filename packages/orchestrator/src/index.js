@@ -5,8 +5,9 @@ import { promisify } from "node:util";
 import { interruptRun, startRun, writeRunSummary } from "@kca/agent-runtime";
 import { validateDag } from "@kca/core/dag";
 import { createWorktree, mergeSubtask } from "@kca/git-worktree";
-import { appendJsonl, boardSnapshot, createTask, getTask, listTasks, moveTask, paths, readAgent, readCommandResult, readHook, readProject, readSettings, readSettingsScope, recordCommandResult, updateSettings, updateTask, writeTaskFile, writeYaml } from "@kca/fsdb";
+import { appendJsonl, boardSnapshot, createTask, getTask, listTasks, moveTask, paths, readAgent, readCommandResult, readHook, readJsonl, readProject, readSettings, readSettingsScope, readYaml, recordCommandResult, updateSettings, updateTask, writeTaskFile, writeYaml } from "@kca/fsdb";
 import { appendChatMessage, readChatHistory } from "@kca/fsdb/chat-store";
+import { readSemaphoreState } from "@kca/fsdb/runtime-store";
 import { runBoardAssistant, loadPiSdk } from "@kca/pi-adapter";
 import { parseCommand, parseQuery, TaskSchema } from "@kca/schemas";
 import { findParentMergeBusy } from "./merge-coordinator.js";
@@ -111,6 +112,7 @@ export async function whyNotRunning(task, root) {
 async function orchestratorStatus(root) {
   const tasks = await listTasks(root);
   const settings = await readSettings(root);
+  const semaphores = await readSemaphoreState(root);
   const running = tasks.filter((task) => task.status === "running");
   const queued = tasks.filter((task) => task.status === "queued");
   const mergePending = tasks.filter((task) => task.status === "merge_pending");
@@ -128,7 +130,8 @@ async function orchestratorStatus(root) {
     running: running.map((task) => ({ id: task.id, agent: task.routing?.currentAgent || task.agent?.currentAgent || task.agent || "assistant" })),
     merges: mergePending.map((task) => task.id),
     worktrees: tasks.filter((task) => task.worktree?.enabled).map((task) => ({ taskId: task.id, branch: task.worktree?.branch, path: task.worktree?.path })),
-    blockers: blocked.map((task) => ({ taskId: task.id, title: task.title, blockedBy: task.dependencies?.blockedBy || [] }))
+    blockers: blocked.map((task) => ({ taskId: task.id, title: task.title, blockedBy: task.dependencies?.blockedBy || [] })),
+    semaphores
   };
 }
 
@@ -176,6 +179,14 @@ export async function handleCommand(input, root) {
   if (command.type === "task.update") {
     const task = TaskSchema.parse(await updateTask(command.taskId, command.patch, root));
     result = { ok: true, commandId: command.commandId, task };
+  }
+
+  if (command.type === "task.file.write") {
+    const current = await getTask(command.taskId, root);
+    if (!current) throw new Error(`Task not found: ${command.taskId}`);
+    const filePath = await writeTaskFile(command.taskId, command.path, command.content, root);
+    await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "task.file.updated", actor: "user", taskId: command.taskId, path: filePath });
+    result = { ok: true, commandId: command.commandId, task: TaskSchema.parse(current), path: filePath };
   }
 
   if (command.type === "task.move") {
@@ -557,6 +568,19 @@ export async function handleQuery(input, root) {
   if (query.type === "orchestrator.status") return orchestratorStatus(root);
   if (query.type === "settings.scope") return readSettingsScope(query.scope, root);
   if (query.type === "chat.history") return readChatHistory(root, query);
+  if (query.type === "task.files") {
+    const p = paths(root);
+    const taskDir = join(p.tasks, query.taskId);
+    return {
+      taskId: query.taskId,
+      acceptance: await readFile(join(taskDir, "acceptance.md"), "utf8").catch(() => ""),
+      description: await readFile(join(taskDir, "description.md"), "utf8").catch(() => ""),
+      planning: await readYaml(join(taskDir, "planning.yaml"), null),
+      subtasks: await readYaml(join(taskDir, "subtasks.yaml"), null),
+      events: await readJsonl(join(taskDir, "events.jsonl")),
+      files: ["task.yaml", "description.md", "acceptance.md", "planning.yaml", "dependencies.yaml", "subtasks.yaml", "events.jsonl"]
+    };
+  }
   if (query.type === "task.detail") {
     const task = await getTask(query.taskId, root);
     if (!task) throw new Error(`Task not found: ${query.taskId}`);

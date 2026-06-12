@@ -96,12 +96,15 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                             <span className="pill soft">{task.kind}</span>
                             <span className="pill soft">{task.priority}</span>
                             {task.routing?.currentAgent ? <span className="pill soft">{task.routing.currentAgent}</span> : null}
+                            {task.routing?.lastAgent ? <span className="pill soft">prev {task.routing.lastAgent}</span> : null}
+                            {task.routing?.nextSuggestedColumn ? <span className="pill soft">next {task.routing.nextSuggestedColumn}</span> : null}
                             {(task.projectTargets || []).map((project) => <span className="pill" key={project}>{project}</span>)}
                           </div>
                           <div className="progress" aria-label={`Progresso ${progress}%`}><span style={{ width: `${progress}%` }} /></div>
                           <div className="task-footer">
                             <span className="mini-meta"><GitBranch size={13} />{task.worktree?.branch || "sem branch"}</span>
-                            <span className="mini-meta">owner: {task.routing?.currentAgent || "user"}</span>
+                            <span className="mini-meta">role: {task.routing?.currentAgent || "user"}</span>
+                            <span className="mini-meta">parallel: {["queued", "running"].includes(task.status) ? "ativo" : "idle"}</span>
                           </div>
                         </button>
                         <div className="task-actions">

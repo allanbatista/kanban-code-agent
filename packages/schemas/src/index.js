@@ -295,6 +295,12 @@ export const CommandSchema = z.discriminatedUnion("type", [
     patch: z.record(z.string(), z.any())
   }),
   commandBase.extend({
+    type: z.literal("task.file.write"),
+    taskId: z.string().min(1),
+    path: z.enum(["acceptance.md", "description.md"]),
+    content: z.string().default("")
+  }),
+  commandBase.extend({
     type: z.literal("task.move"),
     taskId: z.string().min(1),
     toColumn: z.string().min(1),
@@ -377,6 +383,7 @@ export const QuerySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("board.snapshot") }),
   z.object({ type: z.literal("orchestrator.status") }),
   z.object({ type: z.literal("task.detail"), taskId: z.string().min(1) }),
+  z.object({ type: z.literal("task.files"), taskId: z.string().min(1) }),
   z.object({ type: z.literal("settings.scope"), scope: z.string().default("app") }),
   z.object({ type: z.literal("chat.history"), scope: z.enum(["board", "task"]).default("board"), taskId: z.string().optional(), limit: z.number().int().positive().max(500).default(100) }),
   z.object({ type: z.literal("why_not_running"), taskId: z.string().min(1) })

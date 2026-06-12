@@ -1,6 +1,7 @@
 export const COMMAND_TYPES = [
   "task.create",
   "task.update",
+  "task.file.write",
   "task.move",
   "task.run",
   "task.interrupt",
@@ -18,6 +19,7 @@ export const COMMAND_TYPES = [
 export const QUERY_TYPES = [
   "board.snapshot",
   "task.detail",
+  "task.files",
   "orchestrator.status",
   "settings.scope",
   "chat.history",

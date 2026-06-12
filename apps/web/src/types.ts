@@ -16,13 +16,23 @@ export type Task = {
   status: string;
   priority: string;
   projectTargets: string[];
-  routing?: { currentAgent?: string | null; manualOverride?: { active?: boolean } };
+  routing?: { currentAgent?: string | null; lastAgent?: string | null; nextSuggestedColumn?: string | null; manualOverride?: { active?: boolean } };
   worktree?: { branch?: string; path?: string; parentTaskId?: string | null; mergeTarget?: string };
   dependencies?: { needs?: string[]; provides?: string[]; blockedBy?: string[]; fileLocks?: string[]; semaphores?: unknown[] };
   hooks?: { active?: string[] };
   skills?: { active?: string[] };
   agent?: { currentRunId?: string; currentSessionRef?: string; lastSummary?: string } | string;
   updatedAt?: string;
+};
+
+export type TaskFiles = {
+  taskId: string;
+  acceptance: string;
+  description: string;
+  planning?: { status?: string; roles?: { required?: string[]; optional?: string[] } } | null;
+  subtasks?: { nodes?: Array<{ id: string; title?: string; status?: string }> } | null;
+  events: Array<Record<string, unknown>>;
+  files: string[];
 };
 
 export type AppSettings = {
@@ -67,6 +77,7 @@ export type OrchestratorStatus = {
   merges: string[];
   worktrees: Array<{ taskId: string; branch?: string; path?: string }>;
   blockers: Array<{ taskId: string; title: string; blockedBy: string[] }>;
+  semaphores?: { tokens?: Record<string, number>; leases?: Array<{ name: string; taskId?: string; role?: string; expiresAt?: string }> };
 };
 
 export type ChatMessage = {

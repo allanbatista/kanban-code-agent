@@ -125,6 +125,13 @@ test("task modal exposes tabs and runs the assigned agent", async ({ page, reque
   await page.getByRole("button", { name: "Decompor" }).click();
   await page.getByRole("tab", { name: "subtasks" }).click();
   await expect(page.getByRole("dialog").getByText(new RegExp(`${task.id}-01 \\[`))).toBeVisible();
+  await page.getByRole("tab", { name: "aceite" }).click();
+  await page.getByLabel("Critérios de aceite").fill("# Critérios de aceite\n\n- [ ] Aceite editado no E2E.\n");
+  await page.getByRole("button", { name: "Salvar aceite" }).click();
+  await expect.poll(async () => {
+    const response = await request.post(`${daemonUrl}/api/query`, { data: { type: "task.files", taskId: task.id } });
+    return (await response.json()).acceptance;
+  }).toContain("Aceite editado no E2E");
 });
 
 test("daemon scheduler auto-starts queued runnable tasks", async ({ request }) => {
@@ -159,6 +166,8 @@ test("task assistant responds inside the task modal", async ({ page, request }) 
   await page.reload();
   await expect(page.getByRole("dialog").getByText("por que não iniciou?")).toBeVisible();
   await expect(page.getByRole("dialog").getByText(/Tokens do agent assistant|está pronta para executar/)).toBeVisible();
+  const history = await request.post(`${daemonUrl}/api/query`, { data: { type: "chat.history", scope: "task", taskId: task.id } });
+  expect((await history.json()).length).toBeGreaterThanOrEqual(2);
 });
 
 test("settings modal persists scoped settings through the daemon", async ({ page, request }) => {
@@ -198,4 +207,5 @@ test("orchestrator panel exposes runtime capacity and worktree metrics", async (
   await expect(page.getByRole("region", { name: "Orchestrator" })).toBeVisible();
   await expect(page.getByText("worktrees ativos")).toBeVisible();
   await expect(page.getByText("bloqueios")).toBeVisible();
+  await expect(page.getByText("semaforos")).toBeVisible();
 });

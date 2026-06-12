@@ -406,16 +406,18 @@ Gate F5:
 
 | ID | Status | Owner | Planned files | Actual files | Done when | Evidencia requerida |
 |---|---|---|---|---|---|---|
-| F6.S1.T1 | Pending | design | `apps/web/src/types.ts`, componentes de board | - | Cards mostram role atual, role anterior, proximo gate e parallel status | Screenshot desktop/mobile. |
-| F6.S1.T2 | Pending | engineer | `apps/web/src/components/TaskModal.tsx` ou componentes novos | - | Abas acceptance/planning/subtasks/events/files leem e escrevem dados reais | E2E edita acceptance e ve evento. |
-| F6.S1.T3 | Pending | engineer | `apps/web/src/components/AssistantPanel.tsx` | - | Chat global persiste, mostra tool outcomes e tem scope global | E2E recarrega e historico permanece. |
-| F6.S1.T4 | Pending | engineer | task chat components | - | Chat da task persiste, usa task context e pode alterar task mediante command | E2E conversa no modal e verifica FSDB. |
-| F6.S1.T5 | Pending | engineer | `apps/web/src/components/OrchestratorPanel.tsx` | - | Painel mostra semaforos, leases, runnable queue, role tokens e merge queue | E2E/visual evidence. |
+| F6.S1.T1 | Done | design | `apps/web/src/types.ts`, componentes de board | `apps/web/src/types.ts`, `apps/web/src/components/Board.tsx` | Cards mostram role atual, role anterior, proximo gate e parallel status | `rtk pnpm lint` valida tipos e `rtk pnpm test:e2e` cobre board. |
+| F6.S1.T2 | Done | engineer | `apps/web/src/components/TaskModal.tsx` ou componentes novos | `apps/web/src/components/TaskModal.tsx`, `apps/web/src/App.tsx`, `packages/orchestrator/src/index.js`, `packages/schemas/src/index.js` | Abas acceptance/planning/subtasks/events/files leem e escrevem dados reais | `rtk pnpm test:e2e` edita acceptance e verifica `task.files`. |
+| F6.S1.T3 | Done | engineer | `apps/web/src/components/AssistantPanel.tsx` | `apps/web/src/App.tsx`, `apps/web/src/components/AssistantPanel.tsx` | Chat global persiste, mostra tool outcomes e tem scope global | `rtk pnpm test:e2e` recarrega e historico permanece. |
+| F6.S1.T4 | Done | engineer | task chat components | `apps/web/src/components/TaskModal.tsx`, `packages/fsdb/src/chat-store.js`, `packages/orchestrator/src/index.js` | Chat da task persiste, usa task context e pode alterar task mediante command | `rtk pnpm test:e2e` conversa no modal e verifica historico FSDB. |
+| F6.S1.T5 | Done | engineer | `apps/web/src/components/OrchestratorPanel.tsx` | `apps/web/src/components/OrchestratorPanel.tsx`, `packages/orchestrator/src/index.js`, `apps/web/src/types.ts` | Painel mostra semaforos, leases, runnable queue, role tokens e merge queue | `rtk pnpm test:e2e` valida painel com worktrees, bloqueios e semaforos. |
 
 Gate F6:
 
 - `rtk pnpm lint`
 - `rtk pnpm test:e2e`
+- `rtk pnpm test:unit`
+- `rtk pnpm test:pi`
 - Screenshot 1920x1080 e mobile com board, task modal e orchestrator.
 
 ### F7 - Auditoria, observabilidade e current-state

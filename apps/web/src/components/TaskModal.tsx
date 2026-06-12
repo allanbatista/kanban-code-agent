@@ -5,7 +5,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { CheckCircle, GitBranch, Pause, Play, Send, Split, X } from "lucide-react";
 import { z } from "zod";
-import type { ChatMessage, Task } from "../types";
+import type { ChatMessage, Task, TaskFiles } from "../types";
 
 const formSchema = z.object({
   title: z.string().min(1),
@@ -25,11 +25,14 @@ type Props = {
   onSendAssistant: (prompt: string, taskId?: string) => Promise<string> | string;
   messages: ChatMessage[];
   allTasks: Task[];
+  files?: TaskFiles;
+  onSaveFile: (taskId: string, path: "acceptance.md" | "description.md", content: string) => Promise<void> | void;
   onAction: (task: Task, action: "run" | "interrupt" | "complete" | "decompose") => Promise<void> | void;
 };
 
-export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messages, allTasks, onAction }: Props) {
+export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messages, allTasks, files, onSaveFile, onAction }: Props) {
   const [chat, setChat] = useState("");
+  const [acceptance, setAcceptance] = useState("");
   const subtasks = task ? allTasks.filter((item) => item.worktree?.parentTaskId === task.id) : [];
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -44,7 +47,8 @@ export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messag
       kind: task?.kind || "task",
       projectTargets: task?.projectTargets?.join(", ") || ""
     });
-  }, [task, form, open]);
+    setAcceptance(files?.acceptance || "");
+  }, [task, form, open, files?.acceptance]);
 
   async function submit(values: FormValues) {
     await onSave({
@@ -96,7 +100,10 @@ export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messag
                     </div>
                     <label className="field">Projetos alvo<input className="input" placeholder="repo-a, repo-b" {...form.register("projectTargets")} /></label>
                   </Tabs.Content>
-                  <Tabs.Content value="aceite"><Panel title="Critérios de aceite" lines={["Definir aceite objetivo na descrição da task.", "Validar via testes e evidência antes de completar."]} /></Tabs.Content>
+                  <Tabs.Content value="aceite" className="space-y-3">
+                    <label className="field">Critérios de aceite<textarea className="textarea" aria-label="Critérios de aceite" value={acceptance} onChange={(event) => setAcceptance(event.target.value)} /></label>
+                    {task ? <button type="button" className="button-secondary" onClick={() => onSaveFile(task.id, "acceptance.md", acceptance)}>Salvar aceite</button> : null}
+                  </Tabs.Content>
                   <Tabs.Content value="execucao">
                     <Panel title="Runtime" lines={[`status: ${task?.status || "nova"}`, `agent: ${task?.routing?.currentAgent || "assistant"}`, `run: ${typeof task?.agent === "object" ? task.agent?.currentRunId || "nenhum" : "nenhum"}`]} />
                     {task ? <div className="mt-4 flex flex-wrap gap-2">
@@ -112,8 +119,8 @@ export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messag
                     <Panel title="Subtasks paralelas" lines={subtasks.length ? subtasks.map((item) => `${item.id} [${item.status}] ${item.title}`) : ["Use decompor para criar subtasks com needs/provides e agents sugeridos."]} />
                   </Tabs.Content>
                   <Tabs.Content value="hooks"><Panel title="Hooks da task" lines={task?.hooks?.active?.length ? task.hooks.active : ["nenhum hook ativo"]} /></Tabs.Content>
-                  <Tabs.Content value="eventos"><Panel title="Timeline" lines={[`updated: ${task?.updatedAt || "nao persistida"}`]} /></Tabs.Content>
-                  <Tabs.Content value="arquivos"><Panel title="Arquivos da task" lines={["task.yaml", "description.md", "acceptance.md", "dependencies.yaml", "events.jsonl"]} /></Tabs.Content>
+                  <Tabs.Content value="eventos"><Panel title="Timeline" lines={(files?.events?.length ? files.events.slice(-8).map((event) => `${event.type || "event"} · ${event.ts || ""}`) : [`updated: ${task?.updatedAt || "nao persistida"}`])} /></Tabs.Content>
+                  <Tabs.Content value="arquivos"><Panel title="Arquivos da task" lines={files?.files || ["task.yaml", "description.md", "acceptance.md", "dependencies.yaml", "events.jsonl"]} /></Tabs.Content>
                 </div>
               </Tabs.Root>
               <div className="flex justify-end gap-2 border-t border-zinc-800 p-4">
