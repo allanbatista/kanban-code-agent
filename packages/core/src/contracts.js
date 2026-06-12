@@ -24,6 +24,8 @@ export const QUERY_TYPES = [
 export const EVENT_TYPES = [
   "task.created",
   "task.updated",
+  "planning.created",
+  "planning.updated",
   "task.move_requested",
   "task.moved",
   "task.blocked",
@@ -45,12 +47,15 @@ export const EVENT_TYPES = [
   "worktree.updated",
   "worktree.removed",
   "subtasks.spawned",
+  "scheduler.tick",
   "subtask.merged",
   "merge.requested",
   "merge.completed",
   "merge.conflict",
   "settings.updated"
 ];
+
+export const ROLE_IDS = ["manager", "product", "design", "engineering", "quality", "review", "deployment"];
 
 export function commandEnvelope(type, payload = {}) {
   return { type, commandId: payload.commandId || `cmd-${Date.now()}`, ...payload };

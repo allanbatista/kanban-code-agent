@@ -138,6 +138,9 @@ importers:
 
   packages/fsdb:
     dependencies:
+      '@kca/core':
+        specifier: workspace:*
+        version: link:../core
       yaml:
         specifier: ^2.8.1
         version: 2.9.0

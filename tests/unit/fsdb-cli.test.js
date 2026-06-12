@@ -30,7 +30,8 @@ test("kca project add and task create persist YAML, Markdown and JSONL", async (
   assert.equal(task.projectTargets[0], "kanban-code-agent");
   assert.match(await readFile(join(root, "tasks", task.id, "task.yaml"), "utf8"), /schema: kanban-code-agent\/task@1/);
   assert.match(await readFile(join(root, "tasks", task.id, "description.md"), "utf8"), /Persistir formatos abertos/);
-  assert.match(await readFile(join(root, "tasks", task.id, "subtasks.yaml"), "utf8"), /schema: kanban-code-agent\/subtasks@1/);
+  assert.match(await readFile(join(root, "tasks", task.id, "planning.yaml"), "utf8"), /schema: kanban-code-agent\/planning@1/);
+  assert.match(await readFile(join(root, "tasks", task.id, "subtasks.yaml"), "utf8"), /schema: kanban-code-agent\/subtasks@2/);
   assert.match(await readFile(join(root, "tasks", task.id, "comments.jsonl"), "utf8"), /comment.system/);
   assert.match(await readFile(join(root, "tasks", task.id, "events.jsonl"), "utf8"), /task.created/);
 });

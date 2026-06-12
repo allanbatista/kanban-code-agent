@@ -8,12 +8,16 @@ import assert from "node:assert/strict";
 import YAML from "yaml";
 import {
   AgentSettingsSchema,
+  AgentRunSchema,
   AppSettingsSchema,
   BoardSettingsSchema,
   DependenciesSchema,
   EventSchema,
   HookSettingsSchema,
+  PlanningSchema,
   ProjectSettingsSchema,
+  RoleSettingsSchema,
+  SemaphoreStateSchema,
   SkillSettingsSchema,
   SubtasksSchema,
   TaskSchema,
@@ -38,14 +42,18 @@ test("schemas parse generated FSDB settings, task files and events", async () =>
   assert.equal(BoardSettingsSchema.parse(await readYamlFile(join(root, "settings", "boards", "default.yaml"))).columns.length, 6);
   assert.equal(ProjectSettingsSchema.parse(await readYamlFile(join(root, "settings", "projects", "kanban-code-agent.yaml"))).id, "kanban-code-agent");
   assert.equal(AgentSettingsSchema.parse(await readYamlFile(join(root, "settings", "agents", "engineer.yaml"))).provider, "pi");
+  assert.equal(RoleSettingsSchema.parse(await readYamlFile(join(root, "settings", "roles", "engineering.yaml"))).id, "engineering");
   assert.equal(HookSettingsSchema.parse(await readYamlFile(join(root, "settings", "hooks", "summarize-blocker.yaml"))).id, "summarize-blocker");
   assert.equal(SkillSettingsSchema.parse(await readYamlFile(join(root, "settings", "skills", "implementation.yaml"))).id, "implementation");
+  assert.equal(SemaphoreStateSchema.parse(await readYamlFile(join(root, "settings", "runtime", "semaphores.yaml"))).tokens["global:tasks"], 4);
   assert.match(await readFile(join(root, "settings", "skills", "implementation", "SKILL.md"), "utf8"), /Implementation Skill/);
 
   assert.equal(TaskSchema.parse(await readYamlFile(join(root, "tasks", task.id, "task.yaml"))).id, task.id);
+  assert.equal(PlanningSchema.parse(await readYamlFile(join(root, "tasks", task.id, "planning.yaml"))).roles.required.includes("deployment"), true);
   assert.equal(DependenciesSchema.parse(await readYamlFile(join(root, "tasks", task.id, "dependencies.yaml"))).needs.length, 0);
   assert.equal(WorktreeSchema.parse(await readYamlFile(join(root, "tasks", task.id, "worktree.yaml"))).branch, task.worktree.branch);
   assert.equal(SubtasksSchema.parse(await readYamlFile(join(root, "tasks", task.id, "subtasks.yaml"))).taskId, task.id);
+  assert.equal(AgentRunSchema.parse({ schema: "kanban-code-agent/agent-run@1", runId: "run-1", taskId: task.id, agentId: "engineering", role: "engineering", allowedTools: ["complete_task"] }).role, "engineering");
 
   const events = (await readFile(join(root, "tasks", task.id, "events.jsonl"), "utf8")).trim().split("\n").map((line) => EventSchema.parse(JSON.parse(line)));
   assert.equal(events[0].type, "task.created");

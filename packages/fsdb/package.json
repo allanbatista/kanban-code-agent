@@ -7,6 +7,7 @@
     ".": "./src/index.js"
   },
   "dependencies": {
+    "@kca/core": "workspace:*",
     "yaml": "^2.8.1"
   }
 }

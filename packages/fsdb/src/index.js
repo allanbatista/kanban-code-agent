@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { access, appendFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { DEFAULT_ROLES } from "@kca/core/roles";
 import YAML from "yaml";
 
 export const DEFAULT_COLUMNS = ["inbox", "definition", "build", "validate", "blocked", "done"];
@@ -121,6 +122,7 @@ export async function initStorage(rootInput) {
     join(p.settings, "boards"),
     join(p.settings, "projects"),
     join(p.settings, "agents"),
+    join(p.settings, "roles"),
     join(p.settings, "prompts"),
     join(p.settings, "hooks"),
     join(p.settings, "skills"),
@@ -145,7 +147,7 @@ export async function initStorage(rootInput) {
       maxParallelMerges: 1,
       agentSessionRetentionDays: 30,
       resumeSessions: true,
-      agentTokens: { assistant: 1, architect: 1, engineer: 2, validator: 1, reviewer: 1 },
+      agentTokens: { assistant: 1, architect: 1, engineer: 2, validator: 1, reviewer: 1, manager: 1, product: 1, design: 1, engineering: 2, quality: 1, deployment: 1 },
       projectTokens: { "kanban-code-agent": 2 }
     },
     manualMove: { confirmWhenRunning: true, defaultInterruptPolicy: "ask" },
@@ -242,6 +244,26 @@ export async function initStorage(rootInput) {
     });
     await ensureFile(join(p.settings, "prompts", `${agent.id}.md`), agent.prompt);
   }
+  for (const role of DEFAULT_ROLES) {
+    await ensureYaml(join(p.settings, "roles", `${role.id}.yaml`), {
+      schema: "kanban-code-agent/role@1",
+      ...role
+    });
+    await ensureFile(join(p.settings, "prompts", `${role.id}.md`), `# ${role.label}\n\n${role.gate}\n`);
+  }
+  await ensureYaml(join(p.runtime, "semaphores.yaml"), {
+    schema: "kanban-code-agent/semaphores@1",
+    tokens: {
+      "global:tasks": 4,
+      "project:kanban-code-agent:tasks": 2,
+      "project:kanban-code-agent:merge": 1,
+      "agent:engineering": 2,
+      "agent:quality": 1,
+      "agent:review": 1,
+      "agent:deployment": 1
+    },
+    leases: []
+  });
   await ensureYaml(join(p.settings, "skills", "implementation.yaml"), {
     schema: "kanban-code-agent/skill@1",
     id: "implementation",
@@ -319,8 +341,23 @@ export async function createTask(input, rootInput) {
   await writeYaml(join(taskDir, "task.yaml"), task);
   await writeAtomic(join(taskDir, "description.md"), `# ${task.title}\n\n${input.description || ""}\n`);
   await writeAtomic(join(taskDir, "acceptance.md"), "# Critérios de aceite\n\n- [ ] Critério verificável de pronto.\n");
+  await writeYaml(join(taskDir, "planning.yaml"), {
+    schema: "kanban-code-agent/planning@1",
+    taskId: id,
+    status: "draft",
+    createdByRole: "product",
+    roles: {
+      required: ["product", "design", "engineering", "quality", "review", "deployment"],
+      optional: ["manager"]
+    },
+    artifacts: {
+      acceptance: "acceptance.md",
+      design: "artifacts/design.md",
+      technicalPlan: "plan.md"
+    }
+  });
   await writeYaml(join(taskDir, "dependencies.yaml"), { schema: "kanban-code-agent/dependencies@1", ...task.dependencies });
-  await writeYaml(join(taskDir, "subtasks.yaml"), { schema: "kanban-code-agent/subtasks@1", taskId: id, parentTaskId: id, strategy: "dag", mergePolicy: "sequential-into-parent-feature", subtasks: [] });
+  await writeYaml(join(taskDir, "subtasks.yaml"), { schema: "kanban-code-agent/subtasks@2", taskId: id, parentTaskId: id, strategy: "dag", mergePolicy: "sequential-into-parent-feature", nodes: [], subtasks: [], edges: [] });
   await writeYaml(join(taskDir, "worktree.yaml"), { schema: "kanban-code-agent/worktree@1", taskId: id, branch: task.worktree.branch });
   await appendJsonl(join(taskDir, "comments.jsonl"), { ts: now, type: "comment.system", actor: "system", taskId: id, body: "Task criada." });
   await appendJsonl(join(taskDir, "events.jsonl"), { ts: now, type: "task.created", actor: "user", taskId: id, task });
@@ -423,7 +460,9 @@ export async function readSettingsScope(scope = "app", rootInput) {
     const agents = await listYamlValues(join(p.settings, "agents"));
     return { scope: normalized, agents: await Promise.all(agents.map((agent) => readAgentWithPrompt(p.settings, agent))) };
   }
+  if (normalized === "roles") return { scope: normalized, roles: await listYamlValues(join(p.settings, "roles")) };
   if (normalized === "skills") return { scope: normalized, skills: await listYamlValues(join(p.settings, "skills")) };
+  if (normalized === "semaphores") return readYaml(join(p.runtime, "semaphores.yaml"), { schema: "kanban-code-agent/semaphores@1", tokens: {}, leases: [] });
   if (normalized === "projects" || normalized === "repositories") return { scope: normalized, projects: await listYamlValues(join(p.settings, "projects")) };
   if (normalized === "worktrees") {
     return { scope: normalized, runtimeRoot: app.runtimeRoot, projects: (await listYamlValues(join(p.settings, "projects"))).map((project) => ({ id: project.id, worktrees: project.worktrees || {}, repoPath: project.repoPath })) };

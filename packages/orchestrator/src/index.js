@@ -459,24 +459,32 @@ export async function handleCommand(input, root) {
       }, root)));
     }
     await appendJsonl(`${paths(root).tasks}/${parent.id}/events.jsonl`, { ts: new Date().toISOString(), type: "subtasks.spawned", actor: "orchestrator", taskId: parent.id, subtasks: created.map((task) => task.id) });
+    const nodes = created.map((task) => ({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      column: task.column,
+      role: task.routing?.currentAgent || task.agent || null,
+      agent: task.routing?.currentAgent || task.agent || null,
+      needs: task.dependencies?.needs || [],
+      provides: task.dependencies?.provides || [],
+      fileLocks: task.dependencies?.fileLocks || [],
+      semaphores: task.dependencies?.semaphores || [],
+      branch: task.worktree?.branch,
+      mergeTarget: task.worktree?.mergeTarget
+    }));
     await writeYaml(`${paths(root).tasks}/${parent.id}/subtasks.yaml`, {
-      schema: "kanban-code-agent/subtasks@1",
+      schema: "kanban-code-agent/subtasks@2",
       taskId: parent.id,
       parentTaskId: parent.id,
       strategy: "dag",
       mergePolicy: "sequential-into-parent-feature",
-      subtasks: created.map((task) => ({
-        id: task.id,
-        title: task.title,
-        status: task.status,
-        column: task.column,
-        agent: task.routing?.currentAgent || task.agent || null,
-        needs: task.dependencies?.needs || [],
-        provides: task.dependencies?.provides || [],
-        fileLocks: task.dependencies?.fileLocks || [],
-        branch: task.worktree?.branch,
-        mergeTarget: task.worktree?.mergeTarget
-      }))
+      nodes,
+      subtasks: nodes,
+      edges: nodes.flatMap((node) => node.needs.map((contract) => {
+        const provider = nodes.find((candidate) => candidate.provides.includes(contract));
+        return provider ? { from: provider.id, to: node.id, contract } : null;
+      }).filter(Boolean))
     });
     result = { ok: true, commandId: command.commandId, task: parent, subtasks: created };
   }

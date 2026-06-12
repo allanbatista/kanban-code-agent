@@ -320,10 +320,10 @@ Gate F0:
 
 | ID | Status | Owner | Planned files | Actual files | Done when | Evidencia requerida |
 |---|---|---|---|---|---|---|
-| F1.S1.T1 | Pending | architect | `packages/core/src/roles.js`, `packages/core/src/contracts.js` | - | Role registry canonico contem manager/product/design/engineering/quality/review/deployment | Unit test lista roles e toolsets. |
-| F1.S1.T2 | Pending | architect | `packages/schemas/src/index.js` | - | Schemas `RoleSettings`, `Planning`, `Subtasks@2`, `SemaphoreState`, `AgentRun` existem | Schema tests com fixtures validos/invalidos. |
-| F1.S1.T3 | Pending | engineer | `packages/fsdb/src/index.js` ou novos repositorios | - | FSDB cria `settings/roles`, `planning.yaml`, `semaphores.yaml` sem quebrar tasks v1 | CLI/FSDB tests provam migracao/backcompat. |
-| F1.S1.T4 | Pending | engineer | `packages/test-fixtures/src/index.js` | - | Fixtures representam board de equipe completa | Unit tests usam fixtures v2. |
+| F1.S1.T1 | Done | architect | `packages/core/src/roles.js`, `packages/core/src/contracts.js` | `packages/core/src/roles.js`, `packages/core/src/contracts.js`, `packages/core/package.json` | Role registry canonico contem manager/product/design/engineering/quality/review/deployment | `rtk pnpm test:unit` lista roles e toolsets em fixtures/contracts. |
+| F1.S1.T2 | Done | architect | `packages/schemas/src/index.js` | `packages/schemas/src/index.js`, `tests/unit/schemas.test.js` | Schemas `RoleSettings`, `Planning`, `Subtasks@2`, `SemaphoreState`, `AgentRun` existem | `rtk pnpm test:unit` valida schemas gerados pelo FSDB. |
+| F1.S1.T3 | Done | engineer | `packages/fsdb/src/index.js` ou novos repositorios | `packages/fsdb/src/index.js`, `packages/fsdb/package.json`, `pnpm-lock.yaml`, `tests/unit/fsdb-cli.test.js` | FSDB cria `settings/roles`, `planning.yaml`, `semaphores.yaml` sem quebrar tasks v1 | `rtk pnpm test:unit` prova init/task create/decompose/recover. |
+| F1.S1.T4 | Done | engineer | `packages/test-fixtures/src/index.js` | `packages/test-fixtures/src/index.js`, `tests/unit/contracts-fixtures.test.js` | Fixtures representam board de equipe completa | `rtk pnpm test:unit` usa fixtures v2 de roles, planning e DAG. |
 
 Gate F1:
 
@@ -493,4 +493,5 @@ Este criterio e subordinado as clausulas C1-C15 e ao cenario E2E obrigatorio. Se
 | `rtk pnpm lint` | Passou | Typecheck web e `node --check` dos pacotes atuais. |
 | `rtk pnpm test:unit` | Passou, 28/28, 2 skips Pi real | Unit agora roda com `KCA_PI_ADAPTER=fake`; testes de assistant ficaram estritos e rapidos. |
 | `rtk pnpm test:pi` | Passou, 4/4 | Smoke opt-in valida SDK Pi real e doctor sem rodar em unit padrao. |
+| F1 validation | Passou | `rtk pnpm lint`, `rtk pnpm test:unit`, `rtk pnpm test:pi` apos roles/schemas/FSDB defaults. |
 | Inspecao de worktree | Passou | `plan-v2.md` criado; `.memory/TODO.md` atualizado com pendencia v2. |

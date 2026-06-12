@@ -39,6 +39,67 @@ export const SemaphoreSchema = z.union([
   z.object({ name: z.string().min(1), tokens: z.number().int().positive().default(1) }).passthrough()
 ]);
 
+export const RoleSettingsSchema = z.object({
+  schema: z.literal("kanban-code-agent/role@1"),
+  id: z.enum(["manager", "product", "design", "engineering", "quality", "review", "deployment"]),
+  label: z.string().min(1),
+  agentId: z.string().min(1),
+  columnIds: z.array(z.string().min(1)).default([]),
+  tools: z.object({
+    builtin: z.array(z.string()).default([]).optional(),
+    custom: z.array(z.string()).default([])
+  }).passthrough(),
+  limits: z.object({ tokens: z.number().int().nonnegative().default(1) }).passthrough(),
+  policies: z.object({
+    canCreateSubtasks: z.boolean().default(false),
+    requiresWorktree: z.boolean().default(false),
+    autoStart: z.boolean().default(false)
+  }).passthrough(),
+  gate: z.string().min(1).optional()
+}).passthrough();
+
+export const PlanningSchema = z.object({
+  schema: z.literal("kanban-code-agent/planning@1"),
+  taskId: z.string().min(1),
+  status: z.enum(["draft", "proposed", "approved", "superseded"]).default("draft"),
+  createdByRole: z.string().min(1),
+  roles: z.object({
+    required: z.array(z.string().min(1)).default([]),
+    optional: z.array(z.string().min(1)).default([])
+  }).passthrough(),
+  artifacts: z.object({
+    acceptance: z.string().min(1).default("acceptance.md"),
+    design: z.string().min(1).optional(),
+    technicalPlan: z.string().min(1).optional()
+  }).passthrough()
+}).passthrough();
+
+export const SemaphoreStateSchema = z.object({
+  schema: z.literal("kanban-code-agent/semaphores@1"),
+  tokens: z.record(z.string(), z.number().int().nonnegative()).default({}),
+  leases: z.array(z.object({
+    name: z.string().min(1),
+    leaseId: z.string().min(1),
+    runId: z.string().min(1).optional(),
+    taskId: z.string().min(1).optional(),
+    role: z.string().min(1).optional(),
+    acquiredAt: z.string().min(1),
+    expiresAt: z.string().min(1).optional()
+  }).passthrough()).default([])
+}).passthrough();
+
+export const AgentRunSchema = z.object({
+  schema: z.literal("kanban-code-agent/agent-run@1"),
+  runId: z.string().min(1),
+  taskId: z.string().min(1),
+  agentId: z.string().min(1),
+  role: z.string().min(1).optional(),
+  scope: z.enum(["global", "task", "hook"]).default("task"),
+  status: z.enum(["queued", "running", "completed", "failed", "canceled"]).default("queued"),
+  sessionRef: z.string().optional(),
+  allowedTools: z.array(z.string()).default([])
+}).passthrough();
+
 export const DependenciesSchema = z.object({
   schema: z.literal("kanban-code-agent/dependencies@1").optional(),
   needs: z.array(z.string()).default([]),
@@ -60,22 +121,44 @@ export const WorktreeSchema = z.object({
   mergeTarget: z.string().optional()
 }).passthrough();
 
-export const SubtasksSchema = z.object({
+const SubtaskNodeSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().optional(),
+  status: z.string().optional(),
+  column: z.string().optional(),
+  role: z.string().optional(),
+  agent: z.string().nullable().optional(),
+  needs: z.array(z.string()).default([]),
+  provides: z.array(z.string()).default([]),
+  fileLocks: z.array(z.string()).default([]),
+  semaphores: z.array(SemaphoreSchema).default([])
+}).passthrough();
+
+export const SubtasksV1Schema = z.object({
   schema: z.literal("kanban-code-agent/subtasks@1"),
   taskId: z.string().min(1).optional(),
   parentTaskId: z.string().min(1).optional(),
   strategy: z.string().optional(),
   mergePolicy: z.string().optional(),
-  subtasks: z.array(z.object({
-    id: z.string().min(1),
-    title: z.string().optional(),
-    status: z.string().optional(),
-    agent: z.string().nullable().optional(),
-    needs: z.array(z.string()).default([]),
-    provides: z.array(z.string()).default([]),
-    fileLocks: z.array(z.string()).default([])
+  subtasks: z.array(SubtaskNodeSchema).default([])
+}).passthrough();
+
+export const SubtasksV2Schema = z.object({
+  schema: z.literal("kanban-code-agent/subtasks@2"),
+  taskId: z.string().min(1).optional(),
+  parentTaskId: z.string().min(1),
+  strategy: z.literal("dag").default("dag"),
+  mergePolicy: z.string().default("sequential-into-parent-feature"),
+  nodes: z.array(SubtaskNodeSchema).default([]),
+  subtasks: z.array(SubtaskNodeSchema).default([]).optional(),
+  edges: z.array(z.object({
+    from: z.string().min(1),
+    to: z.string().min(1),
+    contract: z.string().min(1).optional()
   }).passthrough()).default([])
 }).passthrough();
+
+export const SubtasksSchema = z.union([SubtasksV1Schema, SubtasksV2Schema]);
 
 export const EventSchema = z.object({
   ts: z.string().min(1),
