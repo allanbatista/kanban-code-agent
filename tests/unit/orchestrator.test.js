@@ -54,7 +54,11 @@ test("orchestrator starts, completes and summarizes a task session", async () =>
   }, root);
   assert.equal(started.task.status, "running");
   assert.match(started.run.sessionRef, /settings\/runtime\/sessions/);
-  assert.match(await readFile(join(root, "settings", "runtime", "sessions", created.task.id, "engineer", "session.jsonl"), "utf8"), /agent.config/);
+  const session = await readFile(join(root, "settings", "runtime", "sessions", created.task.id, "engineer", "session.jsonl"), "utf8");
+  assert.match(session, /agent.config/);
+  assert.match(session, /agent.run/);
+  assert.match(session, /promptHash/);
+  assert.match(session, /allowedTools/);
 
   const completed = await handleCommand({
     type: "agent.complete_task",
@@ -122,6 +126,10 @@ test("assistant chat creates an agent session and can create tasks", async () =>
   const snapshot = await handleQuery({ type: "board.snapshot" }, root);
   assert.equal(snapshot.tasks.some((task) => task.title === "Cobrir chat agent"), true);
   assert.equal(snapshot.events.some((event) => event.type === "agent.event" && event.actor === "assistant"), true);
+  const history = await handleQuery({ type: "chat.history", scope: "board" }, root);
+  assert.equal(history.length, 2);
+  assert.equal(history[0].role, "user");
+  assert.equal(history[1].role, "assistant");
 });
 
 test("assistant chat can move and rename the selected task", async () => {

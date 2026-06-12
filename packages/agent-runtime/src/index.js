@@ -1,4 +1,5 @@
 import { mkdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { appendJsonl, paths, readAgent, readSkill, writeAtomic } from "@kca/fsdb";
 import { startPiSession } from "@kca/pi-adapter";
@@ -7,7 +8,13 @@ export function createRunId(taskId, agentId) {
   return `run_${taskId}_${agentId}_${Date.now()}`;
 }
 
-export async function startRun(task, root, agentId = task.routing?.currentAgent || "assistant") {
+function toolsForAgent(agentConfig) {
+  const tools = agentConfig?.tools;
+  if (Array.isArray(tools)) return tools;
+  return [...(tools?.builtin || []), ...(tools?.custom || [])];
+}
+
+export async function startRun(task, root, agentId = task.routing?.currentAgent || "assistant", options = {}) {
   const p = paths(root);
   const runId = createRunId(task.id, agentId);
   const sessionDir = join(p.runtime, "sessions", task.id, agentId);
@@ -55,6 +62,10 @@ export async function startRun(task, root, agentId = task.routing?.currentAgent 
     description,
     previousSummary ? `# Previous Session Summary\n\n${previousSummary}` : ""
   ].filter(Boolean).join("\n\n");
+  const role = options.role || task.routing?.currentRole || task.routing?.currentAgent || agentId;
+  const scope = options.scope || (task.kind === "assistant" ? "board" : "task");
+  const allowedTools = options.allowedTools || toolsForAgent(agentConfig);
+  const promptHash = createHash("sha256").update(prompt).digest("hex");
   const adapter = await startPiSession({
     task,
     agentId,
@@ -67,9 +78,10 @@ export async function startRun(task, root, agentId = task.routing?.currentAgent 
     skills: configuredSkills.filter(Boolean)
   });
   await appendJsonl(join(sessionDir, "session.jsonl"), started);
+  await appendJsonl(join(sessionDir, "session.jsonl"), { ts: new Date().toISOString(), type: "agent.run", actor: "orchestrator", taskId: task.id, runId, agentId, role, scope, allowedTools, promptHash });
   await appendJsonl(join(sessionDir, "session.jsonl"), { ts: new Date().toISOString(), type: "agent.config", actor: "orchestrator", taskId: task.id, runId, agent: agentConfig, skills: configuredSkills.filter(Boolean), resume: { previousSessionRef, previousSummaryRef } });
   await appendJsonl(join(sessionDir, "session.jsonl"), { ts: new Date().toISOString(), type: "agent.adapter", actor: "orchestrator", taskId: task.id, runId, adapter });
-  return { runId, agentId, sessionRef, summaryRef, previousSessionRef, previousSummaryRef, event: started, adapter };
+  return { runId, agentId, role, scope, allowedTools, promptHash, sessionRef, summaryRef, previousSessionRef, previousSummaryRef, event: started, adapter };
 }
 
 export async function interruptRun(task, root, mode = "soft") {

@@ -5,7 +5,6 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { CheckCircle, GitBranch, Pause, Play, Send, Split, X } from "lucide-react";
 import { z } from "zod";
-import { commandId } from "../api";
 import type { ChatMessage, Task } from "../types";
 
 const formSchema = z.object({
@@ -24,19 +23,18 @@ type Props = {
   onClose: () => void;
   onSave: (input: { id?: string; title: string; description?: string; priority: string; kind: string; projectTargets: string[] }) => Promise<void>;
   onSendAssistant: (prompt: string, taskId?: string) => Promise<string> | string;
+  messages: ChatMessage[];
   onAction: (task: Task, action: "run" | "interrupt" | "complete" | "decompose") => Promise<void> | void;
 };
 
-export function TaskModal({ task, open, onClose, onSave, onSendAssistant, onAction }: Props) {
+export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messages, onAction }: Props) {
   const [chat, setChat] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: { title: "", description: "", priority: "medium", kind: "task", projectTargets: "" }
   });
 
   useEffect(() => {
-    setMessages(task ? [{ id: "task-welcome", role: "assistant", time: "agora", text: `Assistant dedicado para ${task.id}.` }] : []);
     form.reset({
       title: task?.title || "",
       description: task?.description || "",
@@ -63,9 +61,7 @@ export function TaskModal({ task, open, onClose, onSave, onSendAssistant, onActi
     const value = chat.trim();
     if (!value) return;
     setChat("");
-    setMessages((current) => [...current, { id: commandId("task-user"), role: "user", time: "agora", text: value }]);
-    const reply = await onSendAssistant(value, task?.id);
-    setMessages((current) => [...current, { id: commandId("task-assistant"), role: "assistant", time: "agora", text: reply }]);
+    await onSendAssistant(value, task?.id);
   }
 
   return (
@@ -127,7 +123,7 @@ export function TaskModal({ task, open, onClose, onSave, onSendAssistant, onActi
                 <p className="text-xs text-zinc-500">{task?.id || "nova task"} · agent assistant</p>
               </div>
               <div className="flex-1 space-y-3 overflow-auto p-4 text-sm text-zinc-300">
-                {messages.map((message) => (
+                {(messages.length ? messages : task ? [{ id: "task-welcome", role: "assistant" as const, time: "agora", text: `Assistant dedicado para ${task.id}.` }] : []).map((message) => (
                   <article className={message.role === "assistant" ? "chat-assistant" : "chat-user"} key={message.id}>
                     <div className="text-[11px] uppercase text-zinc-500">{message.role} · {message.time}</div>
                     <p className="mt-1">{message.text}</p>

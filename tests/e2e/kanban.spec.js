@@ -83,6 +83,9 @@ test("board assistant runs as agent and creates a real task", async ({ page, req
   await page.getByPlaceholder("Peça ao agent principal").fill(`criar task ${title}`);
   await page.getByLabel("Enviar").click();
   await expect(page.getByText(/Criei KCA-/)).toBeVisible();
+  await page.reload();
+  await expect(page.getByText(`criar task ${title}`)).toBeVisible();
+  await expect(page.getByText(/Criei KCA-/)).toBeVisible();
 
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
@@ -145,6 +148,9 @@ test("task assistant responds inside the task modal", async ({ page, request }) 
   await page.getByText(task.title).click();
   await page.getByPlaceholder("Pergunte sobre escopo").fill("por que não iniciou?");
   await page.getByRole("dialog").getByLabel("Enviar").click();
+  await expect(page.getByRole("dialog").getByText(/Tokens do agent assistant|está pronta para executar/)).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("dialog").getByText("por que não iniciou?")).toBeVisible();
   await expect(page.getByRole("dialog").getByText(/Tokens do agent assistant|está pronta para executar/)).toBeVisible();
 });
 

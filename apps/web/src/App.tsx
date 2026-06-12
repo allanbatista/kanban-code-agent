@@ -14,15 +14,21 @@ function now() {
   return new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" }).format(new Date());
 }
 
+function chatMessage(message: Record<string, unknown>): ChatMessage {
+  return {
+    id: String(message.id || commandId("chat")),
+    role: message.role === "user" ? "user" : "assistant",
+    time: message.ts ? new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" }).format(new Date(String(message.ts))) : now(),
+    text: String(message.text || "")
+  };
+}
+
 function AppShell() {
   const queryClient = useQueryClient();
   const [params, setParams] = useSearchParams();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("kca-theme") || "light");
   const [rail, setRail] = useState<"chat" | "ops">("chat");
-  const [chat, setChat] = useState<ChatMessage[]>([
-    { id: "welcome", role: "assistant", time: now(), text: "Olá. Posso gerenciar o Kanban, explicar por que uma task não iniciou, decompor uma master task em subtasks paralelas, ou acionar o orchestrator." }
-  ]);
   const selectedTaskId = params.get("task");
   const newTaskColumn = params.get("column") || "inbox";
   const statusFilter = params.get("status") || "all";
@@ -31,9 +37,17 @@ function AppShell() {
   const state = useQuery({ queryKey: ["state"], queryFn: loadState });
   const orchestrator = useQuery({ queryKey: ["orchestrator"], queryFn: queryOrchestrator });
   const agents = useQuery({ queryKey: ["settings", "agents"], queryFn: () => queryDaemon<{ agents: AgentSettings[] }>({ type: "settings.scope", scope: "agents" }) });
+  const boardChat = useQuery({ queryKey: ["chat", "board"], queryFn: () => queryDaemon<Array<Record<string, unknown>>>({ type: "chat.history", scope: "board" }) });
+  const taskChat = useQuery({
+    queryKey: ["chat", "task", selectedTaskId],
+    queryFn: () => queryDaemon<Array<Record<string, unknown>>>({ type: "chat.history", scope: "task", taskId: selectedTaskId }),
+    enabled: Boolean(selectedTaskId && selectedTaskId !== "new")
+  });
   const tasks = state.data?.tasks || [];
   const columns = state.data?.columns || [];
   const selectedTask = tasks.find((task) => task.id === selectedTaskId) || null;
+  const boardMessages = (boardChat.data?.length ? boardChat.data.map(chatMessage) : [{ id: "welcome", role: "assistant" as const, time: now(), text: "Olá. Posso gerenciar o Kanban, explicar por que uma task não iniciou, decompor uma master task em subtasks paralelas, ou acionar o orchestrator." }]);
+  const taskMessages = taskChat.data?.map(chatMessage) || [];
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -45,6 +59,7 @@ function AppShell() {
     source.onmessage = () => {
       void queryClient.invalidateQueries({ queryKey: ["state"] });
       void queryClient.invalidateQueries({ queryKey: ["orchestrator"] });
+      void queryClient.invalidateQueries({ queryKey: ["chat"] });
     };
     source.onerror = () => source.close();
     return () => source.close();
@@ -79,7 +94,6 @@ function AppShell() {
   async function sendAssistant(prompt: string, taskId?: string) {
     const clean = prompt.trim();
     if (!clean) return "";
-    if (!taskId) setChat((messages) => [...messages, { id: commandId("msg-user"), role: "user", time: now(), text: clean }]);
     try {
       const payload = {
         type: "agent.chat",
@@ -92,13 +106,12 @@ function AppShell() {
       if (selectedTaskId && selectedTaskId !== "new") payload.selectedTaskId = selectedTaskId;
       const result = await commandDaemon<{ reply?: string }>(payload);
       const reply = result.reply || "Comando processado.";
-      if (!taskId) setChat((messages) => [...messages, { id: commandId("msg-assistant"), role: "assistant", time: now(), text: reply }]);
       await queryClient.invalidateQueries({ queryKey: ["state"] });
       await queryClient.invalidateQueries({ queryKey: ["orchestrator"] });
+      await queryClient.invalidateQueries({ queryKey: taskId ? ["chat", "task", taskId] : ["chat", "board"] });
       return reply;
     } catch (error) {
       const reply = `Erro do daemon: ${error instanceof Error ? error.message : String(error)}`;
-      if (!taskId) setChat((messages) => [...messages, { id: commandId("msg-error"), role: "assistant", time: now(), text: reply }]);
       return reply;
     }
   }
@@ -184,7 +197,7 @@ function AppShell() {
             <button className={rail === "chat" ? "active" : ""} type="button" onClick={() => setRail("chat")}>Assistant</button>
             <button className={rail === "ops" ? "active" : ""} type="button" onClick={() => setRail("ops")}>Orchestrator</button>
           </div>
-          {rail === "chat" ? <AssistantPanel messages={chat} onSend={(text) => sendAssistant(text)} taskCount={tasks.length} selectedTaskId={selectedTask?.id} /> : null}
+          {rail === "chat" ? <AssistantPanel messages={boardMessages} onSend={(text) => sendAssistant(text)} taskCount={tasks.length} selectedTaskId={selectedTask?.id} /> : null}
           {rail === "ops" ? <OrchestratorPanel status={orchestrator.data} loading={orchestrator.isLoading} /> : null}
         </aside>
       </main>
@@ -195,6 +208,7 @@ function AppShell() {
         onClose={() => patchParams({ task: null, column: null })}
         onSave={saveTask}
         onSendAssistant={sendAssistant}
+        messages={taskMessages}
         onAction={taskAction}
       />
       <SettingsDialog

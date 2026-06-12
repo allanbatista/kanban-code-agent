@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.js",
+    "./chat-store": "./src/chat-store.js",
     "./runtime-store": "./src/runtime-store.js"
   },
   "dependencies": {

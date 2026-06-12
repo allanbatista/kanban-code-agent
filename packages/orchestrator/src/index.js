@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { interruptRun, startRun, writeRunSummary } from "@kca/agent-runtime";
 import { createWorktree, mergeSubtask } from "@kca/git-worktree";
 import { appendJsonl, boardSnapshot, createTask, getTask, listTasks, moveTask, paths, readAgent, readCommandResult, readHook, readProject, readSettings, readSettingsScope, recordCommandResult, updateSettings, updateTask, writeTaskFile, writeYaml } from "@kca/fsdb";
+import { appendChatMessage, readChatHistory } from "@kca/fsdb/chat-store";
 import { runBoardAssistant, loadPiSdk } from "@kca/pi-adapter";
 import { parseCommand, parseQuery, TaskSchema } from "@kca/schemas";
 import { schedulerTick } from "./scheduler.js";
@@ -278,6 +279,9 @@ export async function handleCommand(input, root) {
     const agentId = command.agentId || "assistant";
     const prompt = String(command.prompt || "");
     const p = paths(root);
+    const promptTaskId = prompt.match(/\bKCA-[A-Za-z0-9-]+\b/)?.[0];
+    const chatTaskId = command.taskId || command.selectedTaskId || (command.scope === "task" ? promptTaskId : undefined);
+    await appendChatMessage(root, { scope: command.scope, taskId: chatTaskId, role: "user", agentId, text: prompt, commandId: command.commandId });
     const piLoaded = await loadPiSdk();
     const useRealAgent = piLoaded.ok && piLoaded.mode === "real";
 
@@ -364,14 +368,14 @@ export async function handleCommand(input, root) {
         reply: agentResult.reply,
         ok: agentResult.ok
       });
+      await appendChatMessage(root, { scope: command.scope, taskId: chatTaskId, role: "assistant", agentId, text: agentResult.reply, commandId: command.commandId });
 
       result = { ok: true, commandId: command.commandId, reply: agentResult.reply, agentOk: agentResult.ok };
     } else {
       // Fallback: keyword-matching assistant for fake mode / tests
-      const promptTaskId = String(command.prompt).match(/\bKCA-[A-Za-z0-9-]+\b/)?.[0];
       const current = command.taskId || command.selectedTaskId || promptTaskId ? await getTask(command.taskId || command.selectedTaskId || promptTaskId, root) : null;
       const agentTask = current || virtualAssistantTask(command.scope, command.prompt);
-      const run = await startRun(agentTask, root, command.agentId || "assistant");
+      const run = await startRun(agentTask, root, command.agentId || "assistant", { scope: command.scope, role: command.agentId || "assistant" });
       const lower = command.prompt.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
       let action = null;
       let reply = command.scope === "task" && current
@@ -434,6 +438,7 @@ export async function handleCommand(input, root) {
       }
 
       await appendJsonl(`${p.runtime}/logs/events.jsonl`, { ts: new Date().toISOString(), type: "agent.event", actor: run.agentId, runId: run.runId, scope: command.scope, taskId: current?.id, prompt: command.prompt, reply, action });
+      await appendChatMessage(root, { scope: command.scope, taskId: current?.id || chatTaskId, role: "assistant", agentId: run.agentId, text: reply, commandId: command.commandId, runId: run.runId });
       result = { ok: true, commandId: command.commandId, run, reply, action };
     }
   }
@@ -545,6 +550,7 @@ export async function handleQuery(input, root) {
   if (query.type === "board.snapshot") return boardSnapshot(root);
   if (query.type === "orchestrator.status") return orchestratorStatus(root);
   if (query.type === "settings.scope") return readSettingsScope(query.scope, root);
+  if (query.type === "chat.history") return readChatHistory(root, query);
   if (query.type === "task.detail") {
     const task = await getTask(query.taskId, root);
     if (!task) throw new Error(`Task not found: ${query.taskId}`);

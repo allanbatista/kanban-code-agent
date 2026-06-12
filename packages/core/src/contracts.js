@@ -11,6 +11,7 @@ export const COMMAND_TYPES = [
   "agent.report_blocker",
   "agent.request_user_input",
   "agent.emit_artifact",
+  "agent.chat",
   "settings.update"
 ];
 
@@ -19,6 +20,7 @@ export const QUERY_TYPES = [
   "task.detail",
   "orchestrator.status",
   "settings.scope",
+  "chat.history",
   "why_not_running"
 ];
 
@@ -35,6 +37,7 @@ export const EVENT_TYPES = [
   "agent.queued",
   "agent.started",
   "agent.event",
+  "chat.message",
   "agent.checkpoint_requested",
   "agent.interrupted",
   "agent.completed",

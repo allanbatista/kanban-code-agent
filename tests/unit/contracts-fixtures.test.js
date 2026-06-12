@@ -6,6 +6,7 @@ import { boardFixture, boardSnapshotQuery, planningFixture, rolesFixture, subtas
 test("core contracts expose canonical command, query and event names", () => {
   assert.equal(COMMAND_TYPES.includes("task.create"), true);
   assert.equal(COMMAND_TYPES.includes("scheduler.tick"), true);
+  assert.equal(QUERY_TYPES.includes("chat.history"), true);
   assert.equal(QUERY_TYPES.includes("board.snapshot"), true);
   assert.equal(EVENT_TYPES.includes("task.recovered"), true);
   assert.equal(ROLE_IDS.includes("deployment"), true);

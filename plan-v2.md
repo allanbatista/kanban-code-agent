@@ -352,16 +352,18 @@ Gate F2:
 
 | ID | Status | Owner | Planned files | Actual files | Done when | Evidencia requerida |
 |---|---|---|---|---|---|---|
-| F3.S1.T1 | Pending | engineer | `packages/agent-runtime/src/index.js` | - | `startRun` recebe role, scope, task context e toolset filtrado | Session JSONL contem role, scope, allowed tools e prompt hash. |
+| F3.S1.T1 | Done | engineer | `packages/agent-runtime/src/index.js` | `packages/agent-runtime/src/index.js`, `tests/unit/orchestrator.test.js` | `startRun` recebe role, scope, task context e toolset filtrado | `rtk pnpm test:unit` valida `agent.run` com role, scope, allowedTools e promptHash. |
 | F3.S1.T2 | Pending | engineer | `packages/pi-adapter/src/index.js` | - | Pi adapter recebe contracts de tools, sem conhecer FSDB direto | Unit mock prova tools chamadas e efeitos persistidos via context. |
-| F3.S1.T3 | Pending | engineer | `packages/fsdb/src/chat-store.js` | - | Chats global/task persistem em JSONL ou Markdown resumido | E2E recarrega pagina e historico continua. |
-| F3.S1.T4 | Pending | product/design/engineering | `settings/prompts/*.md`, `settings/roles/*.yaml` defaults | - | Cada role tem prompt, escopo, tools e policies proprias | Snapshot de settings e tests de default roles. |
-| F3.S1.T5 | Pending | quality | `tests/unit/orchestrator.test.js`, `tests/e2e/kanban.spec.js` | - | Assistant global e task assistant executam actions por scope correto | Tests cobrem criar global, explicar task, alterar acceptance e decompor. |
+| F3.S1.T3 | Done | engineer | `packages/fsdb/src/chat-store.js` | `packages/fsdb/src/chat-store.js`, `packages/orchestrator/src/index.js`, `apps/web/src/App.tsx`, `apps/web/src/components/TaskModal.tsx` | Chats global/task persistem em JSONL ou Markdown resumido | `rtk pnpm test:e2e` recarrega pagina e historico global/task continua. |
+| F3.S1.T4 | Partial | product/design/engineering | `settings/prompts/*.md`, `settings/roles/*.yaml` defaults | `packages/core/src/roles.js`, `packages/fsdb/src/index.js` | Cada role tem prompt, escopo, tools e policies proprias | Roles default existem; ainda falta prompt/scope/tool policies por role validado end-to-end. |
+| F3.S1.T5 | Partial | quality | `tests/unit/orchestrator.test.js`, `tests/e2e/kanban.spec.js` | `tests/unit/orchestrator.test.js`, `tests/e2e/kanban.spec.js`, `tests/unit/contracts-fixtures.test.js` | Assistant global e task assistant executam actions por scope correto | Tests cobrem criar global, chat history e explicar task; ainda faltam alterar acceptance e decompor por scope persistido. |
 
 Gate F3:
 
 - `rtk pnpm test:unit`
 - `rtk pnpm test:e2e`
+- `rtk pnpm lint`
+- `rtk pnpm test:pi`
 - Smoke Pi real opcional: `rtk pnpm --filter @kca/cli exec kca doctor --pi-smoke` com credenciais locais.
 
 ### F4 - Planning e DAG de N subtasks

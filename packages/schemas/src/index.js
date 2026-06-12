@@ -376,6 +376,7 @@ export const QuerySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("orchestrator.status") }),
   z.object({ type: z.literal("task.detail"), taskId: z.string().min(1) }),
   z.object({ type: z.literal("settings.scope"), scope: z.string().default("app") }),
+  z.object({ type: z.literal("chat.history"), scope: z.enum(["board", "task"]).default("board"), taskId: z.string().optional(), limit: z.number().int().positive().max(500).default(100) }),
   z.object({ type: z.literal("why_not_running"), taskId: z.string().min(1) })
 ]);
 
