@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import YAML from "yaml";
 import { handleCommand, handleQuery } from "../../packages/orchestrator/src/index.js";
+import { planningArtifactsForTask } from "../../packages/orchestrator/src/planning-service.js";
 import { addProject } from "../../packages/fsdb/src/index.js";
 import { createRepoFixture } from "../../packages/git-worktree/src/index.js";
 
@@ -347,6 +348,34 @@ test("orchestrator decomposes a master task into queued subtasks", async () => {
   assert.deepEqual(subtasksFile.subtasks[1].fileLocks, ["tests/**"]);
   assert.equal((await handleQuery({ type: "why_not_running", taskId: decomposed.subtasks[0].id }, root)).runnable, true);
   assert.match((await handleQuery({ type: "why_not_running", taskId: decomposed.subtasks[1].id }, root)).reasons.join(" "), /runtime:agent/);
+});
+
+test("planning service creates planning and acceptance artifacts for a master task", () => {
+  const artifacts = planningArtifactsForTask({ id: "KCA-PLAN", title: "Master ready" });
+  assert.equal(artifacts.planning.taskId, "KCA-PLAN");
+  assert.equal(artifacts.planning.roles.required.includes("deployment"), true);
+  assert.match(artifacts.acceptance, /Master ready funciona de ponta a ponta/);
+});
+
+test("orchestrator decomposes a master task into N subtasks with DAG edges", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-orch-dag-"));
+  const parent = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-dag-parent",
+    input: { title: "Master DAG", kind: "master", projectTargets: ["kanban-code-agent"] }
+  }, root);
+  const subtasks = Array.from({ length: 6 }, (_, index) => ({
+    title: `Subtask ${index + 1}`,
+    needs: index === 0 ? [] : [`contract:${index}`],
+    provides: [`contract:${index + 1}`],
+    fileLocks: index < 2 ? ["packages/core/**"] : [],
+    agentId: "engineer"
+  }));
+  const result = await handleCommand({ type: "task.decompose", commandId: "cmd-dag-decompose", taskId: parent.task.id, subtasks }, root);
+  assert.equal(result.subtasks.length, 6);
+  const subtasksFile = YAML.parse(await readFile(join(root, "tasks", parent.task.id, "subtasks.yaml"), "utf8"));
+  assert.equal(subtasksFile.nodes.length, 6);
+  assert.equal(subtasksFile.edges.length, 5);
 });
 
 test("scheduler explains global limits, agent/project tokens and semaphores", async () => {

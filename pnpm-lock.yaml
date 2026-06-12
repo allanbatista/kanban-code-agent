@@ -152,6 +152,9 @@ importers:
       '@kca/agent-runtime':
         specifier: workspace:*
         version: link:../agent-runtime
+      '@kca/core':
+        specifier: workspace:*
+        version: link:../core
       '@kca/fsdb':
         specifier: workspace:*
         version: link:../fsdb

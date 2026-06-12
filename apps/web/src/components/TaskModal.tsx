@@ -24,11 +24,13 @@ type Props = {
   onSave: (input: { id?: string; title: string; description?: string; priority: string; kind: string; projectTargets: string[] }) => Promise<void>;
   onSendAssistant: (prompt: string, taskId?: string) => Promise<string> | string;
   messages: ChatMessage[];
+  allTasks: Task[];
   onAction: (task: Task, action: "run" | "interrupt" | "complete" | "decompose") => Promise<void> | void;
 };
 
-export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messages, onAction }: Props) {
+export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messages, allTasks, onAction }: Props) {
   const [chat, setChat] = useState("");
+  const subtasks = task ? allTasks.filter((item) => item.worktree?.parentTaskId === task.id) : [];
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: { title: "", description: "", priority: "medium", kind: "task", projectTargets: "" }
@@ -106,7 +108,9 @@ export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messag
                   </Tabs.Content>
                   <Tabs.Content value="worktree"><Panel title="Worktree da task" lines={[`branch: ${task?.worktree?.branch || "a definir"}`, `path: ${task?.worktree?.path || "nao criado"}`, `merge target: ${task?.worktree?.mergeTarget || "main"}`]} /></Tabs.Content>
                   <Tabs.Content value="dependencias"><Panel title="Contratos da task" lines={[`needs -> ${(task?.dependencies?.needs || []).join(", ") || "nenhum"}`, `${task?.id || "task"} -> provides`, (task?.dependencies?.provides || []).join(", ") || "nenhum"]} /></Tabs.Content>
-                  <Tabs.Content value="subtasks"><Panel title="Subtasks paralelas" lines={["Use decompor para criar subtasks com needs/provides e agents sugeridos."]} /></Tabs.Content>
+                  <Tabs.Content value="subtasks">
+                    <Panel title="Subtasks paralelas" lines={subtasks.length ? subtasks.map((item) => `${item.id} [${item.status}] ${item.title}`) : ["Use decompor para criar subtasks com needs/provides e agents sugeridos."]} />
+                  </Tabs.Content>
                   <Tabs.Content value="hooks"><Panel title="Hooks da task" lines={task?.hooks?.active?.length ? task.hooks.active : ["nenhum hook ativo"]} /></Tabs.Content>
                   <Tabs.Content value="eventos"><Panel title="Timeline" lines={[`updated: ${task?.updatedAt || "nao persistida"}`]} /></Tabs.Content>
                   <Tabs.Content value="arquivos"><Panel title="Arquivos da task" lines={["task.yaml", "description.md", "acceptance.md", "dependencies.yaml", "events.jsonl"]} /></Tabs.Content>

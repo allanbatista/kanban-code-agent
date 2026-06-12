@@ -209,6 +209,7 @@ function AppShell() {
         onSave={saveTask}
         onSendAssistant={sendAssistant}
         messages={taskMessages}
+        allTasks={tasks}
         onAction={taskAction}
       />
       <SettingsDialog

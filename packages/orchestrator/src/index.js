@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { interruptRun, startRun, writeRunSummary } from "@kca/agent-runtime";
+import { validateDag } from "@kca/core/dag";
 import { createWorktree, mergeSubtask } from "@kca/git-worktree";
 import { appendJsonl, boardSnapshot, createTask, getTask, listTasks, moveTask, paths, readAgent, readCommandResult, readHook, readProject, readSettings, readSettingsScope, recordCommandResult, updateSettings, updateTask, writeTaskFile, writeYaml } from "@kca/fsdb";
 import { appendChatMessage, readChatHistory } from "@kca/fsdb/chat-store";
@@ -484,6 +485,8 @@ export async function handleCommand(input, root) {
       branch: task.worktree?.branch,
       mergeTarget: task.worktree?.mergeTarget
     }));
+    const dag = validateDag(nodes);
+    if (!dag.ok) throw new Error(`Invalid subtask DAG: ${JSON.stringify(dag.errors)}`);
     await writeYaml(`${paths(root).tasks}/${parent.id}/subtasks.yaml`, {
       schema: "kanban-code-agent/subtasks@2",
       taskId: parent.id,
@@ -492,10 +495,7 @@ export async function handleCommand(input, root) {
       mergePolicy: "sequential-into-parent-feature",
       nodes,
       subtasks: nodes,
-      edges: nodes.flatMap((node) => node.needs.map((contract) => {
-        const provider = nodes.find((candidate) => candidate.provides.includes(contract));
-        return provider ? { from: provider.id, to: node.id, contract } : null;
-      }).filter(Boolean))
+      edges: dag.edges
     });
     result = { ok: true, commandId: command.commandId, task: parent, subtasks: created };
   }

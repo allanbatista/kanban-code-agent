@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@kca/agent-runtime": "workspace:*",
+    "@kca/core": "workspace:*",
     "@kca/fsdb": "workspace:*",
     "@kca/git-worktree": "workspace:*",
     "@kca/pi-adapter": "workspace:*",

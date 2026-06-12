@@ -122,13 +122,20 @@ test("task modal exposes tabs and runs the assigned agent", async ({ page, reque
     const state = await request.get(`${daemonUrl}/api/state`);
     return (await state.json()).tasks.find((item) => item.id === task.id)?.status;
   }).toBe("running");
+  await page.getByRole("button", { name: "Decompor" }).click();
+  await page.getByRole("tab", { name: "subtasks" }).click();
+  await expect(page.getByRole("dialog").getByText(new RegExp(`${task.id}-01 \\[`))).toBeVisible();
 });
 
 test("daemon scheduler auto-starts queued runnable tasks", async ({ request }) => {
+  await request.post(`${daemonUrl}/api/settings.update`, {
+    data: { scope: "app", patch: { runtime: { maxParallelTasks: 10, agentTokens: { "scheduler-e2e": 1 }, projectTokens: { "kanban-code-agent": 10 } } } }
+  });
   const task = await createTask(request, `Scheduled task ${Date.now()}`, {
     column: "definition",
+    projectTargets: [],
     status: "queued",
-    routing: { currentAgent: "engineer", manualOverride: { active: false } }
+    routing: { currentAgent: "scheduler-e2e", manualOverride: { active: false } }
   });
 
   await expect.poll(async () => {

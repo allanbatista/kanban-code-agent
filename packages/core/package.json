@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/fixtures.js",
     "./contracts": "./src/contracts.js",
+    "./dag": "./src/dag.js",
     "./roles": "./src/roles.js"
   }
 }

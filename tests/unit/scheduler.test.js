@@ -63,3 +63,30 @@ test("scheduler tick starts queued runnable tasks and records leases", async () 
   assert.equal((await handleQuery({ type: "task.detail", taskId: second.task.id }, root)).status, "running");
   assert.equal((await readSemaphoreState(root)).leases.some((lease) => lease.taskId === first.task.id), true);
 });
+
+test("scheduler tick blocks dependent subtasks until contracts are provided", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-scheduler-dag-"));
+  await handleCommand({
+    type: "settings.update",
+    commandId: "scheduler-dag-settings",
+    scope: "app",
+    patch: { runtime: { maxParallelTasks: 3, agentTokens: { engineering: 3 }, projectTokens: { "kanban-code-agent": 3 } } }
+  }, root);
+  const first = await handleCommand({
+    type: "task.create",
+    commandId: "scheduler-dag-a",
+    input: { title: "Provider", column: "build", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued", dependencies: { needs: [], provides: ["contract:ready"], blockedBy: [], fileLocks: [], semaphores: [] } }
+  }, root);
+  const second = await handleCommand({
+    type: "task.create",
+    commandId: "scheduler-dag-b",
+    input: { title: "Dependent", column: "build", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued", dependencies: { needs: ["contract:ready"], provides: ["contract:done"], blockedBy: [], fileLocks: [], semaphores: [] } }
+  }, root);
+  const tick = await schedulerTick(root, {
+    whyNotRunning,
+    maxStarts: 3,
+    runTask: (task) => handleCommand({ type: "task.run", commandId: `scheduler-dag-run-${task.id}`, taskId: task.id, agentId: "engineering" }, root)
+  });
+  assert.deepEqual(tick.started.map((item) => item.taskId), [first.task.id]);
+  assert.equal(tick.skipped.some((item) => item.taskId === second.task.id && item.reasons.join(" ").includes("contract:ready")), true);
+});

@@ -370,16 +370,18 @@ Gate F3:
 
 | ID | Status | Owner | Planned files | Actual files | Done when | Evidencia requerida |
 |---|---|---|---|---|---|---|
-| F4.S1.T1 | Pending | product | `packages/orchestrator/src/planning-service.js` | - | Planning cria `planning.yaml`, acceptance e proposta de roles | Unit test cria master task e planning artifacts. |
-| F4.S1.T2 | Pending | architect | `packages/core/src/dag.js` | - | DAG valida ciclos, missing contracts, duplicate provides e locks | Unit tests de grafo valido/invalido. |
-| F4.S1.T3 | Pending | engineer | `packages/orchestrator/src/decompose-command.js` | - | `spawn_subtasks` aceita N nodes e persiste `subtasks@2` | Teste com 6 subtasks e DAG parcial. |
-| F4.S1.T4 | Pending | engineer | `packages/orchestrator/src/scheduler.js` | - | Scheduler executa subtasks prontas em paralelo e bloqueia dependentes | Evidence: runs simultaneos ate limite e reasons para bloqueadas. |
-| F4.S1.T5 | Pending | design/engineer | `apps/web/src/components/TaskModal.tsx` ou novos componentes | - | Aba Subtasks mostra DAG simples dentro da task, sem tela DAG dedicada | Playwright screenshot e interacao basica. |
+| F4.S1.T1 | Done | product | `packages/orchestrator/src/planning-service.js` | `packages/orchestrator/src/planning-service.js`, `tests/unit/orchestrator.test.js` | Planning cria `planning.yaml`, acceptance e proposta de roles | `rtk pnpm test:unit` cria planning artifacts com roles e acceptance. |
+| F4.S1.T2 | Done | architect | `packages/core/src/dag.js` | `packages/core/src/dag.js`, `packages/core/package.json`, `tests/unit/dag.test.js` | DAG valida ciclos, missing contracts, duplicate provides e locks | `rtk pnpm test:unit` cobre grafo valido, ciclos, missing contracts e duplicate provides. |
+| F4.S1.T3 | Done | engineer | `packages/orchestrator/src/decompose-command.js` | `packages/orchestrator/src/index.js`, `tests/unit/orchestrator.test.js` | `spawn_subtasks` aceita N nodes e persiste `subtasks@2` | `rtk pnpm test:unit` cria 6 subtasks e persiste edges `subtasks@2`. |
+| F4.S1.T4 | Done | engineer | `packages/orchestrator/src/scheduler.js` | `packages/orchestrator/src/scheduler.js`, `tests/unit/scheduler.test.js` | Scheduler executa subtasks prontas em paralelo e bloqueia dependentes | `rtk pnpm test:unit` prova starts ate limite e dependente bloqueada por contrato. |
+| F4.S1.T5 | Done | design/engineer | `apps/web/src/components/TaskModal.tsx` ou novos componentes | `apps/web/src/App.tsx`, `apps/web/src/components/TaskModal.tsx`, `tests/e2e/kanban.spec.js` | Aba Subtasks mostra DAG simples dentro da task, sem tela DAG dedicada | `rtk pnpm test:e2e` decompõe task e mostra subtask no modal. |
 
 Gate F4:
 
 - `rtk pnpm test:unit`
 - `rtk pnpm test:e2e`
+- `rtk pnpm lint`
+- `rtk pnpm test:pi`
 - Caso manual/API: master com N=6, maxParallel=3, duas subtasks com lock conflitante, uma dependente de duas provides.
 
 ### F5 - Worktrees, review e deployment
