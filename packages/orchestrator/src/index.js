@@ -7,6 +7,7 @@ import { createWorktree, mergeSubtask } from "@kca/git-worktree";
 import { appendJsonl, boardSnapshot, createTask, getTask, listTasks, moveTask, paths, readAgent, readCommandResult, readHook, readProject, readSettings, readSettingsScope, recordCommandResult, updateSettings, updateTask, writeTaskFile, writeYaml } from "@kca/fsdb";
 import { runBoardAssistant, loadPiSdk } from "@kca/pi-adapter";
 import { parseCommand, parseQuery, TaskSchema } from "@kca/schemas";
+import { schedulerTick } from "./scheduler.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -515,6 +516,20 @@ export async function handleCommand(input, root) {
       const task = TaskSchema.parse(await updateTask(command.taskId, { status: "blocked", column: "blocked" }, root, "task.blocked"));
       result = { ok: false, commandId: command.commandId, task, merge };
     }
+  }
+
+  if (command.type === "scheduler.tick") {
+    result = await schedulerTick(root, {
+      maxStarts: command.maxStarts,
+      whyNotRunning,
+      runTask: (task) => handleCommand({
+        type: "task.run",
+        commandId: `scheduler-run-${task.id}-${Date.now()}`,
+        taskId: task.id,
+        agentId: task.routing?.currentAgent || task.agent?.currentAgent || task.agent || undefined
+      }, root)
+    });
+    result.commandId = command.commandId;
   }
 
   if (command.type === "settings.update") {

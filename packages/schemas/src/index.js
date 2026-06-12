@@ -327,6 +327,10 @@ export const CommandSchema = z.discriminatedUnion("type", [
     subtaskBranch: z.string().min(1).optional()
   }),
   commandBase.extend({
+    type: z.literal("scheduler.tick"),
+    maxStarts: z.number().int().positive().optional()
+  }),
+  commandBase.extend({
     type: z.literal("agent.complete_task"),
     taskId: z.string().min(1),
     runId: z.string().min(1),

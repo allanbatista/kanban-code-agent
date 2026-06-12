@@ -334,15 +334,17 @@ Gate F1:
 
 | ID | Status | Owner | Planned files | Actual files | Done when | Evidencia requerida |
 |---|---|---|---|---|---|---|
-| F2.S1.T1 | Pending | architect | `packages/orchestrator/src/state-machine.js` | - | Transicoes de task saem de tabela/funcao pura | Tests cobrem idle->queued->running, complete, blocked, merge_pending, manual override. |
+| F2.S1.T1 | Done | architect | `packages/orchestrator/src/state-machine.js` | `packages/orchestrator/src/state-machine.js`, `tests/unit/scheduler.test.js` | Transicoes de task saem de tabela/funcao pura | `rtk pnpm test:unit` cobre idle->queued->running, complete, blocked, merge_pending, manual override. |
 | F2.S1.T2 | Pending | engineer | `packages/orchestrator/src/command-bus.js` | - | Um handler por command, sem god function | Tests atuais passam sem regressao. |
-| F2.S1.T3 | Pending | engineer | `packages/orchestrator/src/scheduler.js` | - | `Scheduler.tick()` encontra runnable tasks e inicia ate limites | Teste cria N subtasks e prova paralelismo maximo correto. |
-| F2.S1.T4 | Pending | engineer | `packages/fsdb/src/runtime-store.js` | - | Semaforos possuem acquire/release atomico com leaseId/runId | Tests simulam contencao e release em failure. |
+| F2.S1.T3 | Done | engineer | `packages/orchestrator/src/scheduler.js` | `packages/orchestrator/src/scheduler.js`, `packages/orchestrator/src/index.js`, `packages/core/src/contracts.js`, `packages/schemas/src/index.js`, `tests/unit/scheduler.test.js`, `tests/unit/contracts-fixtures.test.js` | `Scheduler.tick()` encontra runnable tasks e inicia ate limites | `rtk pnpm test:unit` cria tasks queued e prova duas iniciadas com tokens/semaforos. |
+| F2.S1.T4 | Done | engineer | `packages/fsdb/src/runtime-store.js` | `packages/fsdb/src/runtime-store.js`, `packages/fsdb/package.json`, `tests/unit/scheduler.test.js` | Semaforos possuem acquire/release atomico com leaseId/runId | `rtk pnpm test:unit` simula contencao e release. |
 | F2.S1.T5 | Pending | engineer | `apps/daemon/src/server.js` | - | Daemon roda scheduler loop configuravel e publica eventos | E2E prova task autoStart saindo de queued para running. |
 
 Gate F2:
 
 - `rtk pnpm test:unit`
+- `rtk pnpm lint`
+- `rtk pnpm test:pi`
 - teste de concorrencia com 5 subtasks, maxParallel 2, agent tokens 2, locks conflitantes.
 
 ### F3 - Runtime de agents, scopes de chat e roles
