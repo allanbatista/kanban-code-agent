@@ -388,15 +388,18 @@ Gate F4:
 
 | ID | Status | Owner | Planned files | Actual files | Done when | Evidencia requerida |
 |---|---|---|---|---|---|---|
-| F5.S1.T1 | Pending | engineer | `packages/git-worktree/src/index.js` | - | Parent feature worktree criado antes das subtasks | Git fixture valida branch parent e child. |
-| F5.S1.T2 | Pending | engineer | `packages/orchestrator/src/merge-coordinator.js` | - | Merge queue por parent usa semaforo `parent:<id>:merge` | Unit test prova merge sequencial real. |
-| F5.S1.T3 | Pending | review | `settings/roles/review.yaml`, prompts/tests | - | Review role recebe diff/status/evidence e decide bloqueio ou merge_ready | Unit test com finding bloqueante. |
-| F5.S1.T4 | Pending | deployment | `settings/roles/deployment.yaml`, `packages/orchestrator/src/deployment-service.js` | - | Deployment executa comandos configurados, registra release e rollback info | Teste command fake e artifact de deploy. |
-| F5.S1.T5 | Pending | quality | `tests/unit/git-worktree.test.js`, e2e | - | Conflito move task para blocked com evidencia | Fixture Git com conflito real. |
+| F5.S1.T1 | Done | engineer | `packages/git-worktree/src/index.js` | `packages/git-worktree/src/index.js`, `tests/unit/git-worktree.test.js` | Parent feature worktree criado antes das subtasks | `rtk pnpm test:unit` valida branch parent e child. |
+| F5.S1.T2 | Done | engineer | `packages/orchestrator/src/merge-coordinator.js` | `packages/orchestrator/src/merge-coordinator.js`, `packages/orchestrator/src/index.js`, `tests/unit/review-deployment.test.js`, `tests/unit/orchestrator.test.js` | Merge queue por parent usa semaforo `parent:<id>:merge` | `rtk pnpm test:unit` prova merge sequencial e busy task por parent. |
+| F5.S1.T3 | Done | review | `settings/roles/review.yaml`, prompts/tests | `packages/orchestrator/src/review-service.js`, `packages/core/src/roles.js`, `tests/unit/review-deployment.test.js` | Review role recebe diff/status/evidence e decide bloqueio ou merge_ready | `rtk pnpm test:unit` cobre finding critico bloqueante e clean evidence merge_ready. |
+| F5.S1.T4 | Done | deployment | `settings/roles/deployment.yaml`, `packages/orchestrator/src/deployment-service.js` | `packages/orchestrator/src/deployment-service.js`, `packages/core/src/roles.js`, `tests/unit/review-deployment.test.js` | Deployment executa comandos configurados, registra release e rollback info | `rtk pnpm test:unit` executa command fake e registra rollback. |
+| F5.S1.T5 | Done | quality | `tests/unit/git-worktree.test.js`, e2e | `tests/unit/git-worktree.test.js`, `tests/unit/orchestrator.test.js` | Conflito move task para blocked com evidencia | `rtk pnpm test:unit` usa fixture Git com conflito real e task blocked no orchestrator. |
 
 Gate F5:
 
 - `rtk pnpm test:unit`
+- `rtk pnpm lint`
+- `rtk pnpm test:pi`
+- `rtk pnpm test:e2e`
 - Git fixture: parent feature + 3 subtasks + merge sequencial + conflito.
 
 ### F6 - UI de equipe multiagente

@@ -9,6 +9,7 @@ import { appendJsonl, boardSnapshot, createTask, getTask, listTasks, moveTask, p
 import { appendChatMessage, readChatHistory } from "@kca/fsdb/chat-store";
 import { runBoardAssistant, loadPiSdk } from "@kca/pi-adapter";
 import { parseCommand, parseQuery, TaskSchema } from "@kca/schemas";
+import { findParentMergeBusy } from "./merge-coordinator.js";
 import { schedulerTick } from "./scheduler.js";
 
 const execFile = promisify(execFileCallback);
@@ -505,7 +506,7 @@ export async function handleCommand(input, root) {
     if (!current) throw new Error(`Task not found: ${command.taskId}`);
     const parentTaskId = current.worktree?.parentTaskId;
     if (parentTaskId) {
-      const busy = (await listTasks(root)).find((task) => task.id !== current.id && task.status === "merge_pending" && task.worktree?.parentTaskId === parentTaskId);
+      const busy = findParentMergeBusy(await listTasks(root), current);
       if (busy) {
         const task = TaskSchema.parse(await updateTask(command.taskId, { status: "blocked", column: "blocked" }, root, "merge.blocked"));
         result = { ok: false, commandId: command.commandId, task, merge: { ok: false, status: "blocked", reason: "parent_merge_busy", parentTaskId, busyTaskId: busy.id } };

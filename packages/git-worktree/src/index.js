@@ -79,6 +79,13 @@ export async function createWorktree({ repoPath, taskId, branch, root }) {
   return { ok: true, status: "created", ...metadata };
 }
 
+export async function createParentAndChildWorktrees({ repoPath, parentTaskId, parentBranch, childTaskId, childBranch, root }) {
+  const parent = await createWorktree({ repoPath, taskId: parentTaskId, branch: parentBranch, root });
+  if (!parent.ok) return { ok: false, status: parent.status, parent };
+  const child = await createWorktree({ repoPath: parent.worktreePath, taskId: childTaskId, branch: childBranch, root });
+  return { ok: child.ok, status: child.status, parent, child };
+}
+
 export async function readWorktreeMetadata(worktreePath) {
   return JSON.parse(await readFile(join(requireString(worktreePath, "worktreePath"), metadataFile), "utf8"));
 }

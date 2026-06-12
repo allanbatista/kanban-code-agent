@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createRepoFixture, createWorktree, isGitAvailable, mergeSubtask, readWorktreeMetadata, worktreeStatusSummary } from "../../packages/git-worktree/src/index.js";
+import { createParentAndChildWorktrees, createRepoFixture, createWorktree, isGitAvailable, mergeSubtask, readWorktreeMetadata, worktreeStatusSummary } from "../../packages/git-worktree/src/index.js";
 
 const exec = promisify(execFile);
 const hasGit = await isGitAvailable();
@@ -56,6 +56,22 @@ test("mergeSubtask merges only into recorded parent branch", { skip: !hasGit && 
   const merged = await mergeSubtask({ parentPath: fixture.repoPath, subtaskBranch: "task/task-2" });
   assert.equal(merged.status, "merged");
   assert.match(await readFile(join(fixture.repoPath, "feature.txt"), "utf8"), /done/);
+});
+
+test("parent feature worktree is created before child subtask worktree", { skip: !hasGit && "git unavailable" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-gwt-parent-"));
+  const fixture = await createRepoFixture({ root });
+  const created = await createParentAndChildWorktrees({
+    repoPath: fixture.repoPath,
+    parentTaskId: "parent-1",
+    parentBranch: "feature/parent-1",
+    childTaskId: "child-1",
+    childBranch: "task/child-1",
+    root: join(root, "_worktrees")
+  });
+  assert.equal(created.ok, true);
+  assert.equal((await readWorktreeMetadata(created.parent.worktreePath)).parentBranch, "main");
+  assert.equal((await readWorktreeMetadata(created.child.worktreePath)).parentBranch, "feature/parent-1");
 });
 
 test("mergeSubtask returns blocked conflict instead of throwing raw git errors", { skip: !hasGit && "git unavailable" }, async () => {
