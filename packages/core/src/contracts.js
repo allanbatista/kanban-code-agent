@@ -1,0 +1,61 @@
+export const COMMAND_TYPES = [
+  "task.create",
+  "task.update",
+  "task.move",
+  "task.run",
+  "task.interrupt",
+  "task.decompose",
+  "task.merge",
+  "agent.complete_task",
+  "agent.report_blocker",
+  "agent.request_user_input",
+  "agent.emit_artifact",
+  "settings.update"
+];
+
+export const QUERY_TYPES = [
+  "board.snapshot",
+  "task.detail",
+  "orchestrator.status",
+  "settings.scope",
+  "why_not_running"
+];
+
+export const EVENT_TYPES = [
+  "task.created",
+  "task.updated",
+  "task.move_requested",
+  "task.moved",
+  "task.blocked",
+  "task.unblocked",
+  "task.recovered",
+  "agent.queued",
+  "agent.started",
+  "agent.event",
+  "agent.checkpoint_requested",
+  "agent.interrupted",
+  "agent.completed",
+  "agent.failed",
+  "agent.input_requested",
+  "artifact.emitted",
+  "hook.started",
+  "hook.completed",
+  "hook.failed",
+  "worktree.created",
+  "worktree.updated",
+  "worktree.removed",
+  "subtasks.spawned",
+  "subtask.merged",
+  "merge.requested",
+  "merge.completed",
+  "merge.conflict",
+  "settings.updated"
+];
+
+export function commandEnvelope(type, payload = {}) {
+  return { type, commandId: payload.commandId || `cmd-${Date.now()}`, ...payload };
+}
+
+export function queryEnvelope(type, payload = {}) {
+  return { type, ...payload };
+}

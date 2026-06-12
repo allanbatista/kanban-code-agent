@@ -1,0 +1,13 @@
+node_modules/
+dist/
+playwright-report/
+test-results/
+.kca-data/
+settings/runtime/
+_worktrees/
+**/.env
+**/.env.*
+tmp/
+.features/
+/current_state/
+

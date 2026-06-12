@@ -1,0 +1,15 @@
+{
+  "name": "@kca/orchestrator",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@kca/agent-runtime": "workspace:*",
+    "@kca/fsdb": "workspace:*",
+    "@kca/git-worktree": "workspace:*",
+    "@kca/schemas": "workspace:*"
+  }
+}

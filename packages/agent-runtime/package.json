@@ -1,0 +1,13 @@
+{
+  "name": "@kca/agent-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@kca/fsdb": "workspace:*",
+    "@kca/pi-adapter": "workspace:*"
+  }
+}

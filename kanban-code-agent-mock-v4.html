@@ -1,0 +1,1933 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kanban Code Agent — Mock v4</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      --font-mono: "SF Mono", "Roboto Mono", ui-monospace, Menlo, Consolas, monospace;
+      --bg: #f7f7f4;
+      --canvas: #fbfbf8;
+      --surface: #ffffff;
+      --surface-soft: #f2f2ee;
+      --surface-hover: #ecece7;
+      --text: #101010;
+      --muted: #6d695f;
+      --muted-2: #969087;
+      --border: #deded8;
+      --border-strong: #c7c6bf;
+      --inverse: #111111;
+      --inverse-text: #ffffff;
+      --good: #186f45;
+      --warn: #8a5a00;
+      --bad: #94372f;
+      --info: #315c82;
+      --shadow: 0 22px 80px rgba(18, 18, 18, .08);
+      --shadow-soft: 0 1px 2px rgba(18, 18, 18, .05);
+      --focus: 0 0 0 4px rgba(17, 17, 17, .08);
+      --topbar-h: 72px;
+      --right-w: 420px;
+      --column-w: 326px;
+      --radius-xs: 8px;
+      --radius-sm: 12px;
+      --radius-md: 18px;
+      --radius-lg: 24px;
+    }
+
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #171717;
+      --canvas: #1d1d1b;
+      --surface: #222220;
+      --surface-soft: #2a2a27;
+      --surface-hover: #30302d;
+      --text: #f2f2ee;
+      --muted: #aaa69d;
+      --muted-2: #807c74;
+      --border: #393934;
+      --border-strong: #4c4b45;
+      --inverse: #f2f2ee;
+      --inverse-text: #111111;
+      --good: #74c69d;
+      --warn: #f0c56e;
+      --bad: #ef8a7e;
+      --info: #8dbadd;
+      --shadow: 0 24px 88px rgba(0, 0, 0, .32);
+      --shadow-soft: 0 1px 2px rgba(0, 0, 0, .22);
+      --focus: 0 0 0 4px rgba(242, 242, 238, .12);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top left, color-mix(in srgb, var(--surface-soft) 76%, transparent), transparent 34vw),
+        var(--bg);
+      color: var(--text);
+      font: 14px/1.45 var(--font-sans);
+      letter-spacing: -.006em;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--text);
+      min-height: 36px;
+      padding: 0 13px;
+      cursor: pointer;
+      transition: background .16s ease, border-color .16s ease, transform .16s ease, box-shadow .16s ease;
+    }
+    button:hover { background: var(--surface-hover); border-color: var(--border-strong); }
+    button:active { transform: translateY(1px); }
+    button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: none; box-shadow: var(--focus); border-color: var(--border-strong); }
+
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      outline: none;
+      transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
+    }
+    input, select { min-height: 42px; padding: 0 12px; }
+    textarea { min-height: 116px; padding: 11px 12px; resize: vertical; }
+    input::placeholder, textarea::placeholder { color: var(--muted-2); }
+
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 21px; line-height: 1.05; letter-spacing: -.04em; font-weight: 680; }
+    h2 { font-size: 15px; line-height: 1.2; letter-spacing: -.02em; font-weight: 670; }
+    h3 { font-size: 11px; line-height: 1.2; color: var(--muted); text-transform: uppercase; letter-spacing: .09em; font-weight: 760; }
+    p { color: var(--muted); }
+    code { font: 12px/1.4 var(--font-mono); }
+
+    .app { height: 100dvh; display: grid; grid-template-rows: var(--topbar-h) minmax(0, 1fr); }
+    .topbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 18px;
+      padding: 0 clamp(16px, 3vw, 34px);
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg) 82%, transparent);
+      backdrop-filter: blur(18px);
+    }
+    .brand { min-width: 0; display: flex; align-items: center; gap: 12px; }
+    .brand-mark {
+      width: 34px; height: 34px; flex: 0 0 auto;
+      display: grid; place-items: center;
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      background: var(--surface);
+      box-shadow: var(--shadow-soft);
+      font-weight: 760;
+      letter-spacing: -.05em;
+    }
+    .brand-copy { min-width: 0; display: grid; gap: 2px; }
+    .brand-copy strong { font-weight: 680; letter-spacing: -.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .brand-copy span { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .top-actions { display: flex; align-items: center; gap: 10px; }
+    .primary { background: var(--inverse); border-color: var(--inverse); color: var(--inverse-text); }
+    .primary:hover { background: color-mix(in srgb, var(--inverse) 88%, var(--surface)); border-color: color-mix(in srgb, var(--inverse) 88%, var(--surface)); }
+    .quiet { background: transparent; }
+    .ghost { border-color: transparent; background: transparent; color: var(--muted); }
+    .ghost:hover { border-color: var(--border); background: var(--surface-soft); color: var(--text); }
+    .icon-button { width: 40px; padding: 0; display: inline-grid; place-items: center; }
+
+    .workspace {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(360px, var(--right-w));
+      gap: 22px;
+      padding: 18px clamp(16px, 3vw, 34px) 20px;
+      align-items: stretch;
+    }
+    .main-area { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 12px; }
+    .control-row { min-width: 0; display: grid; grid-template-columns: minmax(260px, 440px) minmax(0, 1fr); align-items: center; gap: 10px; }
+    .search { position: relative; }
+    .search input { height: 40px; min-height: 40px; padding-left: 36px; border-radius: 999px; background: color-mix(in srgb, var(--surface) 88%, var(--bg)); }
+    .search::before {
+      content: ""; position: absolute; left: 14px; top: 50%; width: 13px; height: 13px;
+      border: 1.8px solid var(--muted-2); border-radius: 999px; transform: translateY(-50%); pointer-events: none;
+    }
+    .search::after {
+      content: ""; position: absolute; left: 26px; top: 25px; width: 6px; height: 1.8px;
+      border-radius: 99px; background: var(--muted-2); transform: rotate(42deg); pointer-events: none;
+    }
+    .segmented {
+      display: flex; align-items: center; gap: 4px; min-height: 40px; padding: 4px;
+      border: 1px solid var(--border); border-radius: 999px; background: var(--surface-soft);
+      overflow: auto hidden; scrollbar-width: none;
+    }
+    .segmented::-webkit-scrollbar { display: none; }
+    .segmented button { min-height: 30px; border: 0; padding: 0 11px; background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .segmented button.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow-soft); }
+
+    .board-scroll { min-width: 0; min-height: 0; overflow: auto hidden; padding: 2px 0 10px; scroll-snap-type: x proximity; }
+    .kanban { min-height: 100%; min-width: max-content; display: grid; grid-template-columns: repeat(6, var(--column-w)); gap: 14px; align-items: stretch; }
+    .column {
+      min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr);
+      border: 1px solid var(--border); border-radius: var(--radius-md);
+      background: color-mix(in srgb, var(--surface) 84%, var(--canvas)); overflow: hidden;
+      transition: background .16s ease, border-color .16s ease, transform .16s ease;
+      scroll-snap-align: start;
+    }
+    .column.drop-target { border-color: var(--border-strong); background: var(--surface); transform: translateY(-1px); }
+    .column-head {
+      position: sticky; top: 0; z-index: 2;
+      display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px;
+      min-height: 58px; padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--surface) 94%, transparent);
+      backdrop-filter: blur(12px);
+    }
+    .column-head h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .add-card { width: 34px; height: 34px; min-height: 34px; padding: 0; border-radius: 50%; font-size: 19px; line-height: 1; }
+    .cards { min-height: 0; display: grid; align-content: start; gap: 10px; overflow: auto; padding: 12px; }
+
+    .task, .draft-card, .empty-state, .side-panel, .section-card, .confirm, .settings-modal, .task-modal { border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow-soft); }
+    .task {
+      display: grid; gap: 12px; padding: 13px; border-radius: 16px; cursor: grab;
+      transition: border-color .16s ease, background .16s ease, transform .16s ease, box-shadow .16s ease;
+    }
+    .task:hover { border-color: var(--border-strong); transform: translateY(-1px); box-shadow: 0 8px 22px rgba(18, 18, 18, .06); }
+    :root[data-theme="dark"] .task:hover { box-shadow: 0 8px 22px rgba(0,0,0,.18); }
+    .task:active { cursor: grabbing; }
+    .task.dragging { opacity: .42; transform: scale(.98); }
+    .task.selected { border-color: var(--text); }
+    .task-head { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 10px; }
+    .task-title { min-width: 0; display: grid; gap: 5px; }
+    .task-title strong { overflow-wrap: anywhere; font-size: 14px; line-height: 1.25; font-weight: 660; letter-spacing: -.016em; }
+    .task-id { color: var(--muted-2); font: 600 11px/1 var(--font-mono); letter-spacing: 0; }
+    .task-menu { width: 30px; height: 30px; min-height: 30px; padding: 0; border-color: transparent; background: transparent; color: var(--muted); border-radius: 50%; }
+    .task-menu:hover { background: var(--surface-soft); border-color: var(--border); }
+    .task-copy { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+    .inline, .task-tags, .task-footer, .chat-meta, .chat-suggestions, .mini-row, .settings-footer, .modal-actions, .chat-composer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+    .task-footer { justify-content: space-between; gap: 10px; padding-top: 2px; }
+    .mini-meta { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted-2); font-size: 11.5px; white-space: nowrap; }
+    .avatar { width: 22px; height: 22px; display: inline-grid; place-items: center; flex: 0 0 auto; border: 1px solid var(--border); border-radius: 50%; background: var(--surface-soft); color: var(--text); font: 650 10px/1 var(--font-mono); }
+    .pill { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 24px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 11.5px; background: transparent; color: var(--muted); white-space: nowrap; }
+    .pill.soft { background: var(--surface-soft); border-color: transparent; }
+    .pill.done { color: var(--good); border-color: color-mix(in srgb, var(--good) 24%, var(--border)); background: color-mix(in srgb, var(--good) 8%, transparent); }
+    .pill.running, .pill.info { color: var(--info); border-color: color-mix(in srgb, var(--info) 24%, var(--border)); background: color-mix(in srgb, var(--info) 8%, transparent); }
+    .pill.blocked, .pill.failed { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 24%, var(--border)); background: color-mix(in srgb, var(--bad) 8%, transparent); }
+    .pill.queued, .pill.merge_pending, .pill.interrupting, .pill.validating { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 24%, var(--border)); background: color-mix(in srgb, var(--warn) 8%, transparent); }
+    .mono { font-family: var(--font-mono); letter-spacing: -.02em; }
+    .dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 999px; background: var(--text); opacity: .8; }
+    .dot.high { background: var(--bad); }
+    .dot.medium { background: var(--warn); }
+    .dot.low { background: var(--muted); }
+    .progress { height: 6px; border-radius: 999px; overflow: hidden; background: var(--surface-soft); }
+    .progress span { display: block; height: 100%; width: var(--value, 0%); border-radius: inherit; background: color-mix(in srgb, var(--text) 72%, var(--surface)); opacity: .86; }
+
+    .empty-state { display: grid; gap: 6px; padding: 18px 14px; color: var(--muted); border-radius: 16px; border-style: dashed; background: color-mix(in srgb, var(--surface) 45%, transparent); }
+    .empty-state strong { color: var(--text); font-weight: 620; font-size: 13px; }
+    .draft-card { display: grid; gap: 10px; padding: 12px; border-radius: 16px; background: color-mix(in srgb, var(--surface) 92%, var(--surface-soft)); }
+    .draft-card textarea { min-height: 84px; }
+
+    .right-rail { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 10px; }
+    .rail-tabs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; padding: 4px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-soft); }
+    .rail-tabs button { min-height: 32px; border: 0; background: transparent; color: var(--muted); font-size: 12px; }
+    .rail-tabs button.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow-soft); }
+    .side-panel { min-width: 0; min-height: 0; display: none; border-radius: 22px; overflow: hidden; background: color-mix(in srgb, var(--surface) 90%, var(--canvas)); }
+    .side-panel.active { display: grid; }
+    .chat-panel { grid-template-rows: auto auto minmax(0, 1fr) auto; }
+    .chat-head { display: grid; gap: 4px; padding: 18px 18px 12px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 95%, transparent); }
+    .chat-head strong { font-size: 16px; font-weight: 650; letter-spacing: -.02em; }
+    .chat-head p { font-size: 12.5px; color: var(--muted); }
+    .chat-tools { display: grid; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface-soft) 44%, var(--surface)); }
+    .chat-suggestions button { min-height: 30px; padding: 0 10px; font-size: 12px; }
+    .chat-stream { min-height: 0; overflow: auto; display: flex; flex-direction: column; justify-content: flex-end; gap: 12px; padding: 18px; }
+    .chat-message { max-width: 92%; display: grid; gap: 8px; }
+    .chat-message.assistant { align-self: start; }
+    .chat-message.user { align-self: end; }
+    .chat-bubble { padding: 12px 14px; border-radius: 18px; border: 1px solid var(--border); background: var(--surface); color: var(--text); white-space: pre-wrap; line-height: 1.5; box-shadow: var(--shadow-soft); }
+    .chat-message.user .chat-bubble { background: color-mix(in srgb, var(--surface-soft) 76%, var(--surface)); }
+    .chat-meta { font-size: 11px; color: var(--muted); }
+    .chat-composer { display: grid; gap: 12px; padding: 16px 18px 18px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 92%, var(--bg)); overflow: hidden; }
+    .chat-composer textarea { min-height: 110px; max-height: 220px; resize: none; border-radius: 18px; padding: 14px; background: var(--surface); }
+    .chat-composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+
+    .ops-panel { grid-template-rows: auto minmax(0, 1fr); }
+    .ops-head { display: grid; gap: 4px; padding: 18px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 95%, transparent); }
+    .ops-stream { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 12px; padding: 14px; }
+    .section-card { display: grid; gap: 12px; padding: 14px; border-radius: 18px; background: var(--surface); }
+    .dep-flow { display: grid; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 16px; background: color-mix(in srgb, var(--surface-soft) 45%, var(--surface)); }
+    .dep-track { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px; }
+    .dep-node { min-width: 0; display: grid; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+    .dep-node strong { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dep-arrow { color: var(--muted-2); font-weight: 700; }
+    .textarea-small { min-height: 86px; }
+    .section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .agent-row, .subtask-row, .event-row, .file-row, .lock-row, .project-row, .hook-row, .setting-row { display: grid; gap: 8px; padding: 11px; border: 1px solid var(--border); border-radius: 14px; background: color-mix(in srgb, var(--surface) 82%, var(--surface-soft)); }
+    .agent-row-top, .subtask-row-top, .event-row-top, .file-row-top, .hook-row-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+    .agent-row strong, .subtask-row strong, .file-row strong, .project-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+    .small-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .field { display: grid; gap: 7px; min-width: 0; }
+    .field label { color: var(--muted); font-size: 12px; font-weight: 620; }
+    .checkbox-row { display: flex; align-items: center; gap: 9px; min-height: 34px; color: var(--muted); font-size: 13px; }
+    .checkbox-row input { width: auto; min-height: auto; }
+
+    .modal-backdrop, .settings-backdrop, .confirm-backdrop { position: fixed; inset: 0; z-index: 40; display: none; place-items: center; padding: 22px; background: rgba(0, 0, 0, .42); backdrop-filter: blur(8px); }
+    .modal-backdrop.open, .settings-backdrop.open, .confirm-backdrop.open { display: grid; }
+    .task-modal { width: min(1180px, 94vw); height: min(840px, 90vh); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border-radius: 28px; background: var(--surface); box-shadow: var(--shadow); }
+    .modal-head, .settings-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; min-height: 72px; padding: 18px 20px; border-bottom: 1px solid var(--border); }
+    .modal-head-title, .settings-head-title { min-width: 0; display: grid; gap: 3px; }
+    .modal-head-title strong, .settings-head-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 660; letter-spacing: -.018em; }
+    .modal-head-title span, .settings-head-title span { color: var(--muted); font-size: 12px; }
+    .modal-body { min-height: 0; display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; }
+    .modal-left { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); border-right: 1px solid var(--border); overflow: hidden; }
+    .modal-tabs { display: flex; gap: 4px; padding: 10px; border-bottom: 1px solid var(--border); overflow: auto hidden; scrollbar-width: none; background: color-mix(in srgb, var(--surface) 94%, var(--bg)); }
+    .modal-tabs::-webkit-scrollbar { display: none; }
+    .modal-tabs button { min-height: 32px; padding: 0 10px; font-size: 12px; white-space: nowrap; border-color: transparent; background: transparent; color: var(--muted); }
+    .modal-tabs button.active { background: var(--surface-soft); color: var(--text); border-color: var(--border); }
+    .modal-content { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 14px; padding: 16px; }
+    .modal-chat { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: color-mix(in srgb, var(--surface-soft) 35%, var(--surface)); }
+    .modal-chat-title { display: grid; gap: 4px; padding: 16px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 94%, var(--bg)); }
+    .modal-chat-stream { min-height: 0; overflow: auto; display: flex; flex-direction: column; justify-content: flex-end; gap: 12px; padding: 16px; }
+    .modal-chat-composer { display: grid; gap: 10px; padding: 12px 16px 16px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 95%, var(--bg)); }
+    .modal-chat-composer textarea { min-height: 76px; max-height: 160px; resize: none; border-radius: 16px; padding: 12px; }
+    .modal-actions { min-height: 72px; padding: 16px 20px; justify-content: flex-end; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 92%, var(--bg)); }
+
+    .settings-modal { width: 90vw; height: 80vh; max-width: 1280px; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border-radius: 28px; background: var(--surface); box-shadow: var(--shadow); }
+    .settings-body { min-height: 0; display: grid; grid-template-columns: 280px minmax(0, 1fr); overflow: hidden; }
+    .settings-tree { min-height: 0; overflow: auto; border-right: 1px solid var(--border); background: color-mix(in srgb, var(--surface-soft) 48%, var(--surface)); padding: 14px; }
+    .tree-group { display: grid; gap: 6px; margin-bottom: 16px; }
+    .tree-group-title { color: var(--muted-2); font-size: 11px; font-weight: 760; letter-spacing: .08em; text-transform: uppercase; padding: 0 8px; }
+    .tree-button { width: 100%; justify-content: flex-start; border-radius: 12px; border-color: transparent; background: transparent; color: var(--muted); min-height: 36px; padding: 0 10px; text-align: left; }
+    .tree-button.active { background: var(--surface); color: var(--text); border-color: var(--border); box-shadow: var(--shadow-soft); }
+    .settings-content { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 14px; padding: 18px; background: var(--surface); }
+    .settings-footer { min-height: 64px; padding: 14px 18px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 92%, var(--bg)); justify-content: space-between; }
+    .settings-footer-actions { display: flex; align-items: center; gap: 8px; }
+    .remove-mini { width: 28px; height: 28px; min-height: 28px; padding: 0; border-radius: 50%; }
+
+    .confirm { width: min(480px, 94vw); display: grid; gap: 14px; border-radius: 24px; padding: 18px; box-shadow: var(--shadow); }
+    .confirm-actions { justify-content: flex-end; }
+    .toast { position: fixed; right: 18px; bottom: 18px; z-index: 80; display: none; max-width: min(420px, calc(100vw - 36px)); padding: 12px 14px; border: 1px solid var(--border); border-radius: 16px; background: var(--inverse); color: var(--inverse-text); box-shadow: var(--shadow); font-size: 13px; }
+    .toast.show { display: block; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+    @media (max-width: 1180px) {
+      :root { --right-w: 370px; --column-w: 302px; }
+      .workspace { gap: 16px; }
+    }
+    @media (max-width: 1024px) {
+      .topbar { grid-template-columns: 1fr; height: auto; min-height: var(--topbar-h); padding-top: 12px; padding-bottom: 12px; }
+      .top-actions { justify-content: space-between; }
+      .workspace { grid-template-columns: 1fr; }
+      .right-rail { min-height: 620px; }
+      .modal-body { grid-template-columns: 1fr; }
+      .modal-left { border-right: 0; border-bottom: 1px solid var(--border); }
+      .task-modal { height: 92vh; }
+      .settings-body { grid-template-columns: 220px minmax(0, 1fr); }
+    }
+    @media (max-width: 680px) {
+      :root { --topbar-h: 116px; --column-w: 84vw; }
+      .workspace { padding: 14px 10px 16px; gap: 14px; }
+      .topbar { padding-left: 12px; padding-right: 12px; }
+      .control-row { grid-template-columns: 1fr; }
+      .modal-backdrop, .settings-backdrop { padding: 0; }
+      .task-modal, .settings-modal { width: 100vw; height: 100dvh; max-width: none; border-radius: 0; border: 0; }
+      .settings-body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+      .settings-tree { border-right: 0; border-bottom: 1px solid var(--border); display: flex; gap: 8px; overflow: auto hidden; padding: 10px; }
+      .tree-group { display: contents; }
+      .tree-group-title { display: none; }
+      .tree-button { min-width: max-content; }
+      .field-grid, .small-grid { grid-template-columns: 1fr; }
+      .modal-actions, .chat-composer-foot, .confirm-actions { align-items: stretch; flex-direction: column-reverse; }
+      .modal-actions button, .confirm-actions button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand" aria-label="Kanban Code Agent">
+        <div class="brand-mark" aria-hidden="true">K</div>
+        <div class="brand-copy">
+          <strong>Kanban Code Agent</strong>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button type="button" class="quiet" id="openSettings">Configurações</button>
+        <button type="button" class="quiet" id="openNewTask">Nova task</button>
+        <button class="icon-button quiet" id="themeToggle" type="button" aria-label="Alternar tema" title="Alternar tema">◐</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="main-area" aria-label="Board Kanban">
+        <div class="control-row">
+          <label class="search" aria-label="Buscar tasks">
+            <span class="sr-only">Buscar tasks</span>
+            <input id="searchInput" placeholder="Buscar task, agent, branch, skill ou dependência" autocomplete="off">
+          </label>
+          <div class="segmented" id="statusFilters" aria-label="Filtro operacional"></div>
+        </div>
+        <div class="board-scroll">
+          <div class="kanban" id="kanbanBoard"></div>
+        </div>
+      </section>
+
+      <aside class="right-rail" aria-label="Painel lateral">
+        <div class="rail-tabs">
+          <button type="button" class="active" data-rail="chat">Assistant</button>
+          <button type="button" data-rail="ops">Orchestrator</button>
+        </div>
+
+        <section class="side-panel chat-panel active" id="rail-chat" aria-label="Chat principal">
+          <div class="chat-head">
+            <strong>Assistant do board</strong>
+            <p>Gerencia o Kanban, explica bloqueios, cria tasks, decompõe features e conversa com o orchestrator.</p>
+          </div>
+          <div class="chat-tools">
+            <div class="chat-meta">
+              <span class="pill soft" id="chatTaskContext">Sem task selecionada</span>
+              <span class="pill soft" id="chatBoardStats">0 tasks</span>
+            </div>
+            <div class="chat-suggestions">
+              <button type="button" data-chat-prompt="Mostre por que algumas tasks ainda não iniciaram.">Por que não iniciou?</button>
+              <button type="button" data-chat-prompt="Decomponha a task master selecionada em subtasks paralelas.">Decompor master</button>
+              <button type="button" data-chat-prompt="Quais worktrees e merges estão pendentes?">Worktrees</button>
+              <button type="button" data-chat-prompt="Sugira a próxima ação mais segura do board.">Próxima ação</button>
+            </div>
+          </div>
+          <div class="chat-stream" id="chatStream"></div>
+          <form class="chat-composer" id="chatForm">
+            <textarea id="chatInput" placeholder="Peça ao agent principal para criar, mover, decompor, pausar, retomar ou explicar tasks."></textarea>
+            <div class="chat-composer-foot">
+              <span>Mock local · respostas simuladas</span>
+              <div class="chat-composer-actions">
+                <button type="button" class="quiet" id="clearChat">Limpar</button>
+                <button type="submit" class="primary">Enviar</button>
+              </div>
+            </div>
+          </form>
+        </section>
+
+        <section class="side-panel ops-panel" id="rail-ops" aria-label="Orchestrator">
+          <div class="ops-head">
+            <strong>Orchestrator</strong>
+            <p>Fila, agents, worktrees, locks e decisões de execução por task.</p>
+          </div>
+          <div class="ops-stream" id="opsStream"></div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="taskModal" role="dialog" aria-modal="true" aria-labelledby="taskModalTitle">
+    <form class="task-modal" id="taskForm">
+      <header class="modal-head">
+        <div class="modal-head-title">
+          <strong id="taskModalTitle">Task</strong>
+          <span id="taskModalSubtitle">Configuração, execução e chat da task</span>
+        </div>
+        <button class="icon-button quiet" id="closeTaskModal" type="button" aria-label="Fechar modal">×</button>
+      </header>
+      <div class="modal-body">
+        <section class="modal-left" aria-label="Configuração da task">
+          <div class="modal-tabs" id="taskTabs"></div>
+          <div class="modal-content" id="taskContent"></div>
+        </section>
+        <aside class="modal-chat" aria-label="Chat interno da task">
+          <div class="modal-chat-title">
+            <strong>Chat da task</strong>
+            <p id="modalChatContext">Converse com a sessão dedicada desta task.</p>
+          </div>
+          <div class="modal-chat-stream" id="modalChatStream"></div>
+          <div class="modal-chat-composer">
+            <textarea id="modalChatInput" placeholder="Pergunte sobre escopo, execução, dependências, hooks ou próximos passos desta task."></textarea>
+            <div class="chat-composer-foot">
+              <span>Contexto isolado por task</span>
+              <div class="chat-composer-actions">
+                <button type="button" class="quiet" id="clearModalChat">Limpar</button>
+                <button type="button" class="primary" id="sendModalChat">Enviar</button>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+      <footer class="modal-actions">
+        <button type="button" class="quiet" id="cancelTaskModal">Cancelar</button>
+        <button type="submit" class="primary">Salvar task</button>
+      </footer>
+    </form>
+  </div>
+
+  <div class="settings-backdrop" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <form class="settings-modal" id="settingsForm">
+      <header class="settings-head">
+        <div class="settings-head-title">
+          <strong id="settingsTitle">Configurações</strong>
+          <span>Edite o comportamento do board, agents, runtime, hooks e repositórios cadastrados.</span>
+        </div>
+        <button class="icon-button quiet" id="closeSettings" type="button" aria-label="Fechar configurações">×</button>
+      </header>
+      <div class="settings-body">
+        <nav class="settings-tree" id="settingsTree" aria-label="Menu de configurações"></nav>
+        <section class="settings-content" id="settingsContent" aria-label="Conteúdo de configurações"></section>
+      </div>
+      <footer class="settings-footer">
+        <span class="pill soft" id="settingsDirtyState">Alterações locais</span>
+        <div class="settings-footer-actions">
+          <button type="button" class="quiet" id="resetSettings">Restaurar exemplo</button>
+          <button type="submit" class="primary">Salvar configurações</button>
+        </div>
+      </footer>
+    </form>
+  </div>
+
+  <div class="confirm-backdrop" id="moveConfirm" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <section class="confirm">
+      <div>
+        <h2 id="confirmTitle">Interromper execução?</h2>
+        <p id="confirmCopy">Mover esta task agora vai interromper a sessão atual do agent e registrar uma movimentação manual.</p>
+      </div>
+      <div class="confirm-actions">
+        <button type="button" class="quiet" id="cancelMove">Cancelar</button>
+        <button type="button" class="quiet" id="checkpointMove">Mover após checkpoint</button>
+        <button type="button" class="primary" id="confirmMove">Interromper e mover</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script>
+    const storage = {
+      tasks: "kca-mock-v4-tasks",
+      settings: "kca-mock-v4-settings",
+      theme: "kca-mock-v4-theme"
+    };
+
+    const defaultColumns = [
+      { id: "inbox", label: "Entrada", agent: "assistant", autoStart: false, wip: null, hooks: [] },
+      { id: "definition", label: "Definição", agent: "architect", autoStart: true, wip: 3, hooks: ["normalize-description", "suggest-subtasks"] },
+      { id: "build", label: "Construção", agent: "engineer", autoStart: true, wip: 4, hooks: ["ensure-worktree", "collect-diff-summary"] },
+      { id: "validate", label: "Validação", agent: "validator", autoStart: true, wip: 2, hooks: ["run-checks", "summarize-evidence"] },
+      { id: "blocked", label: "Bloqueado", agent: null, autoStart: false, wip: null, hooks: ["summarize-blocker"] },
+      { id: "closed", label: "Encerrado", agent: null, autoStart: false, wip: null, hooks: ["archive-session"] }
+    ];
+
+    const defaultAgents = [
+      { id: "assistant", label: "Interface Assistant", status: "online", tokens: "board", skills: ["kanban-management", "task-writing", "orchestrator-tools"], instructions: "Gerencie o Kanban e explique decisões de execução de forma objetiva." },
+      { id: "architect", label: "Architect", status: "idle", tokens: "1/1", skills: ["spec", "planning", "acceptance-criteria"], instructions: "Refine contexto, critérios de aceite, riscos e decomposição." },
+      { id: "engineer", label: "Engineer", status: "running", tokens: "2/2", skills: ["git-worktree", "typescript", "testing"], instructions: "Implemente dentro do worktree da task e finalize por tool tipada." },
+      { id: "validator", label: "Validator", status: "running", tokens: "1/1", skills: ["qa", "evidence", "merge-readiness"], instructions: "Valide, gere evidências e solicite merge apenas com critérios atendidos." },
+      { id: "hook-agent", label: "Hook Agent", status: "idle", tokens: "0/1", skills: ["summary", "routing", "small-actions"], instructions: "Execute ações curtas disparadas por hooks de coluna." }
+    ];
+
+    const defaultSettings = {
+      general: {
+        appName: "Kanban Code Agent",
+        language: "pt-BR",
+        confirmRunningMove: true,
+        assistantAutoSuggest: true
+      },
+      persistence: {
+        taskStateFormat: "YAML",
+        contextFormat: "Markdown",
+        eventsFormat: "JSONL",
+        versionTaskData: true,
+        versionRuntimeSessions: false
+      },
+      columns: defaultColumns,
+      agents: defaultAgents,
+      skills: [
+        { id: "git-worktree", enabled: true, description: "Operações seguras de worktree, branch e merge." },
+        { id: "testing", enabled: true, description: "Executa testes e sintetiza evidências." },
+        { id: "spec", enabled: true, description: "Transforma intenção em escopo verificável." },
+        { id: "orchestrator-tools", enabled: true, description: "Permite mover, bloquear, concluir e dividir tasks por tools tipadas." }
+      ],
+      hooks: [
+        { id: "normalize-description", trigger: "onEnter", agent: "hook-agent", enabled: true, prompt: "Normalize título, descrição e critérios mínimos da task." },
+        { id: "suggest-subtasks", trigger: "onAgentComplete", agent: "architect", enabled: true, prompt: "Sugira subtasks paralelizáveis com dependências explícitas." },
+        { id: "summarize-blocker", trigger: "onEnter", agent: "hook-agent", enabled: true, prompt: "Resuma o bloqueio em uma decisão acionável para o usuário." }
+      ],
+      runtime: {
+        maxParallelTasks: 4,
+        maxParallelMerges: 1,
+        engineerTokens: 2,
+        validatorTokens: 1,
+        interruptOnManualMove: true,
+        resumeSessions: true
+      },
+      worktrees: {
+        createPerTask: true,
+        subtaskFromParentFeature: true,
+        mergeSubtaskIntoParent: true,
+        cleanupClosed: false,
+        mergePolicy: "Sequencial no parent"
+      },
+      projects: [
+        { id: "kanban-code-agent", label: "Kanban Code Agent", repo: "~/Workspaces/kanban-code-agent", enabled: true },
+        { id: "gmt", label: "GMT UI", repo: "~/Workspaces/gmt", enabled: true },
+        { id: "docs", label: "Docs", repo: "~/Workspaces/docs", enabled: false }
+      ],
+      permissions: {
+        allowShell: true,
+        allowNetwork: false,
+        requireApprovalForMerge: true,
+        requireApprovalForDelete: true
+      },
+      appearance: {
+        density: "comfortable",
+        showProgress: true,
+        showAgentOnCard: true,
+        showProjectOnCard: true
+      }
+    };
+
+    const initialTasks = [
+      {
+        id: "KCA-101",
+        title: "Modelar banco em arquivos abertos",
+        description: "Definir layout de dados com task.yaml, eventos JSONL, Markdown e runtime não versionado, mantendo tudo legível para agents.",
+        projectTargets: ["kanban-code-agent"],
+        column: "definition",
+        status: "running",
+        kind: "task",
+        priority: "Alta",
+        agent: "architect",
+        owner: "Produto",
+        branch: "kca/KCA-101",
+        worktreeEnabled: true,
+        sessionState: "Retomável",
+        progress: 64,
+        hooks: ["normalize-description", "suggest-subtasks"],
+        skills: ["spec", "fsdb"],
+        needs: [],
+        provides: ["contract:fsdb", "schema:task"],
+        locks: ["packages/schemas/**"],
+        subtasks: [],
+        events: [
+          ["09:10", "task.created", "user"],
+          ["09:18", "agent.started", "orchestrator"],
+          ["09:29", "hook.completed", "normalize-description"]
+        ],
+        files: ["task.yaml", "description.md", "events.jsonl"],
+        chat: []
+      },
+      {
+        id: "KCA-200",
+        title: "Task master: agents e worktrees",
+        description: "Feature ampla que gera subtasks paralelas: adapter do SDK, worktree manager, scheduler e merge sequencial no worktree da feature.",
+        projectTargets: ["kanban-code-agent"],
+        column: "build",
+        status: "running",
+        kind: "master",
+        priority: "Alta",
+        agent: "engineer",
+        owner: "Engenharia",
+        branch: "kca/KCA-200",
+        worktreeEnabled: true,
+        sessionState: "Streaming",
+        progress: 42,
+        hooks: ["ensure-worktree", "collect-diff-summary"],
+        skills: ["pi-sdk", "git-worktree", "scheduler"],
+        needs: ["contract:fsdb"],
+        provides: ["runtime:agent", "service:worktree"],
+        locks: ["packages/pi-adapter/**", "packages/git-worktree/**"],
+        subtasks: [
+          { id: "KCA-200A", title: "Adapter do SDK", status: "running", needs: [], provides: ["runtime:agent"], branch: "kca/KCA-200A" },
+          { id: "KCA-200B", title: "Worktree manager", status: "queued", needs: ["contract:fsdb"], provides: ["service:worktree"], branch: "kca/KCA-200B" },
+          { id: "KCA-200C", title: "Merge coordinator", status: "blocked", needs: ["service:worktree"], provides: ["service:merge"], branch: "kca/KCA-200C" }
+        ],
+        events: [
+          ["08:40", "task.master.created", "assistant"],
+          ["08:52", "subtasks.spawned", "architect"],
+          ["09:04", "worktree.created", "orchestrator"],
+          ["09:38", "agent.streaming", "engineer"]
+        ],
+        files: ["subtasks.yaml", "worktree.yaml", "plan.md"],
+        chat: []
+      },
+      {
+        id: "KCA-210",
+        title: "Scheduler com semáforos e dependências",
+        description: "Executar subtasks prontas respeitando needs/provides, locks de arquivos, tokens globais, tokens por agent e slot único de merge.",
+        projectTargets: ["kanban-code-agent"],
+        column: "build",
+        status: "queued",
+        kind: "task",
+        priority: "Alta",
+        agent: "engineer",
+        owner: "Runtime",
+        branch: "kca/KCA-210",
+        worktreeEnabled: true,
+        sessionState: "Aguardando token",
+        progress: 8,
+        hooks: ["ensure-worktree"],
+        skills: ["scheduler", "locks"],
+        needs: ["schema:task"],
+        provides: ["service:scheduler"],
+        locks: ["packages/orchestrator/**"],
+        subtasks: [],
+        events: [["09:51", "task.queued", "orchestrator"]],
+        files: ["dependencies.yaml"],
+        chat: []
+      },
+      {
+        id: "KCA-230",
+        title: "UI minimalista para runtime de agents",
+        description: "Expor agents ativos, sessões, eventos, hooks, worktrees e dependências sem poluir o Kanban principal.",
+        projectTargets: ["kanban-code-agent", "gmt"],
+        column: "validate",
+        status: "merge_pending",
+        kind: "task",
+        priority: "Média",
+        agent: "validator",
+        owner: "UX",
+        branch: "kca/KCA-230",
+        worktreeEnabled: true,
+        sessionState: "Validando",
+        progress: 92,
+        hooks: ["run-checks", "summarize-evidence"],
+        skills: ["qa", "ui-review"],
+        needs: ["service:scheduler"],
+        provides: ["ui:runtime"],
+        locks: ["apps/web/src/**"],
+        subtasks: [],
+        events: [["10:04", "tests.completed", "validator"], ["10:07", "merge.requested", "orchestrator"]],
+        files: ["evidence/ui-runtime.md", "patches/KCA-230.diff"],
+        chat: []
+      },
+      {
+        id: "KCA-240",
+        title: "Resolver conflito em package exports",
+        description: "Build quebrou porque duas subtasks alteraram o contrato público de packages/core. Precisa decisão humana ou rebase coordenado.",
+        projectTargets: ["kanban-code-agent"],
+        column: "blocked",
+        status: "blocked",
+        kind: "task",
+        priority: "Alta",
+        agent: null,
+        owner: "Orchestrator",
+        branch: "kca/KCA-240",
+        worktreeEnabled: true,
+        sessionState: "Interrompida",
+        progress: 18,
+        hooks: ["summarize-blocker"],
+        skills: ["merge", "conflict-summary"],
+        needs: ["contract:core-api"],
+        provides: [],
+        locks: ["packages/core/package.json"],
+        subtasks: [],
+        events: [["10:22", "merge.conflict", "orchestrator"], ["10:23", "task.moved", "orchestrator"]],
+        files: ["summaries/blocker.md"],
+        chat: []
+      },
+      {
+        id: "KCA-250",
+        title: "Documentar formato aberto das tasks",
+        description: "Gerar documentação humana e agent-readable para YAML, Markdown, JSONL, runtime e versionamento.",
+        projectTargets: ["docs"],
+        column: "closed",
+        status: "done",
+        kind: "task",
+        priority: "Baixa",
+        agent: "reviewer",
+        owner: "Docs",
+        branch: "kca/KCA-250",
+        worktreeEnabled: false,
+        sessionState: "Arquivada",
+        progress: 100,
+        hooks: ["archive-session"],
+        skills: ["docs"],
+        needs: ["schema:task"],
+        provides: ["docs:fsdb"],
+        locks: ["docs/**"],
+        subtasks: [],
+        events: [["11:06", "agent.completed", "reviewer"], ["11:09", "task.closed", "user"]],
+        files: ["docs/open-task-format.md"],
+        chat: []
+      }
+    ];
+
+    const taskTabs = ["Resumo", "Aceite", "Execução", "Worktree", "Dependências", "Subtasks", "Hooks", "Eventos", "Arquivos"];
+    const statusFilterOptions = [
+      { id: "all", label: "Tudo" },
+      { id: "running", label: "Rodando" },
+      { id: "queued", label: "Fila" },
+      { id: "blocked", label: "Bloqueadas" },
+      { id: "merge_pending", label: "Merge" },
+      { id: "done", label: "Concluídas" }
+    ];
+
+    const settingsMenu = [
+      { group: "Geral", items: [
+        { id: "general", label: "Workspace" },
+        { id: "appearance", label: "Interface" },
+        { id: "persistence", label: "Persistência" }
+      ]},
+      { group: "Board", items: [
+        { id: "columns", label: "Colunas" },
+        { id: "movement", label: "Movimento manual" },
+        { id: "column-hooks", label: "Hooks por coluna" }
+      ]},
+      { group: "Agents", items: [
+        { id: "agents", label: "Catálogo de agents" },
+        { id: "skills", label: "Skills" },
+        { id: "tools", label: "Tools" }
+      ]},
+      { group: "Runtime", items: [
+        { id: "concurrency", label: "Concorrência" },
+        { id: "worktrees", label: "Worktrees" },
+        { id: "sessions", label: "Sessões" }
+      ]},
+      { group: "Projetos", items: [
+        { id: "projects", label: "Repositórios" }
+      ]},
+      { group: "Segurança", items: [
+        { id: "permissions", label: "Permissões" }
+      ]}
+    ];
+
+    const state = {
+      theme: localStorage.getItem(storage.theme) || "light",
+      settings: loadSettings(),
+      tasks: loadTasks(),
+      query: "",
+      statusFilter: "all",
+      selectedTaskId: null,
+      draggedId: null,
+      draftColumn: null,
+      modalTaskId: null,
+      modalMode: "edit",
+      taskTab: "Resumo",
+      taskDraft: null,
+      pendingMove: null,
+      rail: "chat",
+      settingsSection: "general",
+      settingsDraft: null,
+      chatMessages: [
+        { role: "assistant", time: timeNow(), text: "Olá. Posso gerenciar o Kanban, explicar por que uma task não iniciou, decompor uma master task em subtasks paralelas, ou acionar o orchestrator." }
+      ]
+    };
+
+    const $ = (query, root = document) => root.querySelector(query);
+    const $$ = (query, root = document) => Array.from(root.querySelectorAll(query));
+
+    function timeNow() {
+      return new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" }).format(new Date());
+    }
+
+    function loadTasks() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(storage.tasks) || "null");
+        if (Array.isArray(saved) && saved.length) return saved;
+      } catch (error) {
+        console.warn("Não foi possível carregar tasks", error);
+      }
+      return structuredClone(initialTasks);
+    }
+
+    function loadSettings() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(storage.settings) || "null");
+        if (saved && typeof saved === "object") return mergeDeep(structuredClone(defaultSettings), saved);
+      } catch (error) {
+        console.warn("Não foi possível carregar configurações", error);
+      }
+      return structuredClone(defaultSettings);
+    }
+
+    function saveTasks() { localStorage.setItem(storage.tasks, JSON.stringify(state.tasks)); }
+    function saveSettings() { localStorage.setItem(storage.settings, JSON.stringify(state.settings)); }
+
+    function mergeDeep(target, source) {
+      for (const key of Object.keys(source || {})) {
+        if (Array.isArray(source[key])) target[key] = source[key];
+        else if (source[key] && typeof source[key] === "object") target[key] = mergeDeep(target[key] || {}, source[key]);
+        else target[key] = source[key];
+      }
+      return target;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>\"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" })[char]);
+    }
+
+    function normalizeText(value) {
+      return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    }
+
+    function applyTheme() {
+      document.documentElement.dataset.theme = state.theme;
+      localStorage.setItem(storage.theme, state.theme);
+      const toggle = $("#themeToggle");
+      toggle.textContent = state.theme === "dark" ? "☼" : "◐";
+      toggle.setAttribute("aria-pressed", String(state.theme === "dark"));
+    }
+
+    function notify(message) {
+      const toast = $("#toast");
+      toast.textContent = message;
+      toast.classList.add("show");
+      clearTimeout(notify.timer);
+      notify.timer = setTimeout(() => toast.classList.remove("show"), 1800);
+    }
+
+    function formatDateTime(date) {
+      return new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(date);
+    }
+
+    function initial(value) { return String(value || "?").trim().slice(0, 1).toUpperCase(); }
+    function statusTone(status) { return String(status || "idle").replace(/_/g, "_"); }
+    function priorityClass(priority) {
+      const value = normalizeText(priority);
+      if (value.includes("alta")) return "high";
+      if (value.includes("media")) return "medium";
+      return "low";
+    }
+
+    function projectLabel(id) {
+      const project = state.settings.projects.find((item) => item.id === id);
+      return project ? project.label : id;
+    }
+
+    function agentLabel(id) {
+      if (!id) return "Sem agent";
+      const agent = state.settings.agents.find((item) => item.id === id);
+      return agent ? agent.label : id;
+    }
+
+    function getSelectedTask() { return state.tasks.find((task) => task.id === state.selectedTaskId) || null; }
+    function getCurrentTask() { return state.tasks.find((task) => task.id === state.modalTaskId) || null; }
+    function columns() { return state.settings.columns; }
+
+    function taskMatchesQuery(task) {
+      const query = normalizeText(state.query);
+      const statusOk = state.statusFilter === "all" || task.status === state.statusFilter;
+      if (!statusOk) return false;
+      if (!query) return true;
+      const haystack = normalizeText([
+        task.id, task.title, task.description, task.status, task.kind, task.priority, task.agent, task.owner, task.branch,
+        ...(task.projectTargets || []), ...(task.hooks || []), ...(task.skills || []), ...(task.needs || []), ...(task.provides || []), ...(task.locks || [])
+      ].join(" "));
+      return haystack.includes(query);
+    }
+
+    function visibleTasks() { return state.tasks.filter(taskMatchesQuery); }
+    function tasksInColumn(columnId) { return state.tasks.filter((task) => task.column === columnId && taskMatchesQuery(task)); }
+
+    function renderStatusFilters() {
+      $("#statusFilters").innerHTML = statusFilterOptions.map((option) => `<button type="button" class="${state.statusFilter === option.id ? "active" : ""}" data-status-filter="${option.id}">${escapeHtml(option.label)}</button>`).join("");
+    }
+
+    function renderBoard() {
+      $("#kanbanBoard").innerHTML = columns().map(renderColumn).join("");
+      renderStatusFilters();
+      renderChatHeaderMeta();
+      renderOps();
+    }
+
+    function renderColumn(column) {
+      const tasks = tasksInColumn(column.id);
+      const cards = tasks.length
+        ? tasks.map(renderTask).join("")
+        : `<div class="empty-state"><strong>Nenhuma task</strong><span>${state.query || state.statusFilter !== "all" ? "A busca ou filtro não encontrou tasks nesta coluna." : "Crie uma task ou arraste uma existente para cá."}</span></div>`;
+      return `
+        <section class="column" data-column-id="${escapeHtml(column.id)}">
+          <header class="column-head">
+            <h2>${escapeHtml(column.label)}</h2>
+            <button class="add-card" type="button" data-new-task="${escapeHtml(column.id)}" aria-label="Nova task em ${escapeHtml(column.label)}">+</button>
+          </header>
+          <div class="cards" data-card-list="${escapeHtml(column.id)}">
+            ${renderDraft(column.id)}
+            ${cards}
+          </div>
+        </section>
+      `;
+    }
+
+    function renderDraft(columnId) {
+      if (state.draftColumn !== columnId) return "";
+      return `
+        <form class="draft-card" data-draft-column="${escapeHtml(columnId)}">
+          <input name="title" placeholder="Título da task" autocomplete="off" required>
+          <textarea name="description" placeholder="Descrição curta"></textarea>
+          <div class="modal-actions" style="padding:0; border:0; min-height:auto;">
+            <button type="button" class="ghost" data-cancel-draft="${escapeHtml(columnId)}">Cancelar</button>
+            <button type="submit" class="primary">Criar</button>
+          </div>
+        </form>
+      `;
+    }
+
+    function renderTask(task) {
+      const projects = (task.projectTargets || []).slice(0, 2).map(projectLabel).join(", ") || "Sem projeto";
+      const selected = state.selectedTaskId === task.id ? "selected" : "";
+      const tags = [
+        `<span class="pill ${escapeHtml(task.status)}">${escapeHtml(labelStatus(task.status))}</span>`,
+        `<span class="pill"><span class="dot ${priorityClass(task.priority)}"></span>${escapeHtml(task.priority)}</span>`,
+        state.settings.appearance.showAgentOnCard ? `<span class="pill soft">${escapeHtml(agentLabel(task.agent))}</span>` : "",
+        state.settings.appearance.showProjectOnCard ? `<span class="pill soft">${escapeHtml(projects)}</span>` : ""
+      ].filter(Boolean).join("");
+      return `
+        <article class="task ${selected}" draggable="true" tabindex="0" data-task-id="${escapeHtml(task.id)}" aria-label="Abrir ${escapeHtml(task.title)}">
+          <div class="task-head">
+            <div class="task-title">
+              <span class="task-id">${escapeHtml(task.id)} · ${escapeHtml(task.kind)}</span>
+              <strong>${escapeHtml(task.title)}</strong>
+            </div>
+            <button class="task-menu" type="button" data-open-task="${escapeHtml(task.id)}" aria-label="Abrir task">•••</button>
+          </div>
+          <p class="task-copy">${escapeHtml(task.description)}</p>
+          <div class="task-tags">${tags}</div>
+          ${state.settings.appearance.showProgress ? `<div class="progress" aria-label="Progresso"><span style="--value:${Number(task.progress || 0)}%"></span></div>` : ""}
+          <footer class="task-footer">
+            <span class="mini-meta"><span class="avatar">${escapeHtml(initial(task.owner))}</span>${escapeHtml(task.owner || "Sem dono")}</span>
+            <span class="mini-meta">${escapeHtml(task.branch || "sem branch")}</span>
+          </footer>
+        </article>
+      `;
+    }
+
+    function labelStatus(status) {
+      const map = { running: "Rodando", queued: "Fila", blocked: "Bloqueada", merge_pending: "Merge", done: "Concluída", idle: "Idle", paused: "Pausada", failed: "Falha", interrupting: "Interrompendo", validating: "Validando", canceled: "Cancelada" };
+      return map[status] || status || "Idle";
+    }
+
+    function createTask(columnId, title, description) {
+      const now = new Date();
+      const column = columns().find((item) => item.id === columnId) || columns()[0];
+      const task = {
+        id: `KCA-${String(Date.now()).slice(-5)}`,
+        title: title.trim(),
+        description: description.trim() || "Sem descrição.",
+        projectTargets: [],
+        column: column.id,
+        status: column.autoStart && column.agent ? "queued" : "idle",
+        kind: "task",
+        priority: "Média",
+        agent: column.agent,
+        owner: "Você",
+        branch: `kca/${String(Date.now()).slice(-5)}`,
+        worktreeEnabled: true,
+        sessionState: "Nova",
+        progress: 0,
+        hooks: [...(column.hooks || [])],
+        skills: [],
+        needs: [],
+        provides: [],
+        locks: [],
+        subtasks: [],
+        events: [[timeNow(), "task.created", "user"]],
+        files: ["task.yaml", "description.md", "events.jsonl"],
+        chat: []
+      };
+      state.tasks.unshift(task);
+      state.draftColumn = null;
+      saveTasks();
+      renderBoard();
+      notify("Task criada.");
+    }
+
+    function moveTask(taskId, columnId, force = false) {
+      const task = state.tasks.find((item) => item.id === taskId);
+      const column = columns().find((item) => item.id === columnId);
+      if (!task || !column || task.column === columnId) return;
+      const running = ["running"].includes(task.status);
+      if (running && state.settings.general.confirmRunningMove && !force) {
+        state.pendingMove = { taskId, columnId };
+        $("#confirmCopy").textContent = `Mover ${task.id} para ${column.label} vai interromper a sessão atual do agent e registrar uma movimentação manual.`;
+        $("#moveConfirm").classList.add("open");
+        return;
+      }
+      task.column = columnId;
+      if (running && state.settings.runtime.interruptOnManualMove) {
+        task.status = column.agent ? "queued" : "idle";
+        task.sessionState = "Interrompida por movimento manual";
+        task.events.unshift([timeNow(), "agent.interrupted", "orchestrator"]);
+      }
+      task.agent = column.agent;
+      task.hooks = Array.from(new Set([...(task.hooks || []), ...(column.hooks || [])]));
+      task.events.unshift([timeNow(), "task.moved", "user"]);
+      saveTasks();
+      renderBoard();
+      notify(`Movida para ${column.label}.`);
+    }
+
+    function openTaskModal(taskId) {
+      const task = state.tasks.find((item) => item.id === taskId);
+      if (!task) return;
+      state.modalMode = "edit";
+      state.modalTaskId = taskId;
+      state.selectedTaskId = taskId;
+      state.taskTab = "Resumo";
+      state.taskDraft = structuredClone(task);
+      if (!Array.isArray(state.taskDraft.chat) || !state.taskDraft.chat.length) {
+        state.taskDraft.chat = [{ role: "assistant", time: timeNow(), text: `Estou com o contexto da task ${task.id}. Posso ajudar com escopo, execução, subtasks, hooks ou próximos passos.` }];
+      }
+      $("#taskModalTitle").textContent = task.title;
+      $("#taskModalSubtitle").textContent = `${task.id} · ${labelStatus(task.status)} · ${agentLabel(task.agent)}`;
+      renderTaskTabs();
+      renderTaskContent();
+      renderModalChat();
+      renderChatHeaderMeta();
+      $("#taskModal").classList.add("open");
+    }
+
+    function openNewTaskModal() {
+      state.modalMode = "new";
+      state.modalTaskId = null;
+      state.selectedTaskId = null;
+      state.taskTab = "Resumo";
+      state.taskDraft = {
+        id: `KCA-${String(Date.now()).slice(-5)}`,
+        title: "Nova task",
+        description: "",
+        acceptance: ["Critério verificável de pronto"],
+        projectTargets: [],
+        column: "inbox",
+        status: "idle",
+        kind: "task",
+        priority: "Média",
+        agent: "assistant",
+        owner: "Você",
+        branch: `kca/${String(Date.now()).slice(-5)}`,
+        worktreeEnabled: true,
+        sessionState: "Nova",
+        progress: 0,
+        hooks: [], skills: [], needs: [], provides: [], locks: [], subtasks: [],
+        events: [[timeNow(), "task.drafted", "user"]],
+        files: ["task.yaml", "description.md", "events.jsonl"],
+        chat: [{ role: "assistant", time: timeNow(), text: "Crie a task com o projeto/repositório alvo, agent desejado e critérios mínimos." }]
+      };
+      $("#taskModalTitle").textContent = "Nova task";
+      $("#taskModalSubtitle").textContent = "A própria task define quais projetos serão alterados";
+      renderTaskTabs();
+      renderTaskContent();
+      renderModalChat();
+      $("#taskModal").classList.add("open");
+    }
+
+    function closeTaskModal() {
+      state.modalTaskId = null;
+      state.taskDraft = null;
+      $("#taskModal").classList.remove("open");
+    }
+
+    function renderTaskTabs() {
+      $("#taskTabs").innerHTML = taskTabs.map((tab) => `<button type="button" class="${state.taskTab === tab ? "active" : ""}" data-task-tab="${escapeHtml(tab)}">${escapeHtml(tab)}</button>`).join("");
+    }
+
+    function updateDraftFromInputs() {
+      const draft = state.taskDraft;
+      if (!draft) return;
+      const get = (id) => $(`#${id}`);
+      if (get("taskTitle")) draft.title = get("taskTitle").value;
+      if (get("taskDescription")) draft.description = get("taskDescription").value;
+      if (get("taskAcceptance")) draft.acceptance = splitLines(get("taskAcceptance").value);
+      if (get("taskPlan")) draft.plan = splitLines(get("taskPlan").value);
+      if (get("taskColumn")) draft.column = get("taskColumn").value;
+      if (get("taskStatus")) draft.status = get("taskStatus").value;
+      if (get("taskKind")) draft.kind = get("taskKind").value;
+      if (get("taskPriority")) draft.priority = get("taskPriority").value;
+      if (get("taskAgent")) draft.agent = get("taskAgent").value || null;
+      if (get("taskOwner")) draft.owner = get("taskOwner").value;
+      if (get("taskProjects")) draft.projectTargets = splitList(get("taskProjects").value);
+      if (get("taskBranch")) draft.branch = get("taskBranch").value;
+      if (get("taskProgress")) draft.progress = Number(get("taskProgress").value || 0);
+      if (get("taskNeeds")) draft.needs = splitList(get("taskNeeds").value);
+      if (get("taskProvides")) draft.provides = splitList(get("taskProvides").value);
+      if (get("taskLocks")) draft.locks = splitList(get("taskLocks").value);
+      if (get("taskHooks")) draft.hooks = splitList(get("taskHooks").value);
+      if (get("taskSkills")) draft.skills = splitList(get("taskSkills").value);
+      if (get("taskWorktreeEnabled")) draft.worktreeEnabled = get("taskWorktreeEnabled").checked;
+      if (get("taskSessionState")) draft.sessionState = get("taskSessionState").value;
+    }
+
+    function splitList(value) {
+      return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+    }
+
+    function splitLines(value) {
+      return String(value || "").split("\n").map((item) => item.replace(/^[-*\s]+/, "").trim()).filter(Boolean);
+    }
+
+    function renderTaskContent() {
+      const draft = state.taskDraft;
+      if (!draft) return;
+      const content = $("#taskContent");
+      const agentOptions = [`<option value="">Sem agent</option>`, ...state.settings.agents.map((agent) => `<option value="${escapeHtml(agent.id)}" ${draft.agent === agent.id ? "selected" : ""}>${escapeHtml(agent.label)}</option>`)].join("");
+      const columnOptions = columns().map((column) => `<option value="${escapeHtml(column.id)}" ${draft.column === column.id ? "selected" : ""}>${escapeHtml(column.label)}</option>`).join("");
+
+      if (state.taskTab === "Resumo") {
+        content.innerHTML = `
+          <div class="section-card">
+            <div class="section-title"><h3>Essencial</h3><span class="pill ${escapeHtml(draft.status)}">${escapeHtml(labelStatus(draft.status))}</span></div>
+            <div class="field"><label for="taskTitle">Título</label><input id="taskTitle" value="${escapeHtml(draft.title)}" required></div>
+            <div class="field"><label for="taskDescription">Descrição</label><textarea id="taskDescription" placeholder="Explique a entrega, contexto e definição de pronto.">${escapeHtml(draft.description)}</textarea></div>
+            <div class="field-grid">
+              <div class="field"><label for="taskColumn">Coluna</label><select id="taskColumn">${columnOptions}</select></div>
+              <div class="field"><label for="taskStatus">Status operacional</label><select id="taskStatus">${["idle","queued","running","interrupting","validating","paused","blocked","merge_pending","done","failed","canceled"].map(s => `<option value="${s}" ${draft.status === s ? "selected" : ""}>${labelStatus(s)}</option>`).join("")}</select></div>
+              <div class="field"><label for="taskKind">Tipo</label><select id="taskKind"><option ${draft.kind === "task" ? "selected" : ""}>task</option><option ${draft.kind === "master" ? "selected" : ""}>master</option><option ${draft.kind === "subtask" ? "selected" : ""}>subtask</option></select></div>
+              <div class="field"><label for="taskPriority">Prioridade</label><select id="taskPriority">${["Baixa","Média","Alta"].map(p => `<option ${draft.priority === p ? "selected" : ""}>${p}</option>`).join("")}</select></div>
+              <div class="field"><label for="taskAgent">Agent responsável</label><select id="taskAgent">${agentOptions}</select></div>
+              <div class="field"><label for="taskOwner">Dono</label><input id="taskOwner" value="${escapeHtml(draft.owner || "")}"></div>
+            </div>
+            <div class="field"><label for="taskProjects">Projetos/repositórios alvo</label><input id="taskProjects" value="${escapeHtml((draft.projectTargets || []).join(", "))}" placeholder="kanban-code-agent, gmt"></div>
+          </div>
+          <div class="section-card">
+            <div class="section-title"><h3>Contratos</h3><span class="pill soft">needs / provides</span></div>
+            <div class="field"><label for="taskNeeds">Precisa de</label><input id="taskNeeds" value="${escapeHtml((draft.needs || []).join(", "))}" placeholder="schema:task, service:scheduler"></div>
+            <div class="field"><label for="taskProvides">Entrega</label><input id="taskProvides" value="${escapeHtml((draft.provides || []).join(", "))}" placeholder="ui:runtime, service:merge"></div>
+          </div>
+        `;
+      }
+
+      if (state.taskTab === "Aceite") {
+        const acceptance = (draft.acceptance && draft.acceptance.length ? draft.acceptance : ["O escopo está claro para um agent executar.", "A mudança pode ser validada com evidências objetivas."]);
+        const plan = (draft.plan && draft.plan.length ? draft.plan : ["Refinar contexto", "Executar no worktree da task", "Validar e registrar evidências"]);
+        content.innerHTML = `
+          <div class="section-card">
+            <div class="section-title"><h3>Critérios de aceite</h3><span class="pill soft">verificável</span></div>
+            <p>Use frases objetivas. O agent deve conseguir transformar cada item em checagem, evidência ou decisão.</p>
+            <div class="field"><label for="taskAcceptance">Checklist</label><textarea class="textarea-small" id="taskAcceptance" placeholder="Um critério por linha">${escapeHtml(acceptance.map(item => `- ${item}`).join("\n"))}</textarea></div>
+          </div>
+          <div class="section-card">
+            <div class="section-title"><h3>Plano sugerido</h3><span class="pill soft">agent-readable</span></div>
+            <div class="field"><label for="taskPlan">Passos</label><textarea class="textarea-small" id="taskPlan" placeholder="Um passo por linha">${escapeHtml(plan.map(item => `- ${item}`).join("\n"))}</textarea></div>
+          </div>
+        `;
+      }
+
+      if (state.taskTab === "Execução") {
+        content.innerHTML = `
+          <div class="section-card">
+            <div class="section-title"><h3>Runtime</h3><span class="pill ${escapeHtml(draft.status)}">${escapeHtml(labelStatus(draft.status))}</span></div>
+            <div class="field-grid">
+              <div class="field"><label for="taskProgress">Progresso</label><input id="taskProgress" type="number" min="0" max="100" value="${Number(draft.progress || 0)}"></div>
+              <div class="field"><label for="taskSessionState">Sessão</label><input id="taskSessionState" value="${escapeHtml(draft.sessionState || "")}"></div>
+            </div>
+            <div class="inline">
+              <button type="button" class="quiet" data-sim-action="pause">Pausar agent</button>
+              <button type="button" class="quiet" data-sim-action="resume">Retomar sessão</button>
+              <button type="button" class="quiet" data-sim-action="complete">Marcar como concluída</button>
+            </div>
+          </div>
+          <div class="section-card">
+            <div class="section-title"><h3>Locks</h3><span class="pill soft">${(draft.locks || []).length}</span></div>
+            <div class="field"><label for="taskLocks">Arquivos/áreas reservadas</label><input id="taskLocks" value="${escapeHtml((draft.locks || []).join(", "))}" placeholder="packages/core/**, apps/web/**"></div>
+            ${(draft.locks || []).map(lock => `<div class="lock-row"><strong>${escapeHtml(lock)}</strong><span class="pill soft">reservado por ${escapeHtml(draft.id)}</span></div>`).join("") || `<p>Nenhum lock declarado.</p>`}
+          </div>
+        `;
+      }
+
+      if (state.taskTab === "Worktree") {
+        content.innerHTML = `
+          <div class="section-card">
+            <div class="section-title"><h3>Worktree da task</h3><span class="pill ${draft.worktreeEnabled ? "done" : "soft"}">${draft.worktreeEnabled ? "ativo" : "desativado"}</span></div>
+            <label class="checkbox-row"><input type="checkbox" id="taskWorktreeEnabled" ${draft.worktreeEnabled ? "checked" : ""}> Criar worktree dedicado para esta task</label>
+            <div class="field"><label for="taskBranch">Branch da task</label><input id="taskBranch" value="${escapeHtml(draft.branch || "")}"></div>
+            <div class="small-grid">
+              <div class="setting-row"><strong>Isolamento</strong><p>Cada task roda no próprio diretório de trabalho.</p></div>
+              <div class="setting-row"><strong>Subtasks</strong><p>Subtasks partem da feature parent e voltam para ela.</p></div>
+            </div>
+          </div>
+        `;
+      }
+
+      if (state.taskTab === "Dependências") {
+        const needs = draft.needs || [];
+        const provides = draft.provides || [];
+        const locks = draft.locks || [];
+        content.innerHTML = `
+          <div class="section-card">
+            <div class="section-title"><h3>Contratos da task</h3><span class="pill soft">needs / provides</span></div>
+            <div class="field"><label for="taskNeeds">Precisa de</label><input id="taskNeeds" value="${escapeHtml(needs.join(", "))}" placeholder="schema:task, service:scheduler"></div>
+            <div class="field"><label for="taskProvides">Entrega</label><input id="taskProvides" value="${escapeHtml(provides.join(", "))}" placeholder="ui:runtime, service:merge"></div>
+            <div class="dep-flow">
+              <div class="dep-track">
+                <div class="dep-node"><strong>Entrada</strong><span class="pill soft">${escapeHtml(needs.join(", ") || "sem dependência")}</span></div>
+                <span class="dep-arrow">→</span>
+                <div class="dep-node"><strong>${escapeHtml(draft.id)}</strong><span class="pill ${escapeHtml(draft.status)}">${escapeHtml(labelStatus(draft.status))}</span></div>
+                <span class="dep-arrow">→</span>
+                <div class="dep-node"><strong>Saída</strong><span class="pill soft">${escapeHtml(provides.join(", ") || "a declarar")}</span></div>
+              </div>
+              <p>Essa visão não é uma tela DAG separada: é apenas um resumo local da task para explicar fila, paralelismo e bloqueios.</p>
+            </div>
+          </div>
+          <div class="section-card">
+            <div class="section-title"><h3>Locks e semáforos</h3><span class="pill soft">concorrência</span></div>
+            <div class="field"><label for="taskLocks">Arquivos/áreas reservadas</label><input id="taskLocks" value="${escapeHtml(locks.join(", "))}" placeholder="packages/core/**, apps/web/**"></div>
+            ${locks.map(lock => `<div class="lock-row"><strong>${escapeHtml(lock)}</strong><span class="pill soft">lock por ${escapeHtml(draft.id)}</span></div>`).join("") || `<p>Nenhum lock declarado.</p>`}
+          </div>
+        `;
+      }
+
+      if (state.taskTab === "Subtasks") {
+        content.innerHTML = `
+          <div class="section-card">
+            <div class="section-title"><h3>Subtasks paralelas</h3><button type="button" class="quiet" id="addSubtask">Adicionar</button></div>
+            <p>Use subtasks quando uma feature puder ser dividida em entregas com dependências claras. Cada subtask pode rodar em paralelo quando tiver acesso ao que precisa.</p>
+            ${(draft.subtasks || []).map((subtask, index) => `
+              <div class="subtask-row">
+                <div class="subtask-row-top"><strong>${escapeHtml(subtask.id)} · ${escapeHtml(subtask.title)}</strong><span class="pill ${escapeHtml(subtask.status)}">${escapeHtml(labelStatus(subtask.status))}</span></div>
+                <div class="inline"><span class="pill soft">needs: ${(subtask.needs || []).join(", ") || "—"}</span><span class="pill soft">provides: ${(subtask.provides || []).join(", ") || "—"}</span></div>
+                <div class="field"><label>Branch</label><input data-subtask-branch="${index}" value="${escapeHtml(subtask.branch || "")}"></div>
+              </div>
+            `).join("") || `<div class="empty-state"><strong>Sem subtasks</strong><span>Transforme esta task em master para dividir o trabalho.</span></div>`}
+          </div>
+        `;
+      }
+
+      if (state.taskTab === "Hooks") {
+        content.innerHTML = `
+          <div class="section-card">
+            <div class="section-title"><h3>Hooks da task</h3><span class="pill soft">coluna + task</span></div>
+            <div class="field"><label for="taskHooks">Hooks ativos</label><input id="taskHooks" value="${escapeHtml((draft.hooks || []).join(", "))}" placeholder="normalize-description, run-checks"></div>
+            <div class="field"><label for="taskSkills">Skills carregadas</label><input id="taskSkills" value="${escapeHtml((draft.skills || []).join(", "))}" placeholder="git-worktree, testing"></div>
+            ${state.settings.hooks.map(hook => `<div class="hook-row"><div class="hook-row-top"><strong>${escapeHtml(hook.id)}</strong><span class="pill soft">${escapeHtml(hook.trigger)}</span></div><p>${escapeHtml(hook.prompt)}</p></div>`).join("")}
+          </div>
+        `;
+      }
+
+      if (state.taskTab === "Eventos") {
+        content.innerHTML = `
+          <div class="section-card">
+            <div class="section-title"><h3>Timeline</h3><span class="pill soft">append-only</span></div>
+            ${(draft.events || []).map(event => `<div class="event-row"><div class="event-row-top"><strong>${escapeHtml(event[1])}</strong><span class="pill soft">${escapeHtml(event[0])}</span></div><p>ator: ${escapeHtml(event[2])}</p></div>`).join("") || `<p>Nenhum evento registrado.</p>`}
+          </div>
+        `;
+      }
+
+      if (state.taskTab === "Arquivos") {
+        content.innerHTML = `
+          <div class="section-card">
+            <div class="section-title"><h3>Arquivos da task</h3><button type="button" class="quiet" id="addFileRef">Adicionar referência</button></div>
+            ${(draft.files || []).map((file, index) => `<div class="file-row"><div class="file-row-top"><strong>${escapeHtml(file)}</strong><button type="button" class="remove-mini quiet" data-remove-file="${index}">×</button></div></div>`).join("") || `<p>Nenhuma referência vinculada.</p>`}
+          </div>
+        `;
+      }
+    }
+
+    function saveTaskModal() {
+      updateDraftFromInputs();
+      const draft = state.taskDraft;
+      if (!draft) return;
+      draft.title = draft.title.trim() || "Task sem título";
+      draft.description = draft.description.trim() || "Sem descrição.";
+      draft.events = draft.events || [];
+      draft.events.unshift([timeNow(), state.modalMode === "new" ? "task.created" : "task.updated", "user"]);
+      if (state.modalMode === "new") {
+        state.tasks.unshift(structuredClone(draft));
+      } else {
+        const index = state.tasks.findIndex((task) => task.id === state.modalTaskId);
+        if (index >= 0) state.tasks[index] = structuredClone(draft);
+      }
+      saveTasks();
+      state.selectedTaskId = draft.id;
+      closeTaskModal();
+      renderBoard();
+      notify("Task salva.");
+    }
+
+    function renderModalChat() {
+      const draft = state.taskDraft;
+      if (!draft) return;
+      $("#modalChatContext").textContent = `${draft.id} · ${draft.title}`;
+      $("#modalChatStream").innerHTML = (draft.chat || []).map(message => `
+        <article class="chat-message ${escapeHtml(message.role)}">
+          <div class="chat-meta"><span class="avatar">${message.role === "assistant" ? "A" : "V"}</span><span>${message.role === "assistant" ? "Assistant" : "Você"}</span><span>${escapeHtml(message.time)}</span></div>
+          <div class="chat-bubble">${escapeHtml(message.text)}</div>
+        </article>
+      `).join("");
+      $("#modalChatStream").scrollTop = $("#modalChatStream").scrollHeight;
+    }
+
+    function sendModalChat(text) {
+      const clean = String(text || "").trim();
+      const draft = state.taskDraft;
+      if (!clean || !draft) return;
+      draft.chat = draft.chat || [];
+      draft.chat.push({ role: "user", time: timeNow(), text: clean });
+      draft.chat.push({ role: "assistant", time: timeNow(), text: buildTaskReply(clean, draft) });
+      renderModalChat();
+    }
+
+    function buildTaskReply(prompt, task) {
+      const lower = normalizeText(prompt);
+      if (lower.includes("subtask") || lower.includes("divid") || lower.includes("paralel")) {
+        return `Para ${task.id}, eu dividiria em unidades com needs/provides explícitos, cada uma com worktree próprio e merge de volta na feature parent. Evite duas subtasks editando o mesmo lock.`;
+      }
+      if (lower.includes("hook")) {
+        return `Hooks atuais: ${(task.hooks || []).join(", ") || "nenhum"}. Sugestão: use hooks curtos para normalizar contexto, validar saída e resumir bloqueios.`;
+      }
+      if (lower.includes("bloque") || lower.includes("depend")) {
+        return `Dependências atuais de ${task.id}: ${(task.needs || []).join(", ") || "nenhuma"}. Entregas declaradas: ${(task.provides || []).join(", ") || "nenhuma"}.`;
+      }
+      return `Analisando ${task.id}: mantenha escopo claro, projetos alvo explícitos e finalize a etapa usando uma tool tipada para o orchestrator decidir a próxima coluna.`;
+    }
+
+    function renderChat() {
+      $("#chatStream").innerHTML = state.chatMessages.map(message => `
+        <article class="chat-message ${escapeHtml(message.role)}">
+          <div class="chat-meta"><span class="avatar">${message.role === "assistant" ? "A" : "V"}</span><span>${message.role === "assistant" ? "Assistant" : "Você"}</span><span>${escapeHtml(message.time)}</span></div>
+          <div class="chat-bubble">${escapeHtml(message.text)}</div>
+        </article>
+      `).join("");
+      $("#chatStream").scrollTop = $("#chatStream").scrollHeight;
+      renderChatHeaderMeta();
+    }
+
+    function sendChat(text) {
+      const clean = String(text || "").trim();
+      if (!clean) return;
+      state.chatMessages.push({ role: "user", time: timeNow(), text: clean });
+      state.chatMessages.push({ role: "assistant", time: timeNow(), text: buildBoardReply(clean) });
+      renderChat();
+    }
+
+    function buildBoardReply(prompt) {
+      const lower = normalizeText(prompt);
+      const selected = getSelectedTask();
+      const visible = visibleTasks();
+      const blocked = visible.filter((task) => task.status === "blocked" || task.column === "blocked");
+      const queued = visible.filter((task) => task.status === "queued");
+      const running = visible.filter((task) => task.status === "running");
+
+      if (lower.includes("nao iniciou") || lower.includes("não iniciou") || lower.includes("fila")) {
+        return queued.length
+          ? `Tasks em fila: ${queued.map(task => task.id).join(", ")}.
+Motivos prováveis: tokens de agent ocupados, dependências needs ainda não entregues ou locks reservados por outra task.`
+          : "Não há tasks em fila no filtro atual.";
+      }
+      if (lower.includes("decomponha") || lower.includes("subtask")) {
+        if (!selected) return "Selecione uma task master antes de pedir decomposição.";
+        return `Para ${selected.id}, eu criaria subtasks independentes por área de lock, declarando needs/provides e limitando merges a um por vez no parent.`;
+      }
+      if (lower.includes("worktree") || lower.includes("merge")) {
+        const pending = visible.filter((task) => task.status === "merge_pending");
+        return `Worktrees ativos no filtro: ${visible.filter(task => task.worktreeEnabled).length}. Merges pendentes: ${pending.map(task => task.id).join(", ") || "nenhum"}.`;
+      }
+      if (lower.includes("proxima") || lower.includes("próxima")) {
+        if (blocked.length) return `A próxima ação mais segura é destravar ${blocked[0].id}: ${blocked[0].title}.`;
+        if (queued.length) return `A próxima ação mais segura é verificar tokens e dependências de ${queued[0].id}.`;
+        return running.length ? `Acompanhe ${running[0].id} até o próximo checkpoint.` : "Crie ou refine uma task na Entrada.";
+      }
+      return selected
+        ? `Task selecionada: ${selected.id}. Posso explicar dependências, sugerir subtasks, preparar critérios de aceite ou simular uma movimentação.`
+        : "Posso analisar gargalos, explicar fila, criar tasks, decompor uma master task ou revisar configurações.";
+    }
+
+    function renderChatHeaderMeta() {
+      const selected = getSelectedTask();
+      const tasks = visibleTasks();
+      const blocked = tasks.filter((task) => task.column === "blocked" || task.status === "blocked").length;
+      $("#chatTaskContext").textContent = selected ? `${selected.id} · ${selected.title}` : "Sem task selecionada";
+      $("#chatBoardStats").textContent = `${tasks.length} tasks · ${blocked} bloqueada${blocked === 1 ? "" : "s"}`;
+    }
+
+    function renderOps() {
+      const running = state.tasks.filter((task) => task.status === "running");
+      const queued = state.tasks.filter((task) => task.status === "queued");
+      const merge = state.tasks.filter((task) => task.status === "merge_pending");
+      $("#opsStream").innerHTML = `
+        <div class="section-card">
+          <div class="section-title"><h3>Capacidade</h3><span class="pill soft">${running.length}/${state.settings.runtime.maxParallelTasks}</span></div>
+          <div class="small-grid">
+            <div class="setting-row"><strong>${running.length}</strong><p>tasks rodando</p></div>
+            <div class="setting-row"><strong>${queued.length}</strong><p>na fila</p></div>
+            <div class="setting-row"><strong>${merge.length}</strong><p>aguardando merge</p></div>
+            <div class="setting-row"><strong>${state.tasks.filter(t => t.worktreeEnabled).length}</strong><p>worktrees ativos</p></div>
+          </div>
+        </div>
+        <div class="section-card">
+          <div class="section-title"><h3>Agents</h3><span class="pill soft">tokens</span></div>
+          ${state.settings.agents.map(agent => `<div class="agent-row"><div class="agent-row-top"><strong>${escapeHtml(agent.label)}</strong><span class="pill ${agent.status === "running" ? "running" : agent.status === "online" ? "done" : "soft"}">${escapeHtml(agent.status)}</span></div><div class="inline"><span class="pill soft">${escapeHtml(agent.tokens)}</span>${agent.skills.slice(0,3).map(skill => `<span class="pill soft">${escapeHtml(skill)}</span>`).join("")}</div></div>`).join("")}
+        </div>
+        <div class="section-card">
+          <div class="section-title"><h3>Bloqueios</h3><span class="pill blocked">${state.tasks.filter(t => t.status === "blocked").length}</span></div>
+          ${state.tasks.filter(t => t.status === "blocked").map(task => `<div class="event-row"><div class="event-row-top"><strong>${escapeHtml(task.id)}</strong><span class="pill blocked">bloqueada</span></div><p>${escapeHtml(task.title)}</p></div>`).join("") || `<p>Nenhum bloqueio no momento.</p>`}
+        </div>
+      `;
+    }
+
+    function openSettings() {
+      state.settingsDraft = structuredClone(state.settings);
+      renderSettingsTree();
+      renderSettingsContent();
+      $("#settingsModal").classList.add("open");
+    }
+
+    function closeSettings() {
+      state.settingsDraft = null;
+      $("#settingsModal").classList.remove("open");
+    }
+
+    function renderSettingsTree() {
+      $("#settingsTree").innerHTML = settingsMenu.map(group => `
+        <div class="tree-group">
+          <div class="tree-group-title">${escapeHtml(group.group)}</div>
+          ${group.items.map(item => `<button type="button" class="tree-button ${state.settingsSection === item.id ? "active" : ""}" data-settings-section="${escapeHtml(item.id)}">${escapeHtml(item.label)}</button>`).join("")}
+        </div>
+      `).join("");
+    }
+
+    function settingsDraft() { return state.settingsDraft || state.settings; }
+
+    function renderSettingsContent() {
+      const settings = settingsDraft();
+      const section = state.settingsSection;
+      const content = $("#settingsContent");
+      $("#settingsDirtyState").textContent = "Editando: " + settingsLabel(section);
+
+      if (section === "general") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Workspace</h3><span class="pill soft">global</span></div>
+            <div class="field-grid">
+              <div class="field"><label>Nome da aplicação</label><input data-setting="general.appName" value="${escapeHtml(settings.general.appName)}"></div>
+              <div class="field"><label>Idioma padrão</label><select data-setting="general.language"><option ${settings.general.language === "pt-BR" ? "selected" : ""}>pt-BR</option><option ${settings.general.language === "en-US" ? "selected" : ""}>en-US</option></select></div>
+            </div>
+            <label class="checkbox-row"><input type="checkbox" data-setting="general.assistantAutoSuggest" ${settings.general.assistantAutoSuggest ? "checked" : ""}> Assistant sugere próximos passos automaticamente</label>
+          </div>
+        `;
+      }
+
+      if (section === "appearance") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Interface</h3><span class="pill soft">UI</span></div>
+            <div class="field-grid">
+              <div class="field"><label>Densidade</label><select data-setting="appearance.density"><option ${settings.appearance.density === "comfortable" ? "selected" : ""} value="comfortable">Confortável</option><option ${settings.appearance.density === "compact" ? "selected" : ""} value="compact">Compacta</option></select></div>
+              <div class="field"><label>Tema</label><select id="settingsTheme"><option value="light" ${state.theme === "light" ? "selected" : ""}>Claro</option><option value="dark" ${state.theme === "dark" ? "selected" : ""}>Escuro</option></select></div>
+            </div>
+            <label class="checkbox-row"><input type="checkbox" data-setting="appearance.showProgress" ${settings.appearance.showProgress ? "checked" : ""}> Mostrar progresso no card</label>
+            <label class="checkbox-row"><input type="checkbox" data-setting="appearance.showAgentOnCard" ${settings.appearance.showAgentOnCard ? "checked" : ""}> Mostrar agent no card</label>
+            <label class="checkbox-row"><input type="checkbox" data-setting="appearance.showProjectOnCard" ${settings.appearance.showProjectOnCard ? "checked" : ""}> Mostrar projetos no card</label>
+          </div>
+        `;
+      }
+
+      if (section === "persistence") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Persistência</h3><span class="pill soft">formatos abertos</span></div>
+            <div class="field-grid">
+              <div class="field"><label>Estado da task</label><select data-setting="persistence.taskStateFormat"><option ${settings.persistence.taskStateFormat === "YAML" ? "selected" : ""}>YAML</option><option ${settings.persistence.taskStateFormat === "JSON" ? "selected" : ""}>JSON</option></select></div>
+              <div class="field"><label>Contexto textual</label><select data-setting="persistence.contextFormat"><option ${settings.persistence.contextFormat === "Markdown" ? "selected" : ""}>Markdown</option><option ${settings.persistence.contextFormat === "Text" ? "selected" : ""}>Text</option></select></div>
+              <div class="field"><label>Eventos</label><select data-setting="persistence.eventsFormat"><option ${settings.persistence.eventsFormat === "JSONL" ? "selected" : ""}>JSONL</option><option ${settings.persistence.eventsFormat === "NDJSON" ? "selected" : ""}>NDJSON</option></select></div>
+            </div>
+            <label class="checkbox-row"><input type="checkbox" data-setting="persistence.versionTaskData" ${settings.persistence.versionTaskData ? "checked" : ""}> Versionar dados das tasks</label>
+            <label class="checkbox-row"><input type="checkbox" data-setting="persistence.versionRuntimeSessions" ${settings.persistence.versionRuntimeSessions ? "checked" : ""}> Versionar sessões de runtime</label>
+          </div>
+        `;
+      }
+
+      if (section === "columns") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Colunas</h3><button type="button" class="quiet" id="addColumn">Adicionar coluna</button></div>
+            ${settings.columns.map((column, index) => `
+              <div class="setting-row">
+                <div class="field-grid">
+                  <div class="field"><label>Label</label><input data-column-field="label" data-index="${index}" value="${escapeHtml(column.label)}"></div>
+                  <div class="field"><label>Agent padrão</label><select data-column-field="agent" data-index="${index}"><option value="">Sem agent</option>${settings.agents.map(agent => `<option value="${escapeHtml(agent.id)}" ${column.agent === agent.id ? "selected" : ""}>${escapeHtml(agent.label)}</option>`).join("")}</select></div>
+                  <div class="field"><label>WIP</label><input type="number" min="0" data-column-field="wip" data-index="${index}" value="${column.wip ?? ""}"></div>
+                  <div class="field"><label>ID</label><input data-column-field="id" data-index="${index}" value="${escapeHtml(column.id)}"></div>
+                </div>
+                <label class="checkbox-row"><input type="checkbox" data-column-field="autoStart" data-index="${index}" ${column.autoStart ? "checked" : ""}> Auto iniciar agent ao entrar</label>
+              </div>
+            `).join("")}
+          </div>
+        `;
+      }
+
+      if (section === "movement") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Movimento manual</h3><span class="pill soft">usuário soberano</span></div>
+            <label class="checkbox-row"><input type="checkbox" data-setting="general.confirmRunningMove" ${settings.general.confirmRunningMove ? "checked" : ""}> Confirmar antes de mover task com agent rodando</label>
+            <label class="checkbox-row"><input type="checkbox" data-setting="runtime.interruptOnManualMove" ${settings.runtime.interruptOnManualMove ? "checked" : ""}> Interromper sessão atual quando usuário mover manualmente</label>
+            <p>Quando o usuário move uma task, o orchestrator registra a decisão, interrompe o agent se necessário e recalcula o próximo agent com base na nova coluna.</p>
+          </div>
+        `;
+      }
+
+      if (section === "column-hooks") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Hooks por coluna</h3><span class="pill soft">editável</span></div>
+            ${settings.columns.map((column, index) => `<div class="setting-row"><strong>${escapeHtml(column.label)}</strong><div class="field"><label>Hooks</label><input data-column-field="hooks" data-index="${index}" value="${escapeHtml((column.hooks || []).join(", "))}"></div></div>`).join("")}
+          </div>
+        `;
+      }
+
+      if (section === "agents") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Agents</h3><button type="button" class="quiet" id="addAgent">Adicionar agent</button></div>
+            ${settings.agents.map((agent, index) => `
+              <div class="agent-row">
+                <div class="field-grid">
+                  <div class="field"><label>ID</label><input data-agent-field="id" data-index="${index}" value="${escapeHtml(agent.id)}"></div>
+                  <div class="field"><label>Label</label><input data-agent-field="label" data-index="${index}" value="${escapeHtml(agent.label)}"></div>
+                  <div class="field"><label>Status</label><select data-agent-field="status" data-index="${index}">${["online","idle","running","paused"].map(status => `<option ${agent.status === status ? "selected" : ""}>${status}</option>`).join("")}</select></div>
+                  <div class="field"><label>Tokens</label><input data-agent-field="tokens" data-index="${index}" value="${escapeHtml(agent.tokens)}"></div>
+                </div>
+                <div class="field"><label>Skills</label><input data-agent-field="skills" data-index="${index}" value="${escapeHtml((agent.skills || []).join(", "))}"></div>
+                <div class="field"><label>Instruções</label><textarea data-agent-field="instructions" data-index="${index}">${escapeHtml(agent.instructions || "")}</textarea></div>
+              </div>
+            `).join("")}
+          </div>
+        `;
+      }
+
+      if (section === "skills") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Skills</h3><button type="button" class="quiet" id="addSkill">Adicionar skill</button></div>
+            ${settings.skills.map((skill, index) => `<div class="setting-row"><div class="field-grid"><div class="field"><label>ID</label><input data-skill-field="id" data-index="${index}" value="${escapeHtml(skill.id)}"></div><div class="field"><label>Descrição</label><input data-skill-field="description" data-index="${index}" value="${escapeHtml(skill.description)}"></div></div><label class="checkbox-row"><input type="checkbox" data-skill-field="enabled" data-index="${index}" ${skill.enabled ? "checked" : ""}> Skill habilitada</label></div>`).join("")}
+          </div>
+        `;
+      }
+
+      if (section === "tools") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Tools tipadas</h3><span class="pill soft">orchestrator</span></div>
+            ${["complete_task","request_user_input","report_blocker","emit_artifact","spawn_subtasks","pause_agent","resume_agent"].map(tool => `<div class="setting-row"><strong>${tool}</strong><p>Disponível para agents autorizados por configuração.</p></div>`).join("")}
+          </div>
+        `;
+      }
+
+      if (section === "concurrency") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Concorrência</h3><span class="pill soft">semaforização</span></div>
+            <div class="field-grid">
+              <div class="field"><label>Tasks simultâneas</label><input type="number" min="1" data-setting="runtime.maxParallelTasks" value="${settings.runtime.maxParallelTasks}"></div>
+              <div class="field"><label>Merges simultâneos</label><input type="number" min="1" data-setting="runtime.maxParallelMerges" value="${settings.runtime.maxParallelMerges}"></div>
+              <div class="field"><label>Tokens Engineer</label><input type="number" min="1" data-setting="runtime.engineerTokens" value="${settings.runtime.engineerTokens}"></div>
+              <div class="field"><label>Tokens Validator</label><input type="number" min="1" data-setting="runtime.validatorTokens" value="${settings.runtime.validatorTokens}"></div>
+            </div>
+          </div>
+        `;
+      }
+
+      if (section === "worktrees") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Worktrees</h3><span class="pill soft">por task</span></div>
+            <label class="checkbox-row"><input type="checkbox" data-setting="worktrees.createPerTask" ${settings.worktrees.createPerTask ? "checked" : ""}> Criar worktree por task executável</label>
+            <label class="checkbox-row"><input type="checkbox" data-setting="worktrees.subtaskFromParentFeature" ${settings.worktrees.subtaskFromParentFeature ? "checked" : ""}> Subtask nasce a partir da feature parent</label>
+            <label class="checkbox-row"><input type="checkbox" data-setting="worktrees.mergeSubtaskIntoParent" ${settings.worktrees.mergeSubtaskIntoParent ? "checked" : ""}> Subtask volta para a feature parent ao concluir</label>
+            <label class="checkbox-row"><input type="checkbox" data-setting="worktrees.cleanupClosed" ${settings.worktrees.cleanupClosed ? "checked" : ""}> Limpar worktrees encerrados automaticamente</label>
+            <div class="field"><label>Política de merge</label><select data-setting="worktrees.mergePolicy"><option ${settings.worktrees.mergePolicy === "Sequencial no parent" ? "selected" : ""}>Sequencial no parent</option><option ${settings.worktrees.mergePolicy === "Manual" ? "selected" : ""}>Manual</option></select></div>
+          </div>
+        `;
+      }
+
+      if (section === "sessions") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Sessões de agents</h3><span class="pill soft">retomada</span></div>
+            <label class="checkbox-row"><input type="checkbox" data-setting="runtime.resumeSessions" ${settings.runtime.resumeSessions ? "checked" : ""}> Permitir retomar sessão dedicada da task</label>
+            <p>Sessões não precisam ser versionadas, mas o board mantém resumo, status e ponteiro interno para continuidade.</p>
+          </div>
+        `;
+      }
+
+      if (section === "projects") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Repositórios cadastrados</h3><button type="button" class="quiet" id="addProject">Adicionar repositório</button></div>
+            <p>Não existe projeto ativo global. Cada task escolhe quais repositórios pretende alterar.</p>
+            ${settings.projects.map((project, index) => `
+              <div class="project-row">
+                <div class="field-grid">
+                  <div class="field"><label>ID</label><input data-project-field="id" data-index="${index}" value="${escapeHtml(project.id)}"></div>
+                  <div class="field"><label>Nome</label><input data-project-field="label" data-index="${index}" value="${escapeHtml(project.label)}"></div>
+                  <div class="field"><label>Diretório do repositório</label><input data-project-field="repo" data-index="${index}" value="${escapeHtml(project.repo)}"></div>
+                  <label class="checkbox-row"><input type="checkbox" data-project-field="enabled" data-index="${index}" ${project.enabled ? "checked" : ""}> Disponível para tasks</label>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        `;
+      }
+
+      if (section === "permissions") {
+        content.innerHTML = `
+          <div class="section-card"><div class="section-title"><h3>Permissões</h3><span class="pill soft">segurança</span></div>
+            <label class="checkbox-row"><input type="checkbox" data-setting="permissions.allowShell" ${settings.permissions.allowShell ? "checked" : ""}> Permitir shell tools</label>
+            <label class="checkbox-row"><input type="checkbox" data-setting="permissions.allowNetwork" ${settings.permissions.allowNetwork ? "checked" : ""}> Permitir acesso de rede para agents</label>
+            <label class="checkbox-row"><input type="checkbox" data-setting="permissions.requireApprovalForMerge" ${settings.permissions.requireApprovalForMerge ? "checked" : ""}> Exigir aprovação para merge</label>
+            <label class="checkbox-row"><input type="checkbox" data-setting="permissions.requireApprovalForDelete" ${settings.permissions.requireApprovalForDelete ? "checked" : ""}> Exigir aprovação para remoções destrutivas</label>
+          </div>
+        `;
+      }
+    }
+
+    function settingsLabel(id) {
+      for (const group of settingsMenu) {
+        const item = group.items.find((entry) => entry.id === id);
+        if (item) return item.label;
+      }
+      return id;
+    }
+
+    function setNested(obj, path, value) {
+      const parts = path.split(".");
+      let current = obj;
+      for (let i = 0; i < parts.length - 1; i++) current = current[parts[i]];
+      current[parts.at(-1)] = value;
+    }
+
+    function applySettingsInput(target) {
+      const settings = settingsDraft();
+      const settingPath = target.dataset.setting;
+      if (settingPath) {
+        const value = target.type === "checkbox" ? target.checked : target.type === "number" ? Number(target.value) : target.value;
+        setNested(settings, settingPath, value);
+      }
+      const columnField = target.dataset.columnField;
+      if (columnField) {
+        const item = settings.columns[Number(target.dataset.index)];
+        if (columnField === "hooks") item.hooks = splitList(target.value);
+        else if (columnField === "autoStart") item.autoStart = target.checked;
+        else if (columnField === "wip") item.wip = target.value === "" ? null : Number(target.value);
+        else item[columnField] = target.value || (columnField === "agent" ? null : target.value);
+      }
+      const agentField = target.dataset.agentField;
+      if (agentField) {
+        const item = settings.agents[Number(target.dataset.index)];
+        if (agentField === "skills") item.skills = splitList(target.value);
+        else item[agentField] = target.value;
+      }
+      const skillField = target.dataset.skillField;
+      if (skillField) {
+        const item = settings.skills[Number(target.dataset.index)];
+        item[skillField] = target.type === "checkbox" ? target.checked : target.value;
+      }
+      const projectField = target.dataset.projectField;
+      if (projectField) {
+        const item = settings.projects[Number(target.dataset.index)];
+        item[projectField] = target.type === "checkbox" ? target.checked : target.value;
+      }
+      if (target.id === "settingsTheme") {
+        state.theme = target.value;
+        applyTheme();
+      }
+    }
+
+    function saveSettingsModal() {
+      state.settings = structuredClone(state.settingsDraft || state.settings);
+      saveSettings();
+      closeSettings();
+      renderBoard();
+      renderChatHeaderMeta();
+      notify("Configurações salvas.");
+    }
+
+    document.addEventListener("click", (event) => {
+      const themeButton = event.target.closest("#themeToggle");
+      if (themeButton) { state.theme = state.theme === "dark" ? "light" : "dark"; applyTheme(); return; }
+
+      const settingsButton = event.target.closest("#openSettings");
+      if (settingsButton) { openSettings(); return; }
+
+      const newTaskTop = event.target.closest("#openNewTask");
+      if (newTaskTop) { openNewTaskModal(); return; }
+
+      const railButton = event.target.closest("[data-rail]");
+      if (railButton) {
+        state.rail = railButton.dataset.rail;
+        $$("[data-rail]").forEach(btn => btn.classList.toggle("active", btn.dataset.rail === state.rail));
+        $$(".side-panel").forEach(panel => panel.classList.remove("active"));
+        $(`#rail-${state.rail}`).classList.add("active");
+        return;
+      }
+
+      const statusButton = event.target.closest("[data-status-filter]");
+      if (statusButton) { state.statusFilter = statusButton.dataset.statusFilter; renderBoard(); return; }
+
+      const suggestion = event.target.closest("[data-chat-prompt]");
+      if (suggestion) { sendChat(suggestion.dataset.chatPrompt || ""); return; }
+
+      const newTaskButton = event.target.closest("[data-new-task]");
+      if (newTaskButton) { state.draftColumn = newTaskButton.dataset.newTask; renderBoard(); return; }
+
+      const cancelDraft = event.target.closest("[data-cancel-draft]");
+      if (cancelDraft) { state.draftColumn = null; renderBoard(); return; }
+
+      const openTask = event.target.closest("[data-open-task]");
+      if (openTask) { openTaskModal(openTask.dataset.openTask); return; }
+
+      const taskCard = event.target.closest("[data-task-id]");
+      if (taskCard && !taskCard.classList.contains("dragging")) {
+        state.selectedTaskId = taskCard.dataset.taskId;
+        renderBoard();
+        notify(`Task ${taskCard.dataset.taskId} selecionada.`);
+        return;
+      }
+
+      const tab = event.target.closest("[data-task-tab]");
+      if (tab) { updateDraftFromInputs(); state.taskTab = tab.dataset.taskTab; renderTaskTabs(); renderTaskContent(); return; }
+
+      const sim = event.target.closest("[data-sim-action]");
+      if (sim && state.taskDraft) {
+        updateDraftFromInputs();
+        const action = sim.dataset.simAction;
+        if (action === "pause") { state.taskDraft.status = "paused"; state.taskDraft.sessionState = "Pausada"; }
+        if (action === "resume") { state.taskDraft.status = "running"; state.taskDraft.sessionState = "Streaming"; }
+        if (action === "complete") { state.taskDraft.status = "done"; state.taskDraft.progress = 100; state.taskDraft.sessionState = "Concluída"; }
+        state.taskDraft.events.unshift([timeNow(), `agent.${action}`, "user"]);
+        renderTaskContent();
+        renderModalChat();
+        return;
+      }
+
+      const addSubtask = event.target.closest("#addSubtask");
+      if (addSubtask && state.taskDraft) {
+        updateDraftFromInputs();
+        const suffix = String((state.taskDraft.subtasks || []).length + 1).padStart(2, "0");
+        state.taskDraft.kind = "master";
+        state.taskDraft.subtasks = state.taskDraft.subtasks || [];
+        state.taskDraft.subtasks.push({ id: `${state.taskDraft.id}-${suffix}`, title: "Nova subtask", status: "queued", needs: [], provides: [], branch: `${state.taskDraft.branch}-${suffix}` });
+        renderTaskContent();
+        return;
+      }
+
+      const addFile = event.target.closest("#addFileRef");
+      if (addFile && state.taskDraft) {
+        const name = prompt("Referência do arquivo:", "artifacts/evidence.md");
+        if (name) { state.taskDraft.files = state.taskDraft.files || []; state.taskDraft.files.push(name); renderTaskContent(); }
+        return;
+      }
+
+      const removeFile = event.target.closest("[data-remove-file]");
+      if (removeFile && state.taskDraft) {
+        state.taskDraft.files.splice(Number(removeFile.dataset.removeFile), 1);
+        renderTaskContent();
+        return;
+      }
+
+      const settingsSection = event.target.closest("[data-settings-section]");
+      if (settingsSection) { state.settingsSection = settingsSection.dataset.settingsSection; renderSettingsTree(); renderSettingsContent(); return; }
+
+      const addColumn = event.target.closest("#addColumn");
+      if (addColumn) { settingsDraft().columns.push({ id: `column-${Date.now()}`, label: "Nova coluna", agent: null, autoStart: false, wip: null, hooks: [] }); renderSettingsContent(); return; }
+      const addAgent = event.target.closest("#addAgent");
+      if (addAgent) { settingsDraft().agents.push({ id: `agent-${Date.now()}`, label: "Novo agent", status: "idle", tokens: "0/1", skills: [], instructions: "" }); renderSettingsContent(); return; }
+      const addSkill = event.target.closest("#addSkill");
+      if (addSkill) { settingsDraft().skills.push({ id: `skill-${Date.now()}`, enabled: true, description: "" }); renderSettingsContent(); return; }
+      const addProject = event.target.closest("#addProject");
+      if (addProject) { settingsDraft().projects.push({ id: `repo-${Date.now()}`, label: "Novo repositório", repo: "~/Workspaces/novo-repo", enabled: true }); renderSettingsContent(); return; }
+    });
+
+    document.addEventListener("input", (event) => {
+      if (event.target.matches("#searchInput")) { state.query = event.target.value; renderBoard(); return; }
+      if (event.target.closest("#settingsContent")) applySettingsInput(event.target);
+    });
+
+    document.addEventListener("change", (event) => {
+      if (event.target.closest("#settingsContent")) applySettingsInput(event.target);
+    });
+
+    document.addEventListener("submit", (event) => {
+      const draftForm = event.target.closest("[data-draft-column]");
+      if (draftForm) {
+        event.preventDefault();
+        createTask(draftForm.dataset.draftColumn, draftForm.elements.title.value, draftForm.elements.description.value);
+        return;
+      }
+      if (event.target === $("#chatForm")) {
+        event.preventDefault();
+        sendChat($("#chatInput").value);
+        $("#chatInput").value = "";
+        return;
+      }
+      if (event.target === $("#taskForm")) {
+        event.preventDefault();
+        saveTaskModal();
+        return;
+      }
+      if (event.target === $("#settingsForm")) {
+        event.preventDefault();
+        saveSettingsModal();
+      }
+    });
+
+    document.addEventListener("dragstart", (event) => {
+      const task = event.target.closest("[data-task-id]");
+      if (!task) return;
+      state.draggedId = task.dataset.taskId;
+      task.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", state.draggedId);
+    });
+    document.addEventListener("dragend", (event) => {
+      const task = event.target.closest("[data-task-id]");
+      if (task) task.classList.remove("dragging");
+      state.draggedId = null;
+      $$(".column").forEach((column) => column.classList.remove("drop-target"));
+    });
+    document.addEventListener("dragover", (event) => {
+      const column = event.target.closest("[data-column-id]");
+      if (!column || !state.draggedId) return;
+      event.preventDefault();
+      column.classList.add("drop-target");
+    });
+    document.addEventListener("dragleave", (event) => {
+      const column = event.target.closest("[data-column-id]");
+      if (column && !column.contains(event.relatedTarget)) column.classList.remove("drop-target");
+    });
+    document.addEventListener("drop", (event) => {
+      const column = event.target.closest("[data-column-id]");
+      if (!column || !state.draggedId) return;
+      event.preventDefault();
+      moveTask(state.draggedId, column.dataset.columnId);
+    });
+
+    $("#closeTaskModal").addEventListener("click", closeTaskModal);
+    $("#cancelTaskModal").addEventListener("click", closeTaskModal);
+    $("#taskModal").addEventListener("click", (event) => { if (event.target === $("#taskModal")) closeTaskModal(); });
+    $("#sendModalChat").addEventListener("click", () => { sendModalChat($("#modalChatInput").value); $("#modalChatInput").value = ""; });
+    $("#modalChatInput").addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendModalChat($("#modalChatInput").value); $("#modalChatInput").value = ""; } });
+    $("#clearModalChat").addEventListener("click", () => { if (!state.taskDraft) return; state.taskDraft.chat = [{ role: "assistant", time: timeNow(), text: "Chat da task reiniciado." }]; renderModalChat(); });
+    $("#clearChat").addEventListener("click", () => { state.chatMessages = [{ role: "assistant", time: timeNow(), text: "Chat limpo. Posso analisar fila, bloqueios, subtasks e próximas ações." }]; renderChat(); });
+
+    $("#closeSettings").addEventListener("click", closeSettings);
+    $("#settingsModal").addEventListener("click", (event) => { if (event.target === $("#settingsModal")) closeSettings(); });
+    $("#resetSettings").addEventListener("click", () => { state.settingsDraft = structuredClone(defaultSettings); renderSettingsTree(); renderSettingsContent(); notify("Configurações de exemplo restauradas no modal."); });
+
+    $("#cancelMove").addEventListener("click", () => { state.pendingMove = null; $("#moveConfirm").classList.remove("open"); });
+    $("#checkpointMove").addEventListener("click", () => {
+      const pending = state.pendingMove;
+      state.pendingMove = null;
+      $("#moveConfirm").classList.remove("open");
+      if (!pending) return;
+      const task = state.tasks.find((item) => item.id === pending.taskId);
+      if (task) {
+        task.status = "queued";
+        task.sessionState = "Checkpoint solicitado antes do movimento";
+        task.events.unshift([timeNow(), "agent.checkpoint_requested", "user"]);
+      }
+      moveTask(pending.taskId, pending.columnId, true);
+    });
+    $("#confirmMove").addEventListener("click", () => {
+      const pending = state.pendingMove;
+      state.pendingMove = null;
+      $("#moveConfirm").classList.remove("open");
+      if (pending) moveTask(pending.taskId, pending.columnId, true);
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        if ($("#settingsModal").classList.contains("open")) closeSettings();
+        else if ($("#taskModal").classList.contains("open")) closeTaskModal();
+        else if ($("#moveConfirm").classList.contains("open")) $("#moveConfirm").classList.remove("open");
+      }
+      if (event.key === "Enter" && event.target.closest("[data-task-id]")) openTaskModal(event.target.closest("[data-task-id]").dataset.taskId);
+    });
+
+    applyTheme();
+    renderBoard();
+    renderChat();
+  </script>
+</body>
+</html>

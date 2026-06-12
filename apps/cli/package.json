@@ -1,0 +1,17 @@
+{
+  "name": "@kca/cli",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "kca": "./src/kca.js"
+  },
+  "scripts": {
+    "dev": "node src/kca.js"
+  },
+  "dependencies": {
+    "@kca/fsdb": "workspace:*",
+    "@kca/orchestrator": "workspace:*",
+    "@kca/pi-adapter": "workspace:*"
+  }
+}

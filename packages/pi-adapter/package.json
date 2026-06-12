@@ -1,0 +1,12 @@
+{
+  "name": "@kca/pi-adapter",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.79.1"
+  }
+}
