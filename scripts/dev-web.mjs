@@ -1,16 +1,24 @@
 import { spawn } from "node:child_process";
 
-const daemonPort = process.env.KCA_DAEMON_PORT || "4174";
+// Suppress EPIPE/EIO errors when stdin is closed or disconnected (common in some terminals)
+process.stdin.on("error", (err) => {
+  if (err.code === "EIO" || err.code === "EPIPE") return;
+  throw err;
+});
+process.stdin.resume();
+
+const daemonPort = process.env.KCA_DAEMON_PORT || "15000";
 const daemonUrl = `http://127.0.0.1:${daemonPort}`;
 const webArgs = process.argv.slice(2);
 if (webArgs[0] === "--") webArgs.shift();
+if (!webArgs.includes("--port")) webArgs.push("--port", process.env.KCA_WEB_PORT || "15001");
 const children = new Set();
 
 function spawnCommand(command, args, env = {}) {
   const child = spawn(command, args, {
     cwd: process.cwd(),
     env: { ...process.env, ...env },
-    stdio: "inherit"
+    stdio: ["ignore", "inherit", "inherit"]
   });
   children.add(child);
   child.on("exit", () => children.delete(child));

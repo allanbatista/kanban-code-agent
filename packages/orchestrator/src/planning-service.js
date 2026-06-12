@@ -1,4 +1,7 @@
+import { logStep } from "@kca/core/log";
+
 export function planningArtifactsForTask(task, roles = ["product", "design", "engineering", "quality", "review", "deployment"]) {
+  logStep("orchestrator", "planning.artifacts", { taskId: task.id, roles: roles.length });
   return {
     planning: {
       schema: "kanban-code-agent/planning@1",

@@ -40,6 +40,26 @@ test("orchestrator updates task and explains why it is not running", async () =>
   assert.match(why.reasons.join(" "), /contract:fsdb/);
 });
 
+test("moving a task into an autoStart column drains the scheduler", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-auto-start-move-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-auto-start-create",
+    input: { title: "Auto start on definition", projectTargets: ["kanban-code-agent"] }
+  }, root);
+  const moved = await handleCommand({
+    type: "task.move",
+    commandId: "cmd-auto-start-move",
+    taskId: created.task.id,
+    toColumn: "definition"
+  }, root);
+  assert.equal(moved.task.column, "product");
+  assert.equal(moved.task.status, "queued");
+  assert.equal(moved.task.routing.currentRole, "product");
+  assert.deepEqual(moved.scheduler.started.map((item) => item.taskId), [created.task.id]);
+  assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
+});
+
 test("orchestrator starts, completes and summarizes a task session", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-orch-"));
   const created = await handleCommand({
@@ -69,19 +89,13 @@ test("orchestrator starts, completes and summarizes a task session", async () =>
     nextColumn: "validate",
     summary: "Implementado e pronto para validação."
   }, root);
-  assert.equal(completed.task.column, "validate");
-  assert.equal(completed.task.status, "validating");
+  assert.equal(completed.task.column, "quality");
+  assert.equal(completed.task.status, "queued");
   assert.match(completed.summaryRef, /summaries\/run-/);
-
-  const resumed = await handleCommand({
-    type: "task.run",
-    commandId: "cmd-run-3-resume",
-    taskId: completed.task.id,
-    agentId: "engineer"
-  }, root);
-  assert.equal(resumed.run.previousSessionRef, started.run.sessionRef);
-  assert.equal(resumed.run.previousSummaryRef, completed.summaryRef);
-  assert.match(await readFile(join(root, "settings", "runtime", "sessions", created.task.id, "engineer", "session.jsonl"), "utf8"), /previousSummaryRef/);
+  const autoRun = completed.scheduler.started.find((item) => item.taskId === created.task.id)?.result;
+  assert.equal(autoRun.run.previousSessionRef, started.run.sessionRef);
+  assert.equal(autoRun.run.previousSummaryRef, completed.summaryRef);
+  assert.match(await readFile(join(root, autoRun.run.sessionRef), "utf8"), /previousSummaryRef/);
 });
 
 test("all default agents load editable prompts and can start sessions", async () => {
@@ -149,7 +163,7 @@ test("assistant chat can move and rename the selected task", async () => {
     prompt: "mover para build"
   }, root);
   assert.equal(moved.action.type, "task.moved");
-  assert.equal(moved.action.column, "build");
+  assert.equal(moved.action.column, "engineering");
 
   const renamed = await handleCommand({
     type: "agent.chat",
@@ -421,7 +435,7 @@ test("settings scopes map to concrete settings files", async () => {
   assert.equal(workspace.workspace.name, "Kanban Code Agent");
 
   const columns = await handleQuery({ type: "settings.scope", scope: "columns" }, root);
-  assert.equal(columns.columns.length, 6);
+  assert.equal(columns.columns.length, 10);
 
   const agentUpdate = await handleCommand({
     type: "settings.update",
@@ -477,7 +491,184 @@ test("orchestrator runs hooks on move and supports input/artifact tools", async 
     question: "Aprovar merge?"
   }, root);
   assert.equal(input.task.status, "blocked");
+  assert.equal(input.task.column, "human_wait");
   assert.match(await readFile(join(root, "tasks", created.task.id, input.inputPath), "utf8"), /Aprovar merge/);
+});
+
+test("agentic workflow handoffs keep persona context and human wait distinct from persona wait", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-agentic-flow-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-agentic-create",
+    input: { title: "Fluxo agentico", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "product", currentRole: "product", manualOverride: { active: false } }, column: "product", status: "queued" }
+  }, root);
+  const message = await handleCommand({
+    type: "agent.step",
+    commandId: "cmd-agentic-message",
+    taskId: created.task.id,
+    disposition: { type: "message_and_continue", message: { scope: "task", taskId: created.task.id, persona: "product", agentId: "product", text: "Critérios propostos.", visibility: "both" } }
+  }, root);
+  assert.equal(message.message.persona, "product");
+
+  const handoff = await handleCommand({
+    type: "agent.wait_for_persona",
+    commandId: "cmd-agentic-handoff",
+    taskId: created.task.id,
+    targetRole: "generalist",
+    question: "Executar coleta de evidência sem código."
+  }, root);
+  assert.equal(handoff.task.column, "generalist");
+  assert.equal(handoff.task.status, "queued");
+  assert.equal(handoff.task.routing.currentRole, "generalist");
+
+  const delegated = await handleCommand({
+    type: "agent.delegate_task",
+    commandId: "cmd-agentic-delegate",
+    taskId: created.task.id,
+    fromPersona: "generalist",
+    toPersona: "engineering",
+    wait: false,
+    request: "Implementar parte técnica."
+  }, root);
+  assert.equal(delegated.task.column, "engineering");
+  assert.equal(delegated.task.routing.currentAgent, "engineering");
+
+  const human = await handleCommand({
+    type: "agent.wait_for_human",
+    commandId: "cmd-agentic-human",
+    taskId: created.task.id,
+    question: "Aprovar risco?",
+    requestedByRole: "engineering",
+    options: ["Aprovar", "Cancelar"]
+  }, root);
+  assert.equal(human.task.column, "human_wait");
+  assert.equal(human.task.status, "waiting_human");
+
+  const answered = await handleCommand({
+    type: "task.answer_input",
+    commandId: "cmd-agentic-answer",
+    taskId: created.task.id,
+    answer: "Aprovado",
+    returnRole: "engineering"
+  }, root);
+  assert.equal(answered.task.column, "engineering");
+  assert.equal(answered.task.status, "queued");
+
+  const chatBuild = await handleQuery({ type: "chat.build", taskId: created.task.id, persona: "product" }, root);
+  assert.equal(chatBuild.schema, "kanban-code-agent/agent-chat-build@1");
+  assert.equal(chatBuild.messages[0].persona, "product");
+  assert.equal(chatBuild.provider, "pi");
+
+  const compacted = await handleCommand({
+    type: "chat.compact",
+    commandId: "cmd-agentic-compact",
+    taskId: created.task.id,
+    persona: "product",
+    summary: "Resumo compacto do Product.",
+    tokenStats: { before: 100, after: 20 }
+  }, root);
+  assert.equal(compacted.compaction.messageCount >= 1, true);
+  assert.match(await readFile(join(root, "tasks", created.task.id, compacted.compaction.summaryRef), "utf8"), /Resumo compacto/);
+  const compactedHistory = await handleQuery({ type: "chat.history", scope: "task", taskId: created.task.id, persona: "product" }, root);
+  assert.equal(compactedHistory[0].disposition, "chat.compacted");
+
+  const providers = await handleQuery({ type: "provider.discover" }, root);
+  assert.equal(providers.providers.some((provider) => provider.id === "openai" && provider.requiredEnv.includes("OPENAI_API_KEY")), true);
+
+  const events = (await handleQuery({ type: "task.files", taskId: created.task.id }, root)).events;
+  assert.equal(events.some((event) => event.type === "role.handoff" && event.toRole === "generalist"), true);
+  assert.equal(events.some((event) => event.type === "human.input_requested"), true);
+  assert.equal(events.some((event) => event.type === "delegation.requested"), true);
+  assert.equal(events.some((event) => event.type === "chat.compacted"), true);
+});
+
+test("provider model settings block runs when required env is missing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-provider-env-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-provider-create",
+    input: { title: "Provider missing env", status: "queued", routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } } }
+  }, root);
+  await handleCommand({
+    type: "settings.update",
+    commandId: "cmd-provider-agent",
+    scope: "agents",
+    patch: { id: "engineering", provider: "openai_compatible", model: { provider: "openai_compatible", name: "gpt-test", effort: "high" } }
+  }, root);
+  const why = await handleQuery({ type: "why_not_running", taskId: created.task.id }, root);
+  assert.equal(why.runnable, false);
+  assert.match(why.reasons.join(" "), /OPENAI_COMPATIBLE_API_KEY|OPENAI_COMPATIBLE_BASE_URL/);
+});
+
+test("runtime auto-compacts active persona chat before a run", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-auto-compact-"));
+  await handleCommand({
+    type: "settings.update",
+    commandId: "cmd-auto-compact-settings",
+    scope: "app",
+    patch: { runtime: { maxParallelTasks: 10, chatCompaction: { maxActiveMessages: 1 }, agentTokens: { product: 2 } } }
+  }, root);
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-auto-compact-create",
+    input: { title: "Auto compact", status: "queued", routing: { currentAgent: "product", currentRole: "product", manualOverride: { active: false } } }
+  }, root);
+  await handleCommand({ type: "agent.message", commandId: "cmd-auto-compact-msg-a", message: { scope: "task", taskId: created.task.id, persona: "product", agentId: "product", text: "Mensagem A" } }, root);
+  await handleCommand({ type: "agent.message", commandId: "cmd-auto-compact-msg-b", message: { scope: "task", taskId: created.task.id, persona: "product", agentId: "product", text: "Mensagem B" } }, root);
+  const run = await handleCommand({ type: "task.run", commandId: "cmd-auto-compact-run", taskId: created.task.id, agentId: "product" }, root);
+  assert.equal(run.ok, true);
+  const files = await handleQuery({ type: "task.files", taskId: created.task.id }, root);
+  assert.equal(files.events.some((event) => event.type === "chat.compacted"), true);
+});
+
+test("review and deployment commands move gates with persisted evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-review-deploy-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-review-deploy-create",
+    input: { title: "Review deploy", status: "queued", column: "review", routing: { currentAgent: "review", currentRole: "review", manualOverride: { active: false } } }
+  }, root);
+  const failed = await handleCommand({
+    type: "agent.review_task",
+    commandId: "cmd-review-fail",
+    taskId: created.task.id,
+    findings: [{ severity: "critical", message: "regression" }],
+    evidence: ["unit"]
+  }, root);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.task.column, "engineering");
+
+  await handleCommand({
+    type: "role.route_task",
+    commandId: "cmd-review-route",
+    taskId: created.task.id,
+    role: "review",
+    reason: "ready"
+  }, root);
+  const passed = await handleCommand({
+    type: "agent.review_task",
+    commandId: "cmd-review-pass",
+    taskId: created.task.id,
+    findings: [],
+    evidence: ["lint pass"]
+  }, root);
+  assert.equal(passed.ok, true);
+  assert.equal(passed.task.column, "deployment");
+
+  const deployed = await handleCommand({
+    type: "agent.deploy_task",
+    commandId: "cmd-deploy-pass",
+    taskId: created.task.id,
+    command: process.execPath,
+    args: ["-e", "process.stdout.write('released')"],
+    cwd: root,
+    rollback: "none"
+  }, root);
+  assert.equal(deployed.task.column, "done");
+  assert.equal(deployed.deployment.status, "released");
+  const files = await handleQuery({ type: "task.files", taskId: created.task.id }, root);
+  assert.equal(files.events.some((event) => event.type === "gate.failed"), true);
+  assert.equal(files.events.some((event) => event.type === "gate.passed"), true);
 });
 
 test("orchestrator executes command hooks with timeout and persists output", async () => {

@@ -1,5 +1,6 @@
-import { FormEvent, useState } from "react";
+import { DragEvent, FormEvent, useRef, useState } from "react";
 import * as ScrollArea from "@radix-ui/react-scroll-area";
+import { Paperclip } from "lucide-react";
 import type { ChatMessage } from "../types";
 
 export function AssistantPanel({
@@ -14,13 +15,30 @@ export function AssistantPanel({
   selectedTaskId?: string;
 }) {
   const [text, setText] = useState("");
+  const [attachments, setAttachments] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     const value = text.trim();
-    if (!value) return;
+    if (!value && attachments.length === 0) return;
+    const attachmentNote = attachments.length ? `\n\nAnexos: ${attachments.map((file) => file.name).join(", ")}` : "";
     setText("");
-    await onSend(value);
+    setAttachments([]);
+    await onSend(`${value}${attachmentNote}`);
+  }
+
+  function addAttachments(files: FileList | File[]) {
+    const next = Array.from(files);
+    setAttachments((current) => {
+      const keys = new Set(current.map((file) => `${file.name}:${file.size}`));
+      return [...current, ...next.filter((file) => !keys.has(`${file.name}:${file.size}`))];
+    });
+  }
+
+  function dropFiles(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    addAttachments(event.dataTransfer.files);
   }
 
   return (
@@ -59,6 +77,11 @@ export function AssistantPanel({
           value={text}
           onChange={(event) => setText(event.target.value)}
         />
+        <div className="chat-upload-row" onDragOver={(event) => event.preventDefault()} onDrop={dropFiles}>
+          <button type="button" className="quiet" onClick={() => fileInputRef.current?.click()}><Paperclip size={15} />Anexar</button>
+          <span>{attachments.length ? attachments.map((file) => file.name).join(", ") : "Solte arquivos aqui"}</span>
+          <input ref={fileInputRef} className="sr-only" type="file" multiple onChange={(event) => event.target.files && addAttachments(event.target.files)} />
+        </div>
         <div className="chat-composer-foot">
           <span>Daemon local · tools tipadas</span>
           <div className="chat-composer-actions">

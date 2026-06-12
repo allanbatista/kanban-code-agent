@@ -2,12 +2,13 @@ import * as Dialog from "@radix-ui/react-dialog";
 import * as Switch from "@radix-ui/react-switch";
 import { X } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { AgentSettings, AppSettings } from "../types";
+import type { AgentSettings, AppSettings, ProviderStatus } from "../types";
 
 export function SettingsDialog({
   open,
   settings,
   agents,
+  providers,
   onOpenChange,
   onSave,
   onSaveAgent
@@ -15,17 +16,24 @@ export function SettingsDialog({
   open: boolean;
   settings?: AppSettings;
   agents: AgentSettings[];
+  providers: ProviderStatus[];
   onOpenChange: (open: boolean) => void;
   onSave: (patch: Record<string, unknown>) => Promise<unknown>;
   onSaveAgent: (patch: Record<string, unknown>) => Promise<unknown>;
 }) {
   const showProgress = settings?.ui?.showProgressOnCard ?? true;
+  const taskTextScale = settings?.ui?.taskTextScale ?? 100;
+  const taskFontFamily = settings?.ui?.taskFontFamily || "sans-serif";
   const allowNetwork = settings?.safety?.allowNetwork ?? false;
   const [selectedAgentId, setSelectedAgentId] = useState("assistant");
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || agents[0];
   const [agentPrompt, setAgentPrompt] = useState("");
   const [agentSkills, setAgentSkills] = useState("");
   const [agentTokens, setAgentTokens] = useState(1);
+  const [agentProvider, setAgentProvider] = useState("pi");
+  const [agentModel, setAgentModel] = useState("default");
+  const [agentEffort, setAgentEffort] = useState<"minimal" | "low" | "medium" | "high">("medium");
+  const selectedProvider = providers.find((provider) => provider.id === agentProvider);
 
   useEffect(() => {
     if (!selectedAgent) return;
@@ -33,7 +41,10 @@ export function SettingsDialog({
     setAgentPrompt(selectedAgent.instructionsBody || "");
     setAgentSkills((selectedAgent.skills || []).join(", "));
     setAgentTokens(selectedAgent.limits?.tokens ?? 1);
-  }, [selectedAgent?.id, selectedAgent?.instructionsBody, selectedAgent?.skills, selectedAgent?.limits?.tokens]);
+    setAgentProvider(selectedAgent.model?.provider || selectedAgent.provider || "pi");
+    setAgentModel(selectedAgent.model?.name || "default");
+    setAgentEffort(selectedAgent.model?.effort || "medium");
+  }, [selectedAgent?.id, selectedAgent?.instructionsBody, selectedAgent?.skills, selectedAgent?.limits?.tokens, selectedAgent?.provider, selectedAgent?.model?.provider, selectedAgent?.model?.name, selectedAgent?.model?.effort]);
 
   async function saveAgent() {
     if (!selectedAgent) return;
@@ -41,6 +52,8 @@ export function SettingsDialog({
       id: selectedAgent.id,
       skills: agentSkills.split(",").map((item) => item.trim()).filter(Boolean),
       limits: { ...(selectedAgent.limits || {}), tokens: Number(agentTokens) || 1 },
+      provider: agentProvider,
+      model: { ...(selectedAgent.model || {}), provider: agentProvider, name: agentModel || "default", effort: agentEffort },
       instructionsBody: agentPrompt
     });
   }
@@ -72,6 +85,23 @@ export function SettingsDialog({
                 >
                   <Switch.Thumb className="switch-thumb" />
                 </Switch.Root>
+              </SettingRow>
+              <SettingRow label={`Tamanho dos textos: ${taskTextScale}%`}>
+                <input
+                  className="settings-range"
+                  type="range"
+                  min={50}
+                  max={300}
+                  step={25}
+                  value={taskTextScale}
+                  onChange={(event) => void onSave({ ui: { taskTextScale: Number(event.target.value) } })}
+                />
+              </SettingRow>
+              <SettingRow label="Fonte dos textos">
+                <select className="input settings-select" value={taskFontFamily} onChange={(event) => void onSave({ ui: { taskFontFamily: event.target.value } })}>
+                  <option value="serif">serif</option>
+                  <option value="sans-serif">sans-serif</option>
+                </select>
               </SettingRow>
               <h3 className="text-sm font-semibold">Segurança</h3>
               <SettingRow label="Permitir rede para agents">
@@ -107,11 +137,54 @@ export function SettingsDialog({
                 {selectedAgent ? (
                   <div className="space-y-3 rounded-md border border-zinc-800 bg-zinc-950/70 p-3">
                     <div className="grid grid-cols-2 gap-3">
-                      <label className="field">Agent<input className="input" value={selectedAgent.id} readOnly /></label>
-                      <label className="field">Tokens<input className="input" type="number" min={0} value={agentTokens} onChange={(event) => setAgentTokens(Number(event.target.value))} /></label>
+                      <div className="field">
+                        <label htmlFor="settings-agent-id">Agent</label>
+                        <input id="settings-agent-id" className="input" value={selectedAgent.id} readOnly />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="settings-agent-tokens">Tokens</label>
+                        <input id="settings-agent-tokens" className="input" type="number" min={0} value={agentTokens} onChange={(event) => setAgentTokens(Number(event.target.value))} />
+                      </div>
                     </div>
-                    <label className="field">Skills<input className="input" value={agentSkills} onChange={(event) => setAgentSkills(event.target.value)} /></label>
-                    <label className="field">Prompt editável<textarea className="textarea min-h-52" value={agentPrompt} onChange={(event) => setAgentPrompt(event.target.value)} /></label>
+                    <div className="field">
+                      <label htmlFor="settings-agent-skills">Skills</label>
+                      <input id="settings-agent-skills" className="input" value={agentSkills} onChange={(event) => setAgentSkills(event.target.value)} />
+                    </div>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="field">
+                        <label htmlFor="settings-agent-provider">Provider</label>
+                        <select id="settings-agent-provider" className="input settings-select" value={agentProvider} onChange={(event) => setAgentProvider(event.target.value)}>
+                          {providers.map((provider) => (
+                            <option key={provider.id} value={provider.id}>{provider.id}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="field">
+                        <label htmlFor="settings-agent-model">Modelo</label>
+                        <input id="settings-agent-model" className="input" value={agentModel} onChange={(event) => setAgentModel(event.target.value)} />
+                      </div>
+                      <div className="field">
+                        <label htmlFor="settings-agent-effort">Effort</label>
+                        <select id="settings-agent-effort" className="input settings-select" value={agentEffort} onChange={(event) => setAgentEffort(event.target.value as typeof agentEffort)}>
+                          <option value="minimal">minimal</option>
+                          <option value="low">low</option>
+                          <option value="medium">medium</option>
+                          <option value="high">high</option>
+                        </select>
+                      </div>
+                    </div>
+                    {selectedProvider ? (
+                      <div className="rounded-md border border-zinc-800 bg-zinc-950/70 p-3 text-xs text-zinc-400">
+                        <strong className={selectedProvider.configured ? "text-emerald-500" : "text-amber-500"}>{selectedProvider.configured ? "configured" : "missing_env"}</strong>
+                        <span className="ml-2">{selectedProvider.type}</span>
+                        <div className="mt-2">required: {selectedProvider.requiredEnv.join(", ") || "none"}</div>
+                        {!selectedProvider.configured ? <div>missing: {selectedProvider.missingEnv.join(", ")}</div> : null}
+                      </div>
+                    ) : null}
+                    <div className="field">
+                      <label htmlFor="settings-agent-prompt">Prompt editável</label>
+                      <textarea id="settings-agent-prompt" className="textarea min-h-52" value={agentPrompt} onChange={(event) => setAgentPrompt(event.target.value)} />
+                    </div>
                     <button className="button-primary" type="button" onClick={() => void saveAgent()}>Salvar agent</button>
                   </div>
                 ) : null}

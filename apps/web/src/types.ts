@@ -2,6 +2,7 @@ export type Column = {
   id: string;
   label: string;
   agent?: string | null;
+  role?: string | null;
   autoStart?: boolean;
   wip?: number | null;
   wipLimit?: number | null;
@@ -16,7 +17,7 @@ export type Task = {
   status: string;
   priority: string;
   projectTargets: string[];
-  routing?: { currentAgent?: string | null; lastAgent?: string | null; nextSuggestedColumn?: string | null; manualOverride?: { active?: boolean } };
+  routing?: { currentAgent?: string | null; currentRole?: string | null; lastAgent?: string | null; lastRole?: string | null; nextSuggestedColumn?: string | null; manualOverride?: { active?: boolean } };
   worktree?: { branch?: string; path?: string; parentTaskId?: string | null; mergeTarget?: string };
   dependencies?: { needs?: string[]; provides?: string[]; blockedBy?: string[]; fileLocks?: string[]; semaphores?: unknown[] };
   hooks?: { active?: string[] };
@@ -40,7 +41,7 @@ export type AppSettings = {
   runtimeRoot?: string;
   workspace?: { name?: string; language?: string };
   runtime?: { maxParallelTasks?: number; agentTokens?: Record<string, number>; projectTokens?: Record<string, number> };
-  ui?: { theme?: string; density?: string; showProgressOnCard?: boolean; showAgentOnCard?: boolean; showProjectTargetsOnCard?: boolean };
+  ui?: { theme?: string; density?: string; showProgressOnCard?: boolean; showAgentOnCard?: boolean; showProjectTargetsOnCard?: boolean; taskTextScale?: number; taskFontFamily?: "serif" | "sans-serif" };
   safety?: { requireApprovalForMerge?: boolean; requireApprovalForDelete?: boolean; allowShell?: boolean; allowNetwork?: boolean };
 };
 
@@ -48,11 +49,22 @@ export type AgentSettings = {
   id: string;
   label?: string;
   provider?: string;
+  model?: { provider?: string; name?: string; effort?: "minimal" | "low" | "medium" | "high"; temperature?: number };
   instructionsPath?: string;
   instructionsBody?: string;
   skills?: string[];
   tools?: string[] | { builtin?: string[]; custom?: string[] };
   limits?: { tokens?: number };
+};
+
+export type ProviderStatus = {
+  id: string;
+  type: string;
+  configured: boolean;
+  requiredEnv: string[];
+  missingEnv: string[];
+  optionalEnv?: string[];
+  baseUrl?: string | null;
 };
 
 export type BoardSnapshot = {
@@ -83,6 +95,10 @@ export type OrchestratorStatus = {
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
+  persona?: string;
+  agentId?: string;
+  runId?: string;
+  disposition?: string;
   text: string;
   time: string;
 };

@@ -2,6 +2,7 @@ import { access } from "node:fs/promises";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { logStep } from "@kca/core/log";
 
 const defaultPackage = "@earendil-works/pi-coding-agent";
 const verifiedVersion = "0.79.1";
@@ -25,12 +26,14 @@ async function fileExists(path) {
 }
 
 export async function loadPiSdk(packageName = process.env.KCA_PI_SDK_PACKAGE || defaultPackage) {
+  logStep("pi-adapter", "loadPiSdk.start", { packageName });
   if (process.env.KCA_PI_ADAPTER === "fake") {
+    logStep("pi-adapter", "loadPiSdk.fake", { packageName });
     return { ok: false, mode: "fake", sdk: null, packageName, version: "forced-fake", reason: "forced_by_env" };
   }
   try {
     const sdk = await import(packageName);
-    return {
+    const result = {
       ok: true,
       mode: "real",
       sdk,
@@ -42,7 +45,10 @@ export async function loadPiSdk(packageName = process.env.KCA_PI_SDK_PACKAGE || 
         defineTool: typeof sdk.defineTool === "function"
       }
     };
+    logStep("pi-adapter", "loadPiSdk.done", { packageName, mode: result.mode, version: result.version });
+    return result;
   } catch (error) {
+    logStep("pi-adapter", "loadPiSdk.error", { packageName, reason: safeError(error) });
     return { ok: false, mode: "fake", sdk: null, packageName, version: "unavailable", reason: safeError(error) };
   }
 }
@@ -286,14 +292,17 @@ export function buildKanbanTools(context) {
 // ---------------------------------------------------------------------------
 
 export async function runBoardAssistant({ prompt, agentId = "assistant", instructions, root, context }) {
+  logStep("pi-adapter", "runBoardAssistant.start", { agentId });
   const resolvedRoot = root || join(homedir(), ".kanban-code-agent");
   const loaded = await loadPiSdk();
   if (!loaded.ok) {
+    logStep("pi-adapter", "runBoardAssistant.fallback", { agentId, reason: loaded.reason });
     return { ok: false, reply: `Pi SDK indisponível (${loaded.reason}). Usando fallback determinístico.` };
   }
 
   const sdk = loaded.sdk;
   if (!canUseSdk(sdk)) {
+    logStep("pi-adapter", "runBoardAssistant.unsupported", { agentId });
     return { ok: false, reply: "Pi SDK carregado mas sem API de sessão disponível." };
   }
 
@@ -332,8 +341,10 @@ export async function runBoardAssistant({ prompt, agentId = "assistant", instruc
       : "Você é o assistente do Kanban Code Agent. Use as ferramentas kca_* para gerenciar tasks, colunas e configurações. Responda em português brasileiro.";
     await session.prompt(`${systemContext}\n\n${prompt}`, { source: "sdk" });
     const reply = lastAssistantText || "Processado sem resposta textual.";
+    logStep("pi-adapter", "runBoardAssistant.done", { agentId });
     return { ok: true, reply, modelFallbackMessage, agentId };
   } catch (error) {
+    logStep("pi-adapter", "runBoardAssistant.error", { agentId, reason: safeError(error) });
     return { ok: false, reply: `Erro no agente: ${safeError(error)}` };
   } finally {
     unsubscribe?.();
@@ -346,8 +357,10 @@ export async function runBoardAssistant({ prompt, agentId = "assistant", instruc
 // ---------------------------------------------------------------------------
 
 export async function startPiSession({ task, agentId, runId, cwd, prompt, sessionDir, agentDir, previousSessionFile, tools = [], customTools = [], runPrompt = false }) {
+  logStep("pi-adapter", "startPiSession.start", { taskId: task.id, agentId, runId, runPrompt });
   const loaded = await loadPiSdk();
   if (!loaded.ok) {
+    logStep("pi-adapter", "startPiSession.fake", { taskId: task.id, agentId, runId, reason: loaded.reason });
     return {
       mode: "fake",
       provider: loaded.packageName,
@@ -360,6 +373,7 @@ export async function startPiSession({ task, agentId, runId, cwd, prompt, sessio
 
   const sdk = loaded.sdk;
   if (!canUseSdk(sdk)) {
+    logStep("pi-adapter", "startPiSession.unsupported", { taskId: task.id, agentId, runId });
     return { mode: "real", provider: loaded.packageName, version: loaded.version, sessionId: runId, warning: "Pi SDK loaded without createAgentSession/SessionManager" };
   }
 
@@ -377,6 +391,7 @@ export async function startPiSession({ task, agentId, runId, cwd, prompt, sessio
     }), timeoutMs);
   });
   const real = (async () => {
+    logStep("pi-adapter", "startPiSession.real", { taskId: task.id, agentId, runId });
     const sessionManager = sdk.SessionManager.create(cwd || process.cwd(), sessionDir);
     const { session, modelFallbackMessage } = await sdk.createAgentSession({
       cwd,
@@ -419,12 +434,16 @@ export async function startPiSession({ task, agentId, runId, cwd, prompt, sessio
       session.dispose?.();
     }
   })();
-  return Promise.race([real, timeout]);
+  const result = await Promise.race([real, timeout]);
+  logStep("pi-adapter", "startPiSession.done", { taskId: task.id, agentId, runId, mode: result.mode });
+  return result;
 }
 
 export async function doctorPi({ cwd = process.cwd(), sessionDir, runPrompt = false } = {}) {
+  logStep("pi-adapter", "doctorPi.start", { cwd, runPrompt });
   const loaded = await loadPiSdk();
   if (!loaded.ok) {
+    logStep("pi-adapter", "doctorPi.done", { ok: false, reason: loaded.reason });
     return {
       ok: false,
       sdk: { packageName: loaded.packageName, mode: loaded.mode, version: loaded.version, reason: loaded.reason },
@@ -450,7 +469,7 @@ export async function doctorPi({ cwd = process.cwd(), sessionDir, runPrompt = fa
     dryRun = { mode: "error", reason: safeError(error) };
   }
 
-  return {
+  const result = {
     ok: loaded.ok && loaded.api.createAgentSession && loaded.api.SessionManager && dryRun?.mode === "real",
     sdk: {
       packageName: loaded.packageName,
@@ -464,4 +483,6 @@ export async function doctorPi({ cwd = process.cwd(), sessionDir, runPrompt = fa
     },
     dryRun
   };
+  logStep("pi-adapter", "doctorPi.done", { ok: result.ok });
+  return result;
 }

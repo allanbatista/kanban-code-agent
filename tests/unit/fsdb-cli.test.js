@@ -41,7 +41,7 @@ test("kca task move updates materialized YAML and appends event", async () => {
   const { stdout } = await run(["task", "create", "--title", "Mover task"], root);
   const task = JSON.parse(stdout);
   await run(["task", "move", task.id, "build"], root);
-  assert.match(await readFile(join(root, "tasks", task.id, "task.yaml"), "utf8"), /column: build/);
+  assert.match(await readFile(join(root, "tasks", task.id, "task.yaml"), "utf8"), /column: engineering/);
   assert.match(await readFile(join(root, "tasks", task.id, "events.jsonl"), "utf8"), /task.moved/);
 });
 
@@ -51,11 +51,11 @@ test("kca task recover rebuilds materialized YAML from append-only events", asyn
   const task = JSON.parse(stdout);
   await run(["task", "move", task.id, "build"], root);
   const taskPath = join(root, "tasks", task.id, "task.yaml");
-  const corrupted = (await readFile(taskPath, "utf8")).replace("column: build", "column: blocked").replace("status: idle", "status: blocked");
+  const corrupted = (await readFile(taskPath, "utf8")).replace("column: engineering", "column: human_wait").replace("status: idle", "status: blocked");
   await writeFile(taskPath, corrupted);
 
   const recovered = JSON.parse((await run(["task", "recover", task.id], root)).stdout);
-  assert.equal(recovered.column, "build");
+  assert.equal(recovered.column, "engineering");
   assert.equal(recovered.status, "idle");
   assert.match(await readFile(join(root, "tasks", task.id, "events.jsonl"), "utf8"), /task.recovered/);
 });

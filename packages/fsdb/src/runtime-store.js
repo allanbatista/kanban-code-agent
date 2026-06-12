@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import YAML from "yaml";
+import { logStep } from "@kca/core/log";
 
 function storageRoot(root = process.env.KCA_STORAGE_ROOT) {
   return resolve(root || join(homedir(), ".kanban-code-agent"));
@@ -19,6 +20,7 @@ async function writeAtomic(path, content) {
 }
 
 export async function readSemaphoreState(rootInput) {
+  logStep("fsdb", "readSemaphoreState", { root: storageRoot(rootInput) });
   try {
     return YAML.parse(await readFile(runtimePath(rootInput, "semaphores.yaml"), "utf8"));
   } catch {
@@ -29,6 +31,7 @@ export async function readSemaphoreState(rootInput) {
 export async function writeSemaphoreState(state, rootInput) {
   const next = { schema: "kanban-code-agent/semaphores@1", tokens: {}, leases: [], ...state };
   await writeAtomic(runtimePath(rootInput, "semaphores.yaml"), YAML.stringify(next));
+  logStep("fsdb", "writeSemaphoreState", { root: storageRoot(rootInput) });
   return next;
 }
 
@@ -37,16 +40,20 @@ function activeLeases(state, now = Date.now()) {
 }
 
 export async function acquireSemaphoreLeases(requests, { root, taskId, runId, role, ttlMs = 15 * 60 * 1000 } = {}) {
+  logStep("fsdb", "acquireSemaphoreLeases.start", { taskId: taskId || null, runId: runId || null, requests: requests.length });
   const state = await readSemaphoreState(root);
   const leases = activeLeases(state);
   const normalized = requests.map((item) => typeof item === "string" ? { name: item, tokens: 1 } : { tokens: 1, ...item });
   const blocked = [];
   for (const request of normalized) {
-    const capacity = state.tokens?.[request.name] ?? request.tokens ?? 1;
+    const capacity = request.capacity ?? state.tokens?.[request.name] ?? request.tokens ?? 1;
     const used = leases.filter((lease) => lease.name === request.name).length;
     if (used + (request.tokens || 1) > capacity) blocked.push({ name: request.name, used, capacity });
   }
-  if (blocked.length) return { ok: false, blocked, state: { ...state, leases } };
+  if (blocked.length) {
+    logStep("fsdb", "acquireSemaphoreLeases.blocked", { taskId: taskId || null, runId: runId || null, blocked: blocked.map((item) => item.name) });
+    return { ok: false, blocked, state: { ...state, leases } };
+  }
   const acquiredAt = new Date().toISOString();
   const expiresAt = new Date(Date.now() + ttlMs).toISOString();
   const leaseIdBase = `${taskId || "task"}-${runId || "run"}-${Date.now()}`;
@@ -60,10 +67,13 @@ export async function acquireSemaphoreLeases(requests, { root, taskId, runId, ro
     expiresAt
   })));
   const next = await writeSemaphoreState({ ...state, leases: [...leases, ...newLeases] }, root);
-  return { ok: true, leases: newLeases, state: next };
+  const result = { ok: true, leases: newLeases, state: next };
+  logStep("fsdb", "acquireSemaphoreLeases.done", { taskId: taskId || null, runId: runId || null, leases: newLeases.length });
+  return result;
 }
 
 export async function releaseSemaphoreLeases({ root, leaseIds = [], runId, taskId } = {}) {
+  logStep("fsdb", "releaseSemaphoreLeases.start", { taskId: taskId || null, runId: runId || null, leaseIds: leaseIds.length });
   const state = await readSemaphoreState(root);
   const ids = new Set(leaseIds);
   const leases = activeLeases(state).filter((lease) => {
@@ -72,5 +82,7 @@ export async function releaseSemaphoreLeases({ root, leaseIds = [], runId, taskI
     if (taskId && lease.taskId === taskId) return false;
     return true;
   });
-  return writeSemaphoreState({ ...state, leases }, root);
+  const result = await writeSemaphoreState({ ...state, leases }, root);
+  logStep("fsdb", "releaseSemaphoreLeases.done", { taskId: taskId || null, runId: runId || null });
+  return result;
 }

@@ -3,18 +3,30 @@ import { access, appendFile, mkdir, readdir, readFile, rename, writeFile } from 
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { DEFAULT_ROLES } from "@kca/core/roles";
+import { logStep } from "@kca/core/log";
 import YAML from "yaml";
 
-export const DEFAULT_COLUMNS = ["inbox", "definition", "build", "validate", "blocked", "done"];
+export const DEFAULT_COLUMNS = ["inbox", "product", "design", "generalist", "engineering", "quality", "review", "deployment", "human_wait", "done"];
+const storageInitCache = new Map();
 
 const DEFAULT_COLUMN_META = {
   inbox: { label: "Entrada", agent: "assistant", autoStart: false, wip: null },
-  definition: { label: "Definição", agent: "architect", autoStart: true, wip: null },
-  build: { label: "Construção", agent: "engineer", autoStart: true, wip: 4 },
-  validate: { label: "Validação", agent: "validator", autoStart: true, wip: 2 },
-  blocked: { label: "Bloqueado", agent: null, autoStart: false, wip: null },
-  done: { label: "Encerrado", agent: null, autoStart: false, wip: null }
+  product: { label: "Produto", agent: "product", role: "product", autoStart: true, wip: null },
+  design: { label: "Design", agent: "design", role: "design", autoStart: true, wip: null },
+  generalist: { label: "Generalista", agent: "generalist", role: "generalist", autoStart: true, wip: 3 },
+  engineering: { label: "Engenharia", agent: "engineering", role: "engineering", autoStart: true, wip: 4 },
+  quality: { label: "Qualidade", agent: "quality", role: "quality", autoStart: true, wip: 2 },
+  review: { label: "Review", agent: "review", role: "review", autoStart: true, wip: 2 },
+  deployment: { label: "Deployment", agent: "deployment", role: "deployment", autoStart: false, wip: 1 },
+  human_wait: { label: "Aguardando Humano", agent: null, role: "manager", autoStart: false, wip: null },
+  done: { label: "Pronto", agent: null, role: null, autoStart: false, wip: null }
 };
+
+const COLUMN_ALIASES = { definition: "product", build: "engineering", validate: "quality", blocked: "human_wait", deploy: "deployment" };
+
+export function normalizeColumnId(columnId) {
+  return COLUMN_ALIASES[columnId] || columnId;
+}
 
 export function storageRoot(root = process.env.KCA_STORAGE_ROOT) {
   return resolve(root || join(homedir(), ".kanban-code-agent"));
@@ -116,192 +128,274 @@ async function listYamlValues(dir) {
 }
 
 export async function initStorage(rootInput) {
-  const p = paths(rootInput);
-  const dirs = [
-    p.settings,
-    join(p.settings, "boards"),
-    join(p.settings, "projects"),
-    join(p.settings, "agents"),
-    join(p.settings, "roles"),
-    join(p.settings, "prompts"),
-    join(p.settings, "hooks"),
-    join(p.settings, "skills"),
-    join(p.runtime, "sessions"),
-    join(p.runtime, "locks"),
-    join(p.runtime, "indexes"),
-    join(p.runtime, "logs"),
-    join(p.runtime, "tmp"),
-    p.tasks
-  ];
-  await Promise.all(dirs.map((dir) => mkdir(dir, { recursive: true })));
-  await ensureYaml(join(p.settings, "app.yaml"), {
-    schema: "kanban-code-agent/app@1",
-    storageRoot: p.root,
-    boardId: "default",
-    runtimeRoot: join(p.settings, "runtime"),
-    workspace: { name: "Kanban Code Agent", language: "pt-BR" },
-    persistence: { taskStateFormat: "yaml", contextFormat: "markdown", eventsFormat: "jsonl", versionTaskData: true, versionRuntimeSessions: false },
-    runtime: {
-      maxParallelTasks: 3,
-      maxParallelAgents: 4,
-      maxParallelMerges: 1,
-      agentSessionRetentionDays: 30,
-      resumeSessions: true,
-      agentTokens: { assistant: 1, architect: 1, engineer: 2, validator: 1, reviewer: 1, manager: 1, product: 1, design: 1, engineering: 2, quality: 1, deployment: 1 },
-      projectTokens: { "kanban-code-agent": 2 }
-    },
-    manualMove: { confirmWhenRunning: true, defaultInterruptPolicy: "ask" },
-    ui: { theme: "system", density: "comfortable", showProgressOnCard: true, showAgentOnCard: true, showProjectTargetsOnCard: true, showDependencyBadgesOnCard: true },
-    safety: { requireApprovalForMerge: true, requireApprovalForDelete: true, allowShell: true, allowNetwork: false },
-    tools: { builtin: ["read", "write", "edit", "bash", "grep", "find", "ls"], custom: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"] }
-  });
-  await ensureYaml(join(p.settings, "boards", "default.yaml"), {
-    schema: "kanban-code-agent/board@1",
-    id: "default",
-    columns: DEFAULT_COLUMNS.map((id) => {
-      const meta = DEFAULT_COLUMN_META[id];
-      return { id, label: meta.label, agent: meta.agent, autoStart: meta.autoStart, wip: meta.wip, wipLimit: meta.wip, hooks: { onEnter: id === "blocked" ? ["summarize-blocker"] : id === "validate" ? ["run-checks"] : [], beforeLeave: [], onAgentComplete: [] } };
-    })
-  });
-  await ensureYaml(join(p.settings, "hooks", "summarize-blocker.yaml"), {
-    schema: "kanban-code-agent/hook@1",
-    id: "summarize-blocker",
-    label: "Resumir bloqueio",
-    kind: "agent-action",
-    agent: "hook-agent",
-    trigger: "onEnter",
-    outputs: { writeSummaryTo: "summaries/blocker.md" },
-    timeoutMs: 120000
-  });
-  await ensureYaml(join(p.settings, "hooks", "run-checks.yaml"), {
-    schema: "kanban-code-agent/hook@1",
-    id: "run-checks",
-    label: "Registrar validação",
-    kind: "noop",
-    trigger: "onEnter",
-    timeoutMs: 120000
-  });
-  const defaultAgents = [
-    {
-      id: "assistant",
-      label: "Board Assistant",
-      skills: ["kanban-management"],
-      tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"],
-      tokens: 1,
-      prompt: "# Board Assistant\n\nManage the Kanban board through typed tools. Create, update, move, explain, decompose, and route tasks without editing storage files directly.\n"
-    },
-    {
-      id: "architect",
-      label: "Architect",
-      skills: ["planning"],
-      tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"],
-      tokens: 1,
-      prompt: "# Architect\n\nRefine scope, acceptance criteria, risks, dependencies, file locks, and subtask plans. Produce executable plans with validation evidence.\n"
-    },
-    {
-      id: "engineer",
-      label: "Engineer",
-      skills: ["implementation"],
-      tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
-      tokens: 2,
-      prompt: "# Engineer\n\nImplement the task inside the dedicated worktree when available. Keep changes scoped, run validation, emit artifacts when useful, and complete via typed tool only.\n"
-    },
-    {
-      id: "validator",
-      label: "Validator",
-      skills: ["validation"],
-      tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
-      tokens: 1,
-      prompt: "# Validator\n\nValidate behavior against acceptance criteria with concrete evidence. Report blockers for failures and complete only when evidence proves the task is ready.\n"
-    },
-    {
-      id: "reviewer",
-      label: "Reviewer",
-      skills: ["review"],
-      tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
-      tokens: 1,
-      prompt: "# Reviewer\n\nReview risks, regressions, missing tests, and merge readiness. Prioritize actionable findings with file and evidence references.\n"
-    },
-    {
-      id: "hook-agent",
-      label: "Hook Agent",
-      skills: ["automation"],
-      tools: ["report_blocker", "emit_artifact"],
-      tokens: 1,
-      prompt: "# Hook Agent\n\nRun short hook actions, summarize outcomes, and write concise evidence. Never make broad implementation changes from hooks.\n"
-    }
-  ];
-  for (const agent of defaultAgents) {
-    await ensureYaml(join(p.settings, "agents", `${agent.id}.yaml`), {
-      schema: "kanban-code-agent/agent@1",
-      id: agent.id,
-      label: agent.label,
-      provider: "pi",
-      instructionsPath: `../prompts/${agent.id}.md`,
-      skills: agent.skills,
-      tools: agent.tools,
-      limits: { tokens: agent.tokens }
-    });
-    await ensureFile(join(p.settings, "prompts", `${agent.id}.md`), agent.prompt);
+  const key = paths(rootInput).root;
+  if (!storageInitCache.has(key)) {
+    storageInitCache.set(key, (async () => {
+      const p = paths(rootInput);
+      logStep("fsdb", "initStorage.start", { root: p.root });
+      const dirs = [
+        p.settings,
+        join(p.settings, "boards"),
+        join(p.settings, "projects"),
+        join(p.settings, "agents"),
+        join(p.settings, "roles"),
+        join(p.settings, "prompts"),
+        join(p.settings, "hooks"),
+        join(p.settings, "skills"),
+        join(p.runtime, "sessions"),
+        join(p.runtime, "locks"),
+        join(p.runtime, "indexes"),
+        join(p.runtime, "logs"),
+        join(p.runtime, "tmp"),
+        p.tasks
+      ];
+      await Promise.all(dirs.map((dir) => mkdir(dir, { recursive: true })));
+      await ensureYaml(join(p.settings, "app.yaml"), {
+        schema: "kanban-code-agent/app@1",
+        storageRoot: p.root,
+        boardId: "default",
+        runtimeRoot: join(p.settings, "runtime"),
+        workspace: { name: "Kanban Code Agent", language: "pt-BR" },
+        persistence: { taskStateFormat: "yaml", contextFormat: "markdown", eventsFormat: "jsonl", versionTaskData: true, versionRuntimeSessions: false },
+        runtime: {
+          maxParallelTasks: 3,
+          maxParallelAgents: 4,
+          maxParallelMerges: 1,
+          agentSessionRetentionDays: 30,
+          resumeSessions: true,
+          chatCompaction: { maxActiveMessages: 50 },
+          agentTokens: { assistant: 1, architect: 1, engineer: 2, validator: 1, reviewer: 1, manager: 1, product: 1, design: 1, generalist: 1, engineering: 2, quality: 1, review: 1, deployment: 1 },
+          projectTokens: { "kanban-code-agent": 2 }
+        },
+        manualMove: { confirmWhenRunning: true, defaultInterruptPolicy: "ask" },
+        ui: { theme: "system", density: "comfortable", showProgressOnCard: true, showAgentOnCard: true, showProjectTargetsOnCard: true, showDependencyBadgesOnCard: true },
+        safety: { requireApprovalForMerge: true, requireApprovalForDelete: true, allowShell: true, allowNetwork: false },
+        tools: { builtin: ["read", "write", "edit", "bash", "grep", "find", "ls"], custom: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"] }
+      });
+      await ensureYaml(join(p.settings, "boards", "default.yaml"), {
+        schema: "kanban-code-agent/board@1",
+        id: "default",
+        columns: DEFAULT_COLUMNS.map((id) => {
+          const meta = DEFAULT_COLUMN_META[id];
+          return { id, label: meta.label, agent: meta.agent, role: meta.role, autoStart: meta.autoStart, wip: meta.wip, wipLimit: meta.wip, hooks: { onEnter: id === "human_wait" ? ["summarize-blocker"] : id === "quality" ? ["run-checks"] : [], beforeLeave: [], onAgentComplete: [] } };
+        })
+      });
+      await ensureYaml(join(p.settings, "hooks", "summarize-blocker.yaml"), {
+        schema: "kanban-code-agent/hook@1",
+        id: "summarize-blocker",
+        label: "Resumir bloqueio",
+        kind: "agent-action",
+        agent: "hook-agent",
+        trigger: "onEnter",
+        outputs: { writeSummaryTo: "summaries/blocker.md" },
+        timeoutMs: 120000
+      });
+      await ensureYaml(join(p.settings, "hooks", "run-checks.yaml"), {
+        schema: "kanban-code-agent/hook@1",
+        id: "run-checks",
+        label: "Registrar validação",
+        kind: "noop",
+        trigger: "onEnter",
+        timeoutMs: 120000
+      });
+      const defaultAgents = [
+        {
+          id: "manager",
+          label: "Manager",
+          skills: ["kanban-management"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"],
+          tokens: 1,
+          prompt: "# Manager\n\nClassify demand, choose the next responsible persona, and unblock work with concise operational decisions.\n"
+        },
+        {
+          id: "product",
+          label: "Product",
+          skills: ["planning"],
+          tools: ["complete_task", "request_user_input", "emit_artifact", "spawn_subtasks"],
+          tokens: 1,
+          prompt: "# Product\n\nDefine problem, value, acceptance criteria, risks, and the next responsible persona.\n"
+        },
+        {
+          id: "design",
+          label: "Design",
+          skills: ["planning"],
+          tools: ["complete_task", "request_user_input", "emit_artifact"],
+          tokens: 1,
+          prompt: "# Design\n\nDefine UX flow, states, accessibility, visual handoff, and evidence.\n"
+        },
+        {
+          id: "generalist",
+          label: "Generalist",
+          skills: ["kanban-management"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tokens: 1,
+          prompt: "# Generalist\n\nExecute non-engineering work with evidence, or delegate to Engineering when code or architecture is required.\n"
+        },
+        {
+          id: "engineering",
+          label: "Engineering",
+          skills: ["implementation"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tokens: 2,
+          prompt: "# Engineering\n\nImplement the task inside the dedicated worktree when available. Keep changes scoped and validate locally.\n"
+        },
+        {
+          id: "quality",
+          label: "Quality",
+          skills: ["validation"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tokens: 1,
+          prompt: "# Quality\n\nValidate acceptance criteria with concrete evidence and route failures to the responsible persona.\n"
+        },
+        {
+          id: "review",
+          label: "Review",
+          skills: ["review"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tokens: 1,
+          prompt: "# Review\n\nReview risks, regressions, missing tests, and merge readiness.\n"
+        },
+        {
+          id: "deployment",
+          label: "Deployment",
+          skills: ["automation"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tokens: 1,
+          prompt: "# Deployment\n\nRun release/deploy gates, record rollback notes, or request human credentials/approval.\n"
+        },
+        {
+          id: "assistant",
+          label: "Board Assistant",
+          skills: ["kanban-management"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"],
+          tokens: 1,
+          prompt: "# Board Assistant\n\nManage the Kanban board through typed tools. Create, update, move, explain, decompose, and route tasks without editing storage files directly.\n"
+        },
+        {
+          id: "architect",
+          label: "Architect",
+          skills: ["planning"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"],
+          tokens: 1,
+          prompt: "# Architect\n\nRefine scope, acceptance criteria, risks, dependencies, file locks, and subtask plans. Produce executable plans with validation evidence.\n"
+        },
+        {
+          id: "engineer",
+          label: "Engineer",
+          skills: ["implementation"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tokens: 2,
+          prompt: "# Engineer\n\nImplement the task inside the dedicated worktree when available. Keep changes scoped, run validation, emit artifacts when useful, and complete via typed tool only.\n"
+        },
+        {
+          id: "validator",
+          label: "Validator",
+          skills: ["validation"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tokens: 1,
+          prompt: "# Validator\n\nValidate behavior against acceptance criteria with concrete evidence. Report blockers for failures and complete only when evidence proves the task is ready.\n"
+        },
+        {
+          id: "reviewer",
+          label: "Reviewer",
+          skills: ["review"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tokens: 1,
+          prompt: "# Reviewer\n\nReview risks, regressions, missing tests, and merge readiness. Prioritize actionable findings with file and evidence references.\n"
+        },
+        {
+          id: "hook-agent",
+          label: "Hook Agent",
+          skills: ["automation"],
+          tools: ["report_blocker", "emit_artifact"],
+          tokens: 1,
+          prompt: "# Hook Agent\n\nRun short hook actions, summarize outcomes, and write concise evidence. Never make broad implementation changes from hooks.\n"
+        }
+      ];
+      for (const agent of defaultAgents) {
+        await ensureYaml(join(p.settings, "agents", `${agent.id}.yaml`), {
+          schema: "kanban-code-agent/agent@1",
+          id: agent.id,
+          label: agent.label,
+          provider: "pi",
+          model: { provider: "pi", name: "default", effort: "medium" },
+          instructionsPath: `../prompts/${agent.id}.md`,
+          skills: agent.skills,
+          tools: agent.tools,
+          limits: { tokens: agent.tokens }
+        });
+        await ensureFile(join(p.settings, "prompts", `${agent.id}.md`), agent.prompt);
+      }
+      for (const role of DEFAULT_ROLES) {
+        await ensureYaml(join(p.settings, "roles", `${role.id}.yaml`), {
+          schema: "kanban-code-agent/role@1",
+          ...role
+        });
+        await ensureFile(join(p.settings, "prompts", `${role.id}.md`), `# ${role.label}\n\n${role.gate}\n`);
+      }
+      await ensureYaml(join(p.runtime, "semaphores.yaml"), {
+        schema: "kanban-code-agent/semaphores@1",
+        tokens: {
+          "global:tasks": 4,
+          "project:kanban-code-agent:tasks": 2,
+          "project:kanban-code-agent:merge": 1,
+          "agent:manager": 1,
+          "agent:product": 1,
+          "agent:design": 1,
+          "agent:generalist": 1,
+          "agent:engineering": 2,
+          "agent:quality": 1,
+          "agent:review": 1,
+          "agent:deployment": 1
+        },
+        leases: []
+      });
+      await ensureYaml(join(p.settings, "skills", "implementation.yaml"), {
+        schema: "kanban-code-agent/skill@1",
+        id: "implementation",
+        instructionsPath: "implementation/SKILL.md"
+      });
+      await ensureFile(join(p.settings, "skills", "implementation", "SKILL.md"), [
+        "---",
+        "name: implementation",
+        "description: Implement task changes inside the dedicated worktree and produce validation evidence.",
+        "---",
+        "",
+        "# Implementation Skill",
+        "",
+        "## Rules",
+        "",
+        "- Work only in the task worktree when one is available.",
+        "- Use typed Kanban tools to complete, block, request input, emit artifacts, or spawn subtasks.",
+        "- Record concise validation evidence before completion.",
+        ""
+      ].join("\n"));
+      await ensureFile(join(p.root, ".gitignore"), [
+        "settings/runtime/sessions/",
+        "settings/runtime/locks/",
+        "settings/runtime/indexes/",
+        "settings/runtime/logs/",
+        "settings/runtime/tmp/",
+        "**/.kca-cache/",
+        "**/.env",
+        "**/.env.*",
+        "_worktrees/",
+        "node_modules/",
+        ""
+      ].join("\n"));
+      logStep("fsdb", "initStorage.ready", { root: p.root });
+      return p;
+    })().catch((error) => {
+      storageInitCache.delete(key);
+      throw error;
+    }));
   }
-  for (const role of DEFAULT_ROLES) {
-    await ensureYaml(join(p.settings, "roles", `${role.id}.yaml`), {
-      schema: "kanban-code-agent/role@1",
-      ...role
-    });
-    await ensureFile(join(p.settings, "prompts", `${role.id}.md`), `# ${role.label}\n\n${role.gate}\n`);
-  }
-  await ensureYaml(join(p.runtime, "semaphores.yaml"), {
-    schema: "kanban-code-agent/semaphores@1",
-    tokens: {
-      "global:tasks": 4,
-      "project:kanban-code-agent:tasks": 2,
-      "project:kanban-code-agent:merge": 1,
-      "agent:engineering": 2,
-      "agent:quality": 1,
-      "agent:review": 1,
-      "agent:deployment": 1
-    },
-    leases: []
-  });
-  await ensureYaml(join(p.settings, "skills", "implementation.yaml"), {
-    schema: "kanban-code-agent/skill@1",
-    id: "implementation",
-    instructionsPath: "implementation/SKILL.md"
-  });
-  await ensureFile(join(p.settings, "skills", "implementation", "SKILL.md"), [
-    "---",
-    "name: implementation",
-    "description: Implement task changes inside the dedicated worktree and produce validation evidence.",
-    "---",
-    "",
-    "# Implementation Skill",
-    "",
-    "## Rules",
-    "",
-    "- Work only in the task worktree when one is available.",
-    "- Use typed Kanban tools to complete, block, request input, emit artifacts, or spawn subtasks.",
-    "- Record concise validation evidence before completion.",
-    ""
-  ].join("\n"));
-  await ensureFile(join(p.root, ".gitignore"), [
-    "settings/runtime/sessions/",
-    "settings/runtime/locks/",
-    "settings/runtime/indexes/",
-    "settings/runtime/logs/",
-    "settings/runtime/tmp/",
-    "**/.kca-cache/",
-    "**/.env",
-    "**/.env.*",
-    "_worktrees/",
-    "node_modules/",
-    ""
-  ].join("\n"));
-  return p;
+  return storageInitCache.get(key);
 }
 
 export async function addProject(input, rootInput) {
   const p = await initStorage(rootInput);
+  logStep("fsdb", "addProject.start", { id: input.id, repo: input.repo });
   const project = {
     schema: "kanban-code-agent/project@1",
     id: input.id,
@@ -310,11 +404,13 @@ export async function addProject(input, rootInput) {
     enabled: input.enabled ?? true
   };
   await writeYaml(join(p.settings, "projects", `${project.id}.yaml`), project);
+  logStep("fsdb", "addProject.done", { id: project.id });
   return project;
 }
 
 export async function createTask(input, rootInput) {
   const p = await initStorage(rootInput);
+  logStep("fsdb", "createTask.start", { title: input.title, column: input.column || "inbox" });
   const id = input.id || `KCA-${String(Date.now()).slice(-6)}`;
   const taskDir = join(p.tasks, id);
   const now = new Date().toISOString();
@@ -323,14 +419,14 @@ export async function createTask(input, rootInput) {
     id,
     title: input.title,
     kind: input.kind || "task",
-    column: input.column || "inbox",
+    column: normalizeColumnId(input.column || "inbox"),
     status: input.status || "idle",
     priority: input.priority || "medium",
     createdAt: now,
     updatedAt: now,
     createdBy: "user",
     projectTargets: input.projectTargets || [],
-    routing: input.routing || { currentAgent: input.agent || "assistant", manualOverride: { active: false } },
+    routing: input.routing || { currentAgent: input.agent || "assistant", currentRole: input.role || input.agent || "assistant", manualOverride: { active: false } },
     worktree: input.worktree || { enabled: true, kind: input.kind || "task", branch: input.branch || `kca/${id}`, pathRef: "worktree.yaml", parentTaskId: null, mergeTarget: "main" },
     dependencies: input.dependencies || { needs: [], provides: [], blockedBy: [], fileLocks: [], semaphores: [] },
     hooks: input.hooks || { active: [] },
@@ -361,11 +457,13 @@ export async function createTask(input, rootInput) {
   await writeYaml(join(taskDir, "worktree.yaml"), { schema: "kanban-code-agent/worktree@1", taskId: id, branch: task.worktree.branch });
   await appendJsonl(join(taskDir, "comments.jsonl"), { ts: now, type: "comment.system", actor: "system", taskId: id, body: "Task criada." });
   await appendJsonl(join(taskDir, "events.jsonl"), { ts: now, type: "task.created", actor: "user", taskId: id, task });
+  logStep("fsdb", "createTask.done", { id, column: task.column, status: task.status });
   return task;
 }
 
 export async function listTasks(rootInput) {
   const p = await initStorage(rootInput);
+  logStep("fsdb", "listTasks.start", { root: p.root });
   const ids = await readdir(p.tasks);
   const tasks = await Promise.all(ids.map(async (id) => {
     const task = await readYaml(join(p.tasks, id, "task.yaml"));
@@ -377,16 +475,20 @@ export async function listTasks(rootInput) {
       return task;
     }
   }));
-  return tasks.filter(Boolean);
+  const result = tasks.filter(Boolean);
+  logStep("fsdb", "listTasks.done", { count: result.length });
+  return result;
 }
 
 export async function getTask(taskId, rootInput) {
   const p = paths(rootInput);
+  logStep("fsdb", "getTask", { taskId });
   return readYaml(join(p.tasks, taskId, "task.yaml"));
 }
 
 export async function updateTask(taskId, patch, rootInput, eventType = "task.updated") {
   const p = paths(rootInput);
+  logStep("fsdb", "updateTask.start", { taskId, eventType, patchKeys: Object.keys(patch || {}) });
   const taskPath = join(p.tasks, taskId, "task.yaml");
   const current = await readYaml(taskPath);
   if (!current) throw new Error(`Task not found: ${taskId}`);
@@ -394,11 +496,13 @@ export async function updateTask(taskId, patch, rootInput, eventType = "task.upd
   const task = { ...current, ...patch, updatedAt };
   await writeYaml(taskPath, task);
   await appendJsonl(join(p.tasks, taskId, "events.jsonl"), { ts: updatedAt, type: eventType, actor: "user", taskId, patch });
+  logStep("fsdb", "updateTask.done", { taskId, column: task.column, status: task.status });
   return task;
 }
 
 export async function writeTaskFile(taskId, relativePath, content, rootInput) {
   const p = paths(rootInput);
+  logStep("fsdb", "writeTaskFile", { taskId, relativePath });
   const file = join(p.tasks, taskId, relativePath);
   await writeAtomic(file, content);
   return relativePath;
@@ -406,15 +510,17 @@ export async function writeTaskFile(taskId, relativePath, content, rootInput) {
 
 export async function moveTask(taskId, toColumn, rootInput) {
   const p = paths(rootInput);
+  logStep("fsdb", "moveTask.start", { taskId, toColumn });
   const taskPath = join(p.tasks, taskId, "task.yaml");
   const task = await readYaml(taskPath);
   if (!task) throw new Error(`Task not found: ${taskId}`);
   const from = task.column;
-  task.column = toColumn;
+  task.column = normalizeColumnId(toColumn);
   task.status = toColumn === "done" ? "done" : task.status;
   task.updatedAt = new Date().toISOString();
   await writeYaml(taskPath, task);
-  await appendJsonl(join(p.tasks, taskId, "events.jsonl"), { ts: task.updatedAt, type: "task.moved", actor: "user", taskId, from, to: toColumn, patch: { column: task.column, status: task.status } });
+  await appendJsonl(join(p.tasks, taskId, "events.jsonl"), { ts: task.updatedAt, type: "task.moved", actor: "user", taskId, from, to: task.column, patch: { column: task.column, status: task.status } });
+  logStep("fsdb", "moveTask.done", { taskId, from, to: task.column });
   return task;
 }
 
@@ -443,6 +549,7 @@ async function readAgentWithPrompt(settingsDir, agent) {
 export async function readSettingsScope(scope = "app", rootInput) {
   const p = await initStorage(rootInput);
   const normalized = scope || "app";
+  logStep("fsdb", "readSettingsScope.start", { scope: normalized });
   const app = await readSettings(rootInput);
   if (normalized === "app") return app;
   const appKey = appScopeKey(normalized);
@@ -467,7 +574,9 @@ export async function readSettingsScope(scope = "app", rootInput) {
   if (normalized === "worktrees") {
     return { scope: normalized, runtimeRoot: app.runtimeRoot, projects: (await listYamlValues(join(p.settings, "projects"))).map((project) => ({ id: project.id, worktrees: project.worktrees || {}, repoPath: project.repoPath })) };
   }
-  return { scope: normalized, settings: app };
+  const result = { scope: normalized, settings: app };
+  logStep("fsdb", "readSettingsScope.done", { scope: normalized });
+  return result;
 }
 
 async function updateYamlById(dir, id, patch, fallbackSchema, rootInput) {
@@ -488,6 +597,7 @@ export async function updateSettings(scopeOrPatch, patchOrRoot, maybeRoot) {
   const rootInput = hasExplicitScope ? maybeRoot : patchOrRoot;
   const p = await initStorage(rootInput);
   const normalized = scope || "app";
+  logStep("fsdb", "updateSettings.start", { scope: normalized });
   if (["agents", "skills", "hooks", "projects"].includes(normalized)) {
     const dir = normalized === "projects" ? "projects" : normalized;
     const schema = `kanban-code-agent/${normalized.slice(0, -1)}@1`;
@@ -497,6 +607,7 @@ export async function updateSettings(scopeOrPatch, patchOrRoot, maybeRoot) {
       const instructionsPath = updated.instructionsPath || `../prompts/${updated.id}.md`;
       await writeAtomic(join(p.settings, "agents", instructionsPath), instructionsBody);
     }
+    logStep("fsdb", "updateSettings.done", { scope: normalized, id: updated.id });
     return updated;
   }
   if (normalized === "board" || normalized === "columns" || normalized === "column-hooks") {
@@ -506,6 +617,7 @@ export async function updateSettings(scopeOrPatch, patchOrRoot, maybeRoot) {
     const board = deepMerge(current, boardPatch);
     await writeYaml(boardPath, board);
     await appendJsonl(join(p.runtime, "logs", "events.jsonl"), { ts: new Date().toISOString(), type: "settings.updated", actor: "user", scope: normalized });
+    logStep("fsdb", "updateSettings.done", { scope: normalized });
     return board;
   }
   const appPath = join(p.settings, "app.yaml");
@@ -514,36 +626,43 @@ export async function updateSettings(scopeOrPatch, patchOrRoot, maybeRoot) {
   const settings = appKey ? deepMerge(current, { [appKey]: patch[appKey] || patch }) : deepMerge(current, patch);
   await writeYaml(appPath, settings);
   await appendJsonl(join(p.runtime, "logs", "events.jsonl"), { ts: new Date().toISOString(), type: "settings.updated", actor: "user", scope: normalized });
+  logStep("fsdb", "updateSettings.done", { scope: normalized });
   return appKey ? { scope: normalized, [appKey]: settings[appKey] } : settings;
 }
 
 export async function readSettings(rootInput) {
   const p = await initStorage(rootInput);
+  logStep("fsdb", "readSettings", { root: p.root });
   return readYaml(join(p.settings, "app.yaml"), {});
 }
 
 export async function readHook(hookId, rootInput) {
   const p = await initStorage(rootInput);
+  logStep("fsdb", "readHook", { hookId });
   return readYaml(join(p.settings, "hooks", `${hookId}.yaml`), null);
 }
 
 export async function readAgent(agentId, rootInput) {
   const p = await initStorage(rootInput);
+  logStep("fsdb", "readAgent", { agentId });
   return readYaml(join(p.settings, "agents", `${agentId}.yaml`), null);
 }
 
 export async function readSkill(skillId, rootInput) {
   const p = await initStorage(rootInput);
+  logStep("fsdb", "readSkill", { skillId });
   return (await readSkillMarkdown(join(p.settings, "skills", skillId), skillId)) || readYaml(join(p.settings, "skills", `${skillId}.yaml`), null);
 }
 
 export async function readProject(projectId, rootInput) {
   const p = await initStorage(rootInput);
+  logStep("fsdb", "readProject", { projectId });
   return readYaml(join(p.settings, "projects", `${projectId}.yaml`), null);
 }
 
 export async function rebuildTaskFromEvents(taskId, rootInput) {
   const p = await initStorage(rootInput);
+  logStep("fsdb", "rebuildTaskFromEvents.start", { taskId });
   const task = await getTask(taskId, rootInput);
   if (!task) throw new Error(`Task not found: ${taskId}`);
   const events = await readJsonl(join(p.tasks, taskId, "events.jsonl"));
@@ -559,33 +678,40 @@ export async function rebuildTaskFromEvents(taskId, rootInput) {
   }, created || task);
   await writeYaml(join(p.tasks, taskId, "task.yaml"), rebuilt);
   await appendJsonl(join(p.tasks, taskId, "events.jsonl"), { ts: new Date().toISOString(), type: "task.recovered", actor: "daemon", taskId });
+  logStep("fsdb", "rebuildTaskFromEvents.done", { taskId });
   return rebuilt;
 }
 
 export async function rebuildIndexes(rootInput) {
   const p = await initStorage(rootInput);
+  logStep("fsdb", "rebuildIndexes.start", { root: p.root });
   const tasks = await listTasks(rootInput);
   await writeAtomic(join(p.runtime, "indexes", "tasks.json"), JSON.stringify(tasks.map(({ id, title, column, status }) => ({ id, title, column, status })), null, 2));
+  logStep("fsdb", "rebuildIndexes.done", { taskCount: tasks.length });
   return { taskCount: tasks.length, indexPath: join(p.runtime, "indexes", "tasks.json") };
 }
 
 export async function boardSnapshot(rootInput) {
   const p = await initStorage(rootInput);
+  logStep("fsdb", "boardSnapshot.start", { root: p.root });
   const board = await readYaml(join(p.settings, "boards", "default.yaml"), { columns: [] });
   const tasks = await listTasks(rootInput);
   const settings = await readSettings(rootInput);
-  return {
+  const result = {
     schema: "kanban-code-agent/state@1",
     columns: board.columns || [],
     tasks,
     settings,
     events: await readJsonl(join(p.runtime, "logs", "events.jsonl"))
   };
+  logStep("fsdb", "boardSnapshot.done", { tasks: tasks.length, columns: result.columns.length });
+  return result;
 }
 
 export async function recordCommandResult(commandId, result, rootInput) {
   if (!commandId) return result;
   const p = await initStorage(rootInput);
+  logStep("fsdb", "recordCommandResult", { commandId });
   const file = join(p.runtime, "indexes", "commands", `${commandId}.json`);
   await writeAtomic(file, JSON.stringify(result, null, 2));
   return result;
@@ -594,6 +720,7 @@ export async function recordCommandResult(commandId, result, rootInput) {
 export async function readCommandResult(commandId, rootInput) {
   if (!commandId) return null;
   const p = await initStorage(rootInput);
+  logStep("fsdb", "readCommandResult", { commandId });
   try {
     return JSON.parse(await readFile(join(p.runtime, "indexes", "commands", `${commandId}.json`), "utf8"));
   } catch {

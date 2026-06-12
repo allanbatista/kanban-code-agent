@@ -1,18 +1,16 @@
-import { FormEvent, useEffect, useState } from "react";
+import { DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
-import { CheckCircle, GitBranch, Pause, Play, Send, Split, X } from "lucide-react";
+import { CheckCircle, FileText, GitBranch, Paperclip, Pause, Play, Send, Split, Upload, X } from "lucide-react";
 import { z } from "zod";
 import type { ChatMessage, Task, TaskFiles } from "../types";
 
 const formSchema = z.object({
   title: z.string().min(1),
   description: z.string().optional(),
-  priority: z.string().min(1),
-  kind: z.string().min(1),
-  projectTargets: z.string().optional()
+  projectTargets: z.array(z.string())
 });
 
 type FormValues = z.infer<typeof formSchema>;
@@ -32,32 +30,42 @@ type Props = {
 
 export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messages, allTasks, files, onSaveFile, onAction }: Props) {
   const [chat, setChat] = useState("");
-  const [acceptance, setAcceptance] = useState("");
+  const [projectQuery, setProjectQuery] = useState("");
+  const [attachments, setAttachments] = useState<File[]>([]);
+  const [chatAttachments, setChatAttachments] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const chatFileInputRef = useRef<HTMLInputElement | null>(null);
   const subtasks = task ? allTasks.filter((item) => item.worktree?.parentTaskId === task.id) : [];
+  const projectOptions = useMemo(() => Array.from(new Set([
+    ...allTasks.flatMap((item) => item.projectTargets || []),
+    ...(task?.projectTargets || []),
+    "kanban-code-agent"
+  ])).sort(), [allTasks, task?.projectTargets]);
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
-    defaultValues: { title: "", description: "", priority: "medium", kind: "task", projectTargets: "" }
+    defaultValues: { title: "", description: "", projectTargets: [] }
   });
+  const selectedProjects = form.watch("projectTargets") || [];
+  const filteredProjects = projectOptions.filter((project) => project.toLowerCase().includes(projectQuery.toLowerCase()));
 
   useEffect(() => {
     form.reset({
       title: task?.title || "",
       description: task?.description || "",
-      priority: task?.priority || "medium",
-      kind: task?.kind || "task",
-      projectTargets: task?.projectTargets?.join(", ") || ""
+      projectTargets: task?.projectTargets || []
     });
-    setAcceptance(files?.acceptance || "");
-  }, [task, form, open, files?.acceptance]);
+    setAttachments([]);
+    setChatAttachments([]);
+  }, [task, form, open]);
 
   async function submit(values: FormValues) {
     await onSave({
       id: task?.id,
       title: values.title,
       description: values.description,
-      priority: values.priority,
-      kind: values.kind,
-      projectTargets: values.projectTargets?.split(",").map((item) => item.trim()).filter(Boolean) || []
+      priority: task?.priority || "medium",
+      kind: task?.kind || "task",
+      projectTargets: values.projectTargets || []
     });
     onClose();
   }
@@ -65,9 +73,32 @@ export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messag
   async function submitChat(event: FormEvent) {
     event.preventDefault();
     const value = chat.trim();
-    if (!value) return;
+    if (!value && chatAttachments.length === 0) return;
+    const attachmentNote = chatAttachments.length ? `\n\nAnexos: ${chatAttachments.map((file) => file.name).join(", ")}` : "";
     setChat("");
-    await onSendAssistant(value, task?.id);
+    setChatAttachments([]);
+    await onSendAssistant(`${value}${attachmentNote}`, task?.id);
+  }
+
+  function addAttachments(nextFiles: FileList | File[]) {
+    setAttachments((current) => mergeFiles(current, Array.from(nextFiles)));
+  }
+
+  function addChatAttachments(nextFiles: FileList | File[]) {
+    setChatAttachments((current) => mergeFiles(current, Array.from(nextFiles)));
+  }
+
+  function dropFiles(event: DragEvent<HTMLElement>, target: "task" | "chat") {
+    event.preventDefault();
+    if (target === "task") addAttachments(event.dataTransfer.files);
+    else addChatAttachments(event.dataTransfer.files);
+  }
+
+  function toggleProject(project: string) {
+    const next = selectedProjects.includes(project)
+      ? selectedProjects.filter((item) => item !== project)
+      : [...selectedProjects, project];
+    form.setValue("projectTargets", next, { shouldDirty: true, shouldValidate: true });
   }
 
   return (
@@ -86,23 +117,41 @@ export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messag
             <form className="flex min-h-0 flex-col border-r border-zinc-800" onSubmit={form.handleSubmit(submit)}>
               <Tabs.Root defaultValue="resumo" className="flex min-h-0 flex-1 flex-col">
                 <Tabs.List id="taskTabs" className="tabs-list">
-                  {["resumo", "aceite", "execucao", "worktree", "dependencias", "subtasks", "hooks", "eventos", "arquivos"].map((tab) => (
+                  {["resumo", "execucao", "worktree", "dependencias", "subtasks", "hooks", "eventos", "arquivos"].map((tab) => (
                     <Tabs.Trigger className="tabs-trigger" key={tab} value={tab}>{tab}</Tabs.Trigger>
                   ))}
                 </Tabs.List>
-                <div className="min-h-0 flex-1 overflow-auto p-4">
-                  <Tabs.Content value="resumo" className="space-y-3">
-                    <label className="field">Título<input className="input" aria-label="Título" {...form.register("title")} /></label>
-                    <label className="field">Descrição<textarea className="textarea" aria-label="Descrição" {...form.register("description")} /></label>
-                    <div className="grid grid-cols-2 gap-3">
-                      <label className="field">Tipo<input className="input" {...form.register("kind")} /></label>
-                      <label className="field">Prioridade<input className="input" {...form.register("priority")} /></label>
+                <div className="task-tab-body">
+                  <Tabs.Content value="resumo" className="task-summary">
+                    <div className="field">
+                      <label htmlFor="task-title">Título</label>
+                      <input id="task-title" className="input" {...form.register("title")} />
                     </div>
-                    <label className="field">Projetos alvo<input className="input" placeholder="repo-a, repo-b" {...form.register("projectTargets")} /></label>
-                  </Tabs.Content>
-                  <Tabs.Content value="aceite" className="space-y-3">
-                    <label className="field">Critérios de aceite<textarea className="textarea" aria-label="Critérios de aceite" value={acceptance} onChange={(event) => setAcceptance(event.target.value)} /></label>
-                    {task ? <button type="button" className="button-secondary" onClick={() => onSaveFile(task.id, "acceptance.md", acceptance)}>Salvar aceite</button> : null}
+                    <div className="field">
+                      <span>Projetos alvo</span>
+                      <div className="multi-select">
+                        <div className="multi-select-values">
+                          {selectedProjects.map((project) => (
+                            <button type="button" className="pill" key={project} onClick={() => toggleProject(project)}>{project}<X size={12} /></button>
+                          ))}
+                          <input value={projectQuery} onChange={(event) => setProjectQuery(event.target.value)} placeholder="Buscar projeto" />
+                        </div>
+                        <div className="multi-select-menu">
+                          {filteredProjects.map((project) => (
+                            <label key={project} className="multi-select-option">
+                              <input type="checkbox" checked={selectedProjects.includes(project)} onChange={() => toggleProject(project)} />
+                              {project}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="field task-description-field">
+                      <label htmlFor="task-description">Descrição</label>
+                      <textarea id="task-description" className="textarea" {...form.register("description")} />
+                    </div>
+                    <AttachmentDropzone files={attachments} onClick={() => fileInputRef.current?.click()} onDrop={(event) => dropFiles(event, "task")} onRemove={(index) => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))} />
+                    <input ref={fileInputRef} className="sr-only" type="file" multiple onChange={(event) => event.target.files && addAttachments(event.target.files)} />
                   </Tabs.Content>
                   <Tabs.Content value="execucao">
                     <Panel title="Runtime" lines={[`status: ${task?.status || "nova"}`, `agent: ${task?.routing?.currentAgent || "assistant"}`, `run: ${typeof task?.agent === "object" ? task.agent?.currentRunId || "nenhum" : "nenhum"}`]} />
@@ -120,7 +169,7 @@ export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messag
                   </Tabs.Content>
                   <Tabs.Content value="hooks"><Panel title="Hooks da task" lines={task?.hooks?.active?.length ? task.hooks.active : ["nenhum hook ativo"]} /></Tabs.Content>
                   <Tabs.Content value="eventos"><Panel title="Timeline" lines={(files?.events?.length ? files.events.slice(-8).map((event) => `${event.type || "event"} · ${event.ts || ""}`) : [`updated: ${task?.updatedAt || "nao persistida"}`])} /></Tabs.Content>
-                  <Tabs.Content value="arquivos"><Panel title="Arquivos da task" lines={files?.files || ["task.yaml", "description.md", "acceptance.md", "dependencies.yaml", "events.jsonl"]} /></Tabs.Content>
+                  <Tabs.Content value="arquivos"><Panel title="Arquivos da task" lines={[...(files?.files || ["task.yaml", "description.md", "dependencies.yaml", "events.jsonl"]), ...attachments.map((file) => file.name)]} /></Tabs.Content>
                 </div>
               </Tabs.Root>
               <div className="flex justify-end gap-2 border-t border-zinc-800 p-4">
@@ -142,15 +191,41 @@ export function TaskModal({ task, open, onClose, onSave, onSendAssistant, messag
                 ))}
                 {task?.worktree?.branch ? <div className="flex items-center gap-2 text-xs text-zinc-500"><GitBranch size={13} />{task.worktree.branch}</div> : null}
               </div>
-              <form className="flex gap-2 border-t border-zinc-800 p-4" onSubmit={submitChat}>
-                <input className="input" placeholder="Pergunte sobre escopo" value={chat} onChange={(event) => setChat(event.target.value)} />
-                <button className="icon-button" aria-label="Enviar"><Send size={16} /></button>
+              <form className="task-chat-composer" onSubmit={submitChat} onDragOver={(event) => event.preventDefault()} onDrop={(event) => dropFiles(event, "chat")}>
+                <textarea className="textarea" placeholder="Pergunte sobre escopo" value={chat} onChange={(event) => setChat(event.target.value)} />
+                <div className="task-chat-actions">
+                  <button type="button" className="icon-button" aria-label="Anexar arquivos" title={chatAttachments.map((file) => file.name).join(", ")} onClick={() => chatFileInputRef.current?.click()}><Paperclip size={16} /></button>
+                  <input ref={chatFileInputRef} className="sr-only" type="file" multiple onChange={(event) => event.target.files && addChatAttachments(event.target.files)} />
+                  <button className="icon-button" aria-label="Enviar"><Send size={16} /></button>
+                </div>
               </form>
             </section>
           </div>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
+  );
+}
+
+function mergeFiles(current: File[], next: File[]) {
+  const keys = new Set(current.map((file) => `${file.name}:${file.size}`));
+  return [...current, ...next.filter((file) => !keys.has(`${file.name}:${file.size}`))];
+}
+
+function AttachmentDropzone({ files, onClick, onDrop, onRemove }: { files: File[]; onClick: () => void; onDrop: (event: DragEvent<HTMLDivElement>) => void; onRemove: (index: number) => void }) {
+  return (
+    <div className="attachment-dropzone" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
+      <button type="button" className="button-secondary" onClick={onClick}><Upload size={15} />Upload</button>
+      <div className="attachment-list">
+        {files.length ? files.map((file, index) => (
+          <article className="attachment-card" key={`${file.name}:${file.size}`}>
+            <FileText size={16} />
+            <span>{file.name}</span>
+            <button type="button" className="icon-button" aria-label="Remover arquivo" onClick={() => onRemove(index)}><X size={13} /></button>
+          </article>
+        )) : <span className="attachment-empty">Solte arquivos aqui</span>}
+      </div>
+    </div>
   );
 }
 

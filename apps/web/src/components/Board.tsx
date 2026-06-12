@@ -38,10 +38,10 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
   return (
     <div className="main-area">
       <div className="control-row">
-        <label className="search" aria-label="Buscar tasks">
-          <span className="sr-only">Buscar tasks</span>
-          <input aria-label="Buscar tasks" placeholder="Buscar task, agent, branch, skill ou dependência" value={search} onChange={(event) => onSearch(event.target.value)} />
-        </label>
+        <div className="search">
+          <label className="sr-only" htmlFor="board-search">Buscar tasks</label>
+          <input id="board-search" placeholder="Buscar task, agent, branch, skill ou dependência" value={search} onChange={(event) => onSearch(event.target.value)} />
+        </div>
         <div className="segmented" aria-label="Filtro operacional">
           {filters.map((filter) => (
             <button className={filter.id === statusFilter ? "active" : ""} key={filter.id} type="button" onClick={() => onFilter(filter.id)}>
@@ -93,9 +93,8 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                           {task.description ? <p className="task-copy">{task.description}</p> : null}
                           <div className="task-tags">
                             <span className={clsx("pill", task.status)}>{statusLabels[task.status] || task.status}</span>
-                            <span className="pill soft">{task.kind}</span>
-                            <span className="pill soft">{task.priority}</span>
-                            {task.routing?.currentAgent ? <span className="pill soft">{task.routing.currentAgent}</span> : null}
+                            {task.routing?.currentRole ? <span className="pill soft">{task.routing.currentRole}</span> : null}
+                            {task.routing?.currentAgent && task.routing.currentAgent !== task.routing.currentRole ? <span className="pill soft">{task.routing.currentAgent}</span> : null}
                             {task.routing?.lastAgent ? <span className="pill soft">prev {task.routing.lastAgent}</span> : null}
                             {task.routing?.nextSuggestedColumn ? <span className="pill soft">next {task.routing.nextSuggestedColumn}</span> : null}
                             {(task.projectTargets || []).map((project) => <span className="pill" key={project}>{project}</span>)}
@@ -103,7 +102,7 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                           <div className="progress" aria-label={`Progresso ${progress}%`}><span style={{ width: `${progress}%` }} /></div>
                           <div className="task-footer">
                             <span className="mini-meta"><GitBranch size={13} />{task.worktree?.branch || "sem branch"}</span>
-                            <span className="mini-meta">role: {task.routing?.currentAgent || "user"}</span>
+                            <span className="mini-meta">role: {task.routing?.currentRole || task.routing?.currentAgent || "user"}</span>
                             <span className="mini-meta">parallel: {["queued", "running"].includes(task.status) ? "ativo" : "idle"}</span>
                           </div>
                         </button>

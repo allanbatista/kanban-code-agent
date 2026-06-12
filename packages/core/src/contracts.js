@@ -8,6 +8,16 @@ export const COMMAND_TYPES = [
   "task.decompose",
   "task.merge",
   "scheduler.tick",
+  "agent.step",
+  "agent.wait_for_persona",
+  "agent.wait_for_human",
+  "agent.message",
+  "agent.delegate_task",
+  "chat.compact",
+  "agent.review_task",
+  "agent.deploy_task",
+  "task.answer_input",
+  "role.route_task",
   "agent.complete_task",
   "agent.report_blocker",
   "agent.request_user_input",
@@ -23,6 +33,8 @@ export const QUERY_TYPES = [
   "orchestrator.status",
   "settings.scope",
   "chat.history",
+  "chat.build",
+  "provider.discover",
   "why_not_running"
 ];
 
@@ -39,12 +51,26 @@ export const EVENT_TYPES = [
   "agent.queued",
   "agent.started",
   "agent.event",
+  "agent.message",
+  "agent.waiting_for_persona",
+  "agent.waiting_for_human",
   "chat.message",
   "agent.checkpoint_requested",
   "agent.interrupted",
   "agent.completed",
   "agent.failed",
   "agent.input_requested",
+  "role.handoff",
+  "human.input_requested",
+  "human.input_received",
+  "gate.passed",
+  "gate.failed",
+  "chat.created",
+  "chat.compaction_requested",
+  "chat.compacted",
+  "delegation.requested",
+  "delegation.result",
+  "provider.missing_env",
   "artifact.emitted",
   "hook.started",
   "hook.completed",
@@ -58,10 +84,11 @@ export const EVENT_TYPES = [
   "merge.requested",
   "merge.completed",
   "merge.conflict",
+  "merge.blocked",
   "settings.updated"
 ];
 
-export const ROLE_IDS = ["manager", "product", "design", "engineering", "quality", "review", "deployment"];
+export const ROLE_IDS = ["manager", "product", "design", "generalist", "engineering", "quality", "review", "deployment"];
 
 export function commandEnvelope(type, payload = {}) {
   return { type, commandId: payload.commandId || `cmd-${Date.now()}`, ...payload };

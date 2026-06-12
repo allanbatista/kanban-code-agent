@@ -7,6 +7,8 @@
     ".": "./src/fixtures.js",
     "./contracts": "./src/contracts.js",
     "./dag": "./src/dag.js",
+    "./log": "./src/log.js",
+    "./providers": "./src/providers.js",
     "./roles": "./src/roles.js"
   }
 }

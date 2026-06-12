@@ -1,23 +1,30 @@
 import { appendJsonl, boardSnapshot, getTask, listTasks, paths, readSettings } from "@kca/fsdb";
 import { acquireSemaphoreLeases, releaseSemaphoreLeases } from "@kca/fsdb/runtime-store";
+import { logStep } from "@kca/core/log";
 
 function taskSemaphores(task) {
   return (task.dependencies?.semaphores || []).map((item) => typeof item === "string" ? { name: item, tokens: 1 } : item).filter((item) => item?.name);
 }
 
+function taskAgent(task) {
+  return task.routing?.currentAgent || task.routing?.currentRole || task.agent?.currentAgent || task.agent || "assistant";
+}
+
 export function semaphoreRequestsForTask(task, settings = {}) {
-  const agentId = task.routing?.currentAgent || task.agent?.currentAgent || task.agent || "assistant";
+  const agentId = taskAgent(task);
+  const runtime = settings.runtime || {};
   return [
-    { name: "global:tasks", tokens: 1 },
-    { name: `agent:${agentId}`, tokens: 1 },
-    ...(task.projectTargets || []).map((projectId) => ({ name: `project:${projectId}:tasks`, tokens: 1 })),
+    { name: "global:tasks", tokens: 1, capacity: runtime.maxParallelTasks ?? 1 },
+    { name: `agent:${agentId}`, tokens: 1, capacity: runtime.agentTokens?.[agentId] ?? 1 },
+    ...(task.projectTargets || []).map((projectId) => ({ name: `project:${projectId}:tasks`, tokens: 1, capacity: runtime.projectTokens?.[projectId] ?? 1 })),
     ...taskSemaphores(task)
-  ].filter((request, index, list) => list.findIndex((item) => item.name === request.name) === index && (settings.runtime?.agentTokens?.[agentId] !== 0));
+  ].filter((request, index, list) => list.findIndex((item) => item.name === request.name) === index && (runtime.agentTokens?.[agentId] !== 0));
 }
 
 export async function schedulerTick(root, { whyNotRunning, runTask, maxStarts } = {}) {
   if (typeof whyNotRunning !== "function") throw new Error("schedulerTick requires whyNotRunning");
   if (typeof runTask !== "function") throw new Error("schedulerTick requires runTask");
+  logStep("scheduler", "tick.start", { maxStarts: maxStarts ?? null });
   const snapshot = await boardSnapshot(root);
   const settings = await readSettings(root);
   const tasks = (await listTasks(root)).filter((task) => task.status === "queued");
@@ -35,7 +42,7 @@ export async function schedulerTick(root, { whyNotRunning, runTask, maxStarts } 
       skipped.push({ taskId: task.id, reasons: why.reasons });
       continue;
     }
-    const agentId = task.routing?.currentAgent || task.agent?.currentAgent || task.agent || "assistant";
+    const agentId = taskAgent(task);
     const leases = await acquireSemaphoreLeases(semaphoreRequestsForTask(task, settings), {
       root,
       taskId: task.id,
@@ -64,5 +71,6 @@ export async function schedulerTick(root, { whyNotRunning, runTask, maxStarts } 
     blocked
   };
   await appendJsonl(`${paths(root).runtime}/logs/events.jsonl`, event);
+  logStep("scheduler", "tick.done", { started: started.map((item) => item.taskId), blocked: blocked.length, skipped: skipped.length });
   return { ok: true, event, started, skipped, blocked };
 }

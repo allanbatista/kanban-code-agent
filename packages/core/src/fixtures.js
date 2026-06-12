@@ -1,10 +1,14 @@
 export const columns = [
   { id: "inbox", label: "Entrada", agent: "assistant", autoStart: false, wip: null },
-  { id: "definition", label: "Definição", agent: "architect", autoStart: true, wip: 3 },
-  { id: "build", label: "Construção", agent: "engineer", autoStart: true, wip: 4 },
-  { id: "validate", label: "Validação", agent: "validator", autoStart: true, wip: 2 },
-  { id: "blocked", label: "Bloqueado", agent: null, autoStart: false, wip: null },
-  { id: "done", label: "Pronto", agent: "reviewer", autoStart: false, wip: null }
+  { id: "product", label: "Produto", agent: "product", role: "product", autoStart: true, wip: 3 },
+  { id: "design", label: "Design", agent: "design", role: "design", autoStart: true, wip: 2 },
+  { id: "generalist", label: "Generalista", agent: "generalist", role: "generalist", autoStart: true, wip: 3 },
+  { id: "engineering", label: "Engenharia", agent: "engineering", role: "engineering", autoStart: true, wip: 4 },
+  { id: "quality", label: "Qualidade", agent: "quality", role: "quality", autoStart: true, wip: 2 },
+  { id: "review", label: "Review", agent: "review", role: "review", autoStart: true, wip: 2 },
+  { id: "deployment", label: "Deployment", agent: "deployment", role: "deployment", autoStart: false, wip: 1 },
+  { id: "human_wait", label: "Aguardando Humano", agent: null, role: "manager", autoStart: false, wip: null },
+  { id: "done", label: "Pronto", agent: null, role: null, autoStart: false, wip: null }
 ];
 
 export const agents = [
@@ -12,7 +16,8 @@ export const agents = [
   { id: "architect", label: "Architect", status: "idle" },
   { id: "engineer", label: "Engineer", status: "running" },
   { id: "validator", label: "Validator", status: "idle" },
-  { id: "reviewer", label: "Reviewer", status: "idle" }
+  { id: "reviewer", label: "Reviewer", status: "idle" },
+  { id: "generalist", label: "Generalist", status: "idle" }
 ];
 
 export const tasks = [
@@ -20,7 +25,7 @@ export const tasks = [
     id: "KCA-101",
     title: "Modelar FSDB em arquivos abertos",
     kind: "task",
-    column: "definition",
+    column: "product",
     status: "running",
     priority: "high",
     projectTargets: ["kanban-code-agent"],
@@ -33,7 +38,7 @@ export const tasks = [
     id: "KCA-200",
     title: "Integrar Pi SDK, worktrees e subtasks paralelas",
     kind: "master",
-    column: "build",
+    column: "engineering",
     status: "queued",
     priority: "high",
     projectTargets: ["kanban-code-agent"],

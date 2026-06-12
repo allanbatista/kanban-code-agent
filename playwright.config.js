@@ -1,9 +1,9 @@
 import { defineConfig } from "@playwright/test";
 import { resolve } from "node:path";
 
-const webPort = Number(process.env.KCA_WEB_PORT || 5183);
+const webPort = Number(process.env.KCA_WEB_PORT || 15001);
 const webUrl = `http://127.0.0.1:${webPort}`;
-const daemonPort = Number(process.env.KCA_E2E_DAEMON_PORT || 4175);
+const daemonPort = Number(process.env.KCA_E2E_DAEMON_PORT || 15000);
 const daemonUrl = `http://127.0.0.1:${daemonPort}`;
 const storageRoot = resolve(process.env.KCA_E2E_STORAGE_ROOT || "tmp/playwright-fsdb");
 process.env.KCA_DAEMON_URL = daemonUrl;

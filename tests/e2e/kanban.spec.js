@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import YAML from "yaml";
 
 test.describe.configure({ mode: "serial" });
-const daemonUrl = process.env.KCA_DAEMON_URL || "http://127.0.0.1:4175";
+const daemonUrl = process.env.KCA_DAEMON_URL || "http://127.0.0.1:15000";
 const storageRoot = resolve(process.env.KCA_E2E_STORAGE_ROOT || "tmp/playwright-fsdb");
 
 async function createTask(request, title, extra = {}) {
@@ -35,7 +35,7 @@ test("starts from a clean daemon storage without fixture tasks", async ({ page, 
 test("creates a task through React UI and persists it in FSDB", async ({ page, request }) => {
   const title = `Task UI ${Date.now()}`;
   await page.goto("/");
-  await page.getByRole("button", { name: "Nova task" }).click();
+  await page.getByRole("button", { name: "Nova task", exact: true }).click();
   await page.getByLabel("Título").fill(title);
   await page.getByLabel("Descrição").fill("Persistir via daemon.");
   await page.getByRole("button", { name: "Salvar task" }).click();
@@ -70,11 +70,11 @@ test("edits and moves a persisted card through daemon commands", async ({ page, 
   await page.getByRole("button", { name: "Salvar task" }).click();
   await expect(page.locator(`[data-task-id="${task.id}"]`).getByText(editedTitle)).toBeVisible();
 
-  await page.locator(`[data-task-id="${task.id}"]`).dragTo(page.locator(`[data-column-id="definition"]`));
+  await page.locator(`[data-task-id="${task.id}"]`).dragTo(page.locator(`[data-column-id="product"]`));
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
     return (await state.json()).tasks.find((item) => item.id === task.id)?.column;
-  }).toBe("definition");
+  }).toBe("product");
 });
 
 test("board assistant runs as agent and creates a real task", async ({ page, request }) => {
@@ -106,14 +106,14 @@ test("board assistant moves the selected task through a typed command", async ({
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
     return (await state.json()).tasks.find((item) => item.id === task.id)?.column;
-  }).toBe("build");
+  }).toBe("engineering");
 });
 
 test("task modal exposes tabs and runs the assigned agent", async ({ page, request }) => {
   const task = await createTask(request, `Runtime task ${Date.now()}`);
   await page.goto("/");
   await page.getByText(task.title).click();
-  for (const tab of ["aceite", "execucao", "worktree", "dependencias", "subtasks", "hooks", "eventos", "arquivos"]) {
+  for (const tab of ["resumo", "execucao", "worktree", "dependencias", "subtasks", "hooks", "eventos", "arquivos"]) {
     await page.getByRole("tab", { name: tab }).click();
   }
   await page.getByRole("tab", { name: "execucao" }).click();
@@ -125,25 +125,25 @@ test("task modal exposes tabs and runs the assigned agent", async ({ page, reque
   await page.getByRole("button", { name: "Decompor" }).click();
   await page.getByRole("tab", { name: "subtasks" }).click();
   await expect(page.getByRole("dialog").getByText(new RegExp(`${task.id}-01 \\[`))).toBeVisible();
-  await page.getByRole("tab", { name: "aceite" }).click();
-  await page.getByLabel("Critérios de aceite").fill("# Critérios de aceite\n\n- [ ] Aceite editado no E2E.\n");
-  await page.getByRole("button", { name: "Salvar aceite" }).click();
+  await page.getByRole("tab", { name: "resumo" }).click();
+  await page.getByLabel("Título").fill(`${task.title} editado`);
+  await page.getByRole("button", { name: "Salvar task" }).click();
   await expect.poll(async () => {
-    const response = await request.post(`${daemonUrl}/api/query`, { data: { type: "task.files", taskId: task.id } });
-    return (await response.json()).acceptance;
-  }).toContain("Aceite editado no E2E");
+    const state = await request.get(`${daemonUrl}/api/state`);
+    return (await state.json()).tasks.find((item) => item.id === task.id)?.title;
+  }).toContain("editado");
 });
 
-test("daemon scheduler auto-starts queued runnable tasks", async ({ request }) => {
+test("daemon scheduler starts tasks from persona events", async ({ request }) => {
   await request.post(`${daemonUrl}/api/settings.update`, {
-    data: { scope: "app", patch: { runtime: { maxParallelTasks: 10, agentTokens: { "scheduler-e2e": 1 }, projectTokens: { "kanban-code-agent": 10 } } } }
+    data: { scope: "app", patch: { runtime: { maxParallelTasks: 10, agentTokens: { product: 10 }, projectTokens: { "kanban-code-agent": 10 } } } }
   });
-  const task = await createTask(request, `Scheduled task ${Date.now()}`, {
-    column: "definition",
-    projectTargets: [],
-    status: "queued",
-    routing: { currentAgent: "scheduler-e2e", manualOverride: { active: false } }
+  const task = await createTask(request, `Scheduled task ${Date.now()}`, { projectTargets: [] });
+  const moved = await request.post(`${daemonUrl}/api/task.move`, {
+    data: { taskId: task.id, toColumn: "product" }
   });
+  await expect(moved).toBeOK();
+  expect((await moved.json()).scheduler.started.map((item) => item.taskId)).toContain(task.id);
 
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
@@ -189,7 +189,12 @@ test("settings modal edits an agent prompt and persists it", async ({ page, requ
   const marker = `Prompt especializado ${Date.now()}`;
   await page.goto("/");
   await page.getByRole("button", { name: "Configurações" }).click();
-  await page.getByRole("button", { name: "Engineer" }).click();
+  await page.getByRole("button", { name: "Engineer", exact: true }).click();
+  await page.getByLabel("Provider").selectOption("openai_compatible");
+  await page.getByLabel("Modelo").fill("gpt-test-e2e");
+  await page.getByLabel("Effort").selectOption("high");
+  await expect(page.getByText("missing_env")).toBeVisible();
+  await expect(page.getByText(/^missing: OPENAI_COMPATIBLE_API_KEY, OPENAI_COMPATIBLE_BASE_URL$/)).toBeVisible();
   await page.getByLabel("Prompt editável").fill(`# Engineer\n\n${marker}`);
   await page.getByRole("button", { name: "Salvar agent" }).click();
   await expect.poll(async () => {
@@ -197,8 +202,40 @@ test("settings modal edits an agent prompt and persists it", async ({ page, requ
       data: { type: "settings.scope", scope: "agents" }
     });
     const engineer = (await settings.json()).agents.find((agent) => agent.id === "engineer");
-    return engineer.instructionsBody;
-  }).toContain(marker);
+    return { prompt: engineer.instructionsBody, model: engineer.model };
+  }).toEqual({ prompt: `# Engineer\n\n${marker}`, model: { provider: "openai_compatible", name: "gpt-test-e2e", effort: "high" } });
+});
+
+test("agentic task workflow persists handoffs, human wait, delegation, compaction and done", async ({ request }) => {
+  const task = await createTask(request, `Agentic flow ${Date.now()}`, {
+    column: "product",
+    status: "queued",
+    routing: { currentAgent: "product", currentRole: "product", manualOverride: { active: false } }
+  });
+  const command = (data) => request.post(`${daemonUrl}/api/command`, { data: { commandId: `e2e-agentic-${Date.now()}-${Math.random()}`, ...data } });
+
+  await expect(await command({ type: "agent.message", message: { scope: "task", taskId: task.id, persona: "product", agentId: "product", text: "Aceite definido.", visibility: "both" } })).toBeOK();
+  await expect(await command({ type: "agent.wait_for_persona", taskId: task.id, targetRole: "generalist", question: "Preparar evidência operacional." })).toBeOK();
+  await expect(await command({ type: "agent.delegate_task", taskId: task.id, fromPersona: "generalist", toPersona: "engineering", wait: false, request: "Implementar ajuste técnico." })).toBeOK();
+  await expect(await command({ type: "agent.wait_for_human", taskId: task.id, requestedByRole: "engineering", question: "Aprovar risco?", options: ["Aprovar"] })).toBeOK();
+  await expect(await command({ type: "task.answer_input", taskId: task.id, answer: "Aprovado", returnRole: "engineering" })).toBeOK();
+  await expect(await command({ type: "agent.wait_for_persona", taskId: task.id, targetRole: "quality", question: "Validar aceite." })).toBeOK();
+  await expect(await command({ type: "agent.wait_for_persona", taskId: task.id, targetRole: "review", question: "Revisar evidências." })).toBeOK();
+  await expect(await command({ type: "chat.compact", taskId: task.id, persona: "product", summary: "Product definiu aceite e delegou execução.", tokenStats: { before: 50, after: 10 } })).toBeOK();
+  await expect(await command({ type: "agent.review_task", taskId: task.id, findings: [], evidence: ["E2E pass"] })).toBeOK();
+  await expect(await command({ type: "agent.deploy_task", taskId: task.id, command: process.execPath, args: ["-e", "process.stdout.write('released')"], rollback: "none" })).toBeOK();
+
+  const detail = await request.post(`${daemonUrl}/api/query`, { data: { type: "task.detail", taskId: task.id } });
+  await expect(detail).toBeOK();
+  expect(await detail.json()).toMatchObject({ column: "done", status: "done" });
+
+  const files = await request.post(`${daemonUrl}/api/query`, { data: { type: "task.files", taskId: task.id } });
+  const events = (await files.json()).events;
+  expect(events.some((event) => event.type === "role.handoff" && event.toRole === "generalist")).toBe(true);
+  expect(events.some((event) => event.type === "delegation.requested")).toBe(true);
+  expect(events.some((event) => event.type === "human.input_requested")).toBe(true);
+  expect(events.some((event) => event.type === "chat.compacted")).toBe(true);
+  expect(events.some((event) => event.type === "gate.passed")).toBe(true);
 });
 
 test("orchestrator panel exposes runtime capacity and worktree metrics", async ({ page }) => {

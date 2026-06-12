@@ -8,7 +8,7 @@ import { Board } from "./components/Board";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TaskModal } from "./components/TaskModal";
 import { OrchestratorPanel } from "./components/OrchestratorPanel";
-import type { AgentSettings, ChatMessage, Task, TaskFiles } from "./types";
+import type { AgentSettings, ChatMessage, ProviderStatus, Task, TaskFiles } from "./types";
 
 function now() {
   return new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" }).format(new Date());
@@ -37,6 +37,7 @@ function AppShell() {
   const state = useQuery({ queryKey: ["state"], queryFn: loadState });
   const orchestrator = useQuery({ queryKey: ["orchestrator"], queryFn: queryOrchestrator });
   const agents = useQuery({ queryKey: ["settings", "agents"], queryFn: () => queryDaemon<{ agents: AgentSettings[] }>({ type: "settings.scope", scope: "agents" }) });
+  const providers = useQuery({ queryKey: ["providers"], queryFn: () => queryDaemon<{ providers: ProviderStatus[] }>({ type: "provider.discover" }) });
   const boardChat = useQuery({ queryKey: ["chat", "board"], queryFn: () => queryDaemon<Array<Record<string, unknown>>>({ type: "chat.history", scope: "board" }) });
   const taskChat = useQuery({
     queryKey: ["chat", "task", selectedTaskId],
@@ -53,11 +54,18 @@ function AppShell() {
   const selectedTask = tasks.find((task) => task.id === selectedTaskId) || null;
   const boardMessages = (boardChat.data?.length ? boardChat.data.map(chatMessage) : [{ id: "welcome", role: "assistant" as const, time: now(), text: "Olá. Posso gerenciar o Kanban, explicar por que uma task não iniciou, decompor uma master task em subtasks paralelas, ou acionar o orchestrator." }]);
   const taskMessages = taskChat.data?.map(chatMessage) || [];
+  const taskTextScale = state.data?.settings?.ui?.taskTextScale ?? 100;
+  const taskFontFamily = state.data?.settings?.ui?.taskFontFamily || "sans-serif";
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("kca-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty("--task-text-scale", String(taskTextScale / 100));
+    document.documentElement.style.setProperty("--task-font-family", taskFontFamily === "serif" ? "var(--font-serif)" : "Arial, Helvetica, sans-serif");
+  }, [taskTextScale, taskFontFamily]);
 
   useEffect(() => {
     const source = new EventSource(`${daemonBase}/api/events`);
@@ -223,6 +231,7 @@ function AppShell() {
         open={settingsOpen}
         settings={state.data?.settings}
         agents={agents.data?.agents || []}
+        providers={providers.data?.providers || []}
         onOpenChange={setSettingsOpen}
         onSave={(patch) => runCommand.mutateAsync({ type: "settings.update", commandId: commandId("settings-update"), scope: "app", patch })}
         onSaveAgent={(patch) => runCommand.mutateAsync({ type: "settings.update", commandId: commandId("agent-settings-update"), scope: "agents", patch }).then(() => queryClient.invalidateQueries({ queryKey: ["settings", "agents"] }))}

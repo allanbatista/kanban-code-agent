@@ -7,6 +7,7 @@
     ".": "./src/index.js"
   },
   "dependencies": {
+    "@kca/core": "workspace:*",
     "@earendil-works/pi-coding-agent": "0.79.1"
   }
 }

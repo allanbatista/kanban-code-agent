@@ -5,3 +5,30 @@ Follow the project instructions supplied for this workspace: use concise respons
 # Product Ready Definition
 
 For Kanban Code Agent, "pronto" means the user can start the application, create a task, and see the autonomous end-to-end flow working through integrated functionality: concurrent tasks, role-specific agents, filesystem persistence, global and task-scoped assistants, planning that creates N DAG subtasks, orchestrator-controlled semaphores, review, deployment, and visible runtime evidence. Tests, mock/fake-only behavior, static UI, or isolated commands do not count as product ready.
+# Form List Inputs Use Multi Select
+
+Todo input de form que represente uma lista simples deve ser implementado como multi select.
+
+# Form Field Label Structure
+
+Em toda UI, campos de formulario devem usar container `div.field` com `label htmlFor` associado ao controle por `id`. Use `label` envolvendo controle apenas para checkbox/radio simples. Campos compostos como multi-select, upload, grupos de botoes ou grupos de checkbox nao devem usar `label.field`; use `div.field` com `span`/`label` apropriado e associacoes explicitas quando houver controle principal.
+
+# Agentic Workflow Blocking Semantics
+
+No Kanban Code Agent, bloqueado deve significar que a task depende do usuário/humano. A coluna de bloqueio deve ser tratada como "Aguardando Humano". Quando uma task depende de outra persona/agent, ela deve ser movida para a coluna/responsabilidade dessa persona, não para bloqueado. Toda mensagem de agent no chat deve carregar persona.
+
+# Agent Chat Context Isolation
+
+O Kanban Code Agent possui dois chats distintos: o assistant da interface e o chat de execução da task por persona. Não existe compartilhamento implícito de contexto entre agents. Cada task por persona mantém um único chat ativo; quando ficar longo, o chat ativo deve ser compactado, preservado no histórico e substituído por um novo chat ativo que recebe a compactação como contexto.
+
+# Provider Secrets via Envvars Only
+
+Providers/modelos podem ser configurados por persona, incluindo provider, modelo e effort. API keys não devem ser cadastradas nem persistidas no app; o sistema deve apenas detectar envvars de provedores e instruir o usuário a configurá-las. Providers esperados incluem OpenAI, OpenRouter, OpenAI-compatible genérico e provedores OpenAI-compatible separados.
+
+# Generalist Persona Routing
+
+O Kanban Code Agent deve ter uma persona generalista. Toda próxima ação que não depender de engenheiro, alteração técnica profunda, worktree técnico ou decisão de engenharia deve ser roteada para a persona generalista. A generalista pode escalar para engenharia se descobrir dependência técnica real.
+
+# Full Agentic E2E Validation
+
+A validação final do workflow agentico deve cobrir o fluxo completo ponta a ponta: criar uma task, planejar, rotear por personas, executar, validar, revisar/deployar quando aplicável, e encerrar em Pronto com evidências persistidas, chats/personas e eventos verificáveis.

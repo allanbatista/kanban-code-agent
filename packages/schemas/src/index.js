@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const TaskStatus = z.enum(["idle", "queued", "running", "interrupting", "validating", "blocked", "merge_pending", "done", "failed", "canceled", "paused"]);
+export const TaskStatus = z.enum(["idle", "queued", "running", "interrupting", "validating", "waiting", "waiting_human", "blocked", "merge_pending", "done", "failed", "canceled", "paused"]);
 export const TaskKind = z.enum(["task", "master", "subtask", "spike", "bug", "chore"]);
 export const EventType = z.enum([
   "task.created",
@@ -12,21 +12,37 @@ export const EventType = z.enum([
   "agent.queued",
   "agent.started",
   "agent.event",
+  "agent.message",
+  "agent.waiting_for_persona",
+  "agent.waiting_for_human",
   "agent.checkpoint_requested",
   "agent.interrupted",
   "agent.completed",
   "agent.failed",
   "agent.input_requested",
+  "role.handoff",
+  "human.input_requested",
+  "human.input_received",
+  "gate.passed",
+  "gate.failed",
+  "chat.created",
+  "chat.compaction_requested",
+  "chat.compacted",
+  "delegation.requested",
+  "delegation.result",
+  "provider.missing_env",
   "artifact.emitted",
   "hook.started",
   "hook.completed",
   "hook.failed",
+  "scheduler.tick",
   "worktree.created",
   "worktree.updated",
   "worktree.removed",
   "subtasks.spawned",
   "subtask.merged",
   "merge.requested",
+  "merge.blocked",
   "merge.blocked",
   "merge.completed",
   "merge.conflict",
@@ -41,7 +57,7 @@ export const SemaphoreSchema = z.union([
 
 export const RoleSettingsSchema = z.object({
   schema: z.literal("kanban-code-agent/role@1"),
-  id: z.enum(["manager", "product", "design", "engineering", "quality", "review", "deployment"]),
+  id: z.enum(["manager", "product", "design", "generalist", "engineering", "quality", "review", "deployment"]),
   label: z.string().min(1),
   agentId: z.string().min(1),
   scope: z.enum(["board", "task"]).default("task"),
@@ -57,8 +73,49 @@ export const RoleSettingsSchema = z.object({
     requiresWorktree: z.boolean().default(false),
     autoStart: z.boolean().default(false)
   }).passthrough(),
+  model: z.object({
+    provider: z.string().min(1).default("pi"),
+    name: z.string().min(1).default("default"),
+    effort: z.enum(["minimal", "low", "medium", "high"]).default("medium"),
+    temperature: z.number().optional()
+  }).passthrough().optional(),
   gate: z.string().min(1).optional()
 }).passthrough();
+
+export const ProviderId = z.enum(["pi", "openai", "openrouter", "openai_compatible", "groq", "together", "fireworks", "deepinfra", "cerebras"]);
+
+export const ProviderDiscoverySchema = z.object({
+  schema: z.literal("kanban-code-agent/provider-discovery@1"),
+  providers: z.array(z.object({
+    id: ProviderId,
+    type: z.string().min(1),
+    configured: z.boolean(),
+    requiredEnv: z.array(z.string()).default([]),
+    missingEnv: z.array(z.string()).default([]),
+    optionalEnv: z.array(z.string()).default([]),
+    baseUrl: z.string().nullable().optional()
+  }).passthrough())
+});
+
+export const PersonaMessageSchema = z.object({
+  scope: z.enum(["board", "task"]),
+  taskId: z.string().optional(),
+  persona: z.string().min(1),
+  agentId: z.string().optional(),
+  runId: z.string().optional(),
+  text: z.string().default(""),
+  visibility: z.enum(["chat", "timeline", "both"]).default("chat")
+}).passthrough();
+
+export const AgentStepDispositionSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("continue_running") }),
+  z.object({ type: z.literal("message_and_continue"), message: PersonaMessageSchema }),
+  z.object({ type: z.literal("emit_artifact_and_continue"), artifact: z.object({ path: z.string().min(1), content: z.string().default("") }).passthrough(), message: PersonaMessageSchema.optional() }),
+  z.object({ type: z.literal("complete_for_persona"), nextRole: z.string().min(1), summary: z.string().default(""), evidence: z.array(z.any()).default([]) }),
+  z.object({ type: z.literal("wait_for_persona"), targetRole: z.string().min(1), question: z.string().min(1), expectedArtifact: z.string().optional() }),
+  z.object({ type: z.literal("wait_for_human"), question: z.string().min(1), options: z.array(z.string()).optional(), requestedByRole: z.string().min(1).optional() }),
+  z.object({ type: z.literal("fail_run"), reason: z.string().min(1), recoverable: z.boolean().default(true) })
+]);
 
 export const PlanningSchema = z.object({
   schema: z.literal("kanban-code-agent/planning@1"),
@@ -214,6 +271,12 @@ export const AgentSettingsSchema = z.object({
   id: z.string().min(1),
   label: z.string().optional(),
   provider: z.string().min(1),
+  model: z.object({
+    provider: z.string().min(1).default("pi"),
+    name: z.string().min(1).default("default"),
+    effort: z.enum(["minimal", "low", "medium", "high"]).default("medium"),
+    temperature: z.number().optional()
+  }).passthrough().optional(),
   instructionsPath: z.string().optional(),
   instructions: z.any().optional(),
   skills: z.array(z.string()).default([]),
@@ -253,7 +316,9 @@ export const TaskSchema = z.object({
   projectTargets: z.array(z.string()),
   routing: z.object({
     currentAgent: z.string().nullable().optional(),
+    currentRole: z.string().nullable().optional(),
     lastAgent: z.string().nullable().optional(),
+    lastRole: z.string().nullable().optional(),
     nextSuggestedColumn: z.string().nullable().optional(),
     manualOverride: z.object({
       active: z.boolean().default(false),
@@ -288,6 +353,78 @@ export const CommandSchema = z.discriminatedUnion("type", [
       kind: TaskKind.default("task"),
       column: z.string().default("inbox")
     }).passthrough()
+  }),
+  commandBase.extend({
+    type: z.literal("agent.step"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    disposition: AgentStepDispositionSchema
+  }),
+  commandBase.extend({
+    type: z.literal("agent.wait_for_persona"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    targetRole: z.string().min(1),
+    question: z.string().min(1),
+    expectedArtifact: z.string().optional()
+  }),
+  commandBase.extend({
+    type: z.literal("agent.wait_for_human"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    question: z.string().min(1),
+    options: z.array(z.string()).optional(),
+    requestedByRole: z.string().min(1).optional()
+  }),
+  commandBase.extend({
+    type: z.literal("agent.message"),
+    message: PersonaMessageSchema
+  }),
+  commandBase.extend({
+    type: z.literal("agent.delegate_task"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    fromPersona: z.string().min(1),
+    toPersona: z.string().min(1),
+    wait: z.boolean().default(false),
+    request: z.string().min(1),
+    expectedOutput: z.string().optional(),
+    closeCurrentWhenDelegated: z.boolean().optional()
+  }),
+  commandBase.extend({
+    type: z.literal("chat.compact"),
+    taskId: z.string().min(1),
+    persona: z.string().min(1).default("assistant"),
+    summary: z.string().default(""),
+    tokenStats: z.record(z.string(), z.any()).default({})
+  }),
+  commandBase.extend({
+    type: z.literal("agent.review_task"),
+    taskId: z.string().min(1),
+    findings: z.array(z.object({ severity: z.string().optional(), message: z.string().optional() }).passthrough()).default([]),
+    evidence: z.array(z.any()).default([]),
+    passColumn: z.string().default("deployment"),
+    failRole: z.string().default("engineering")
+  }),
+  commandBase.extend({
+    type: z.literal("agent.deploy_task"),
+    taskId: z.string().min(1),
+    command: z.string().min(1),
+    args: z.array(z.string()).default([]),
+    cwd: z.string().optional(),
+    rollback: z.string().default("")
+  }),
+  commandBase.extend({
+    type: z.literal("task.answer_input"),
+    taskId: z.string().min(1),
+    answer: z.string().min(1),
+    returnRole: z.string().optional()
+  }),
+  commandBase.extend({
+    type: z.literal("role.route_task"),
+    taskId: z.string().min(1),
+    role: z.string().min(1),
+    reason: z.string().default("")
   }),
   commandBase.extend({
     type: z.literal("task.update"),
@@ -385,7 +522,9 @@ export const QuerySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("task.detail"), taskId: z.string().min(1) }),
   z.object({ type: z.literal("task.files"), taskId: z.string().min(1) }),
   z.object({ type: z.literal("settings.scope"), scope: z.string().default("app") }),
-  z.object({ type: z.literal("chat.history"), scope: z.enum(["board", "task"]).default("board"), taskId: z.string().optional(), limit: z.number().int().positive().max(500).default(100) }),
+  z.object({ type: z.literal("chat.history"), scope: z.enum(["board", "task"]).default("board"), taskId: z.string().optional(), persona: z.string().default("assistant"), limit: z.number().int().positive().max(500).default(100) }),
+  z.object({ type: z.literal("chat.build"), taskId: z.string().min(1), persona: z.string().min(1).default("assistant") }),
+  z.object({ type: z.literal("provider.discover") }),
   z.object({ type: z.literal("why_not_running"), taskId: z.string().min(1) })
 ]);
 
