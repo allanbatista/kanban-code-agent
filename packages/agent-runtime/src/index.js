@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { appendJsonl, paths, readAgent, readSettings, readSkill, writeAtomic } from "@kca/fsdb";
 import { compactTaskPersonaChat, readChatHistory } from "@kca/fsdb/chat-store";
-import { startPiSession } from "@kca/pi-adapter";
+import { buildTaskAgentTools, startPiSession } from "@kca/pi-adapter";
 import { logStep } from "@kca/core/log";
 import { roleById } from "../../core/src/roles.js";
 
@@ -13,8 +13,132 @@ export function createRunId(taskId, agentId) {
 
 function toolsForAgent(agentConfig) {
   const tools = agentConfig?.tools;
-  if (Array.isArray(tools)) return tools;
-  return [...(tools?.builtin || []), ...(tools?.custom || [])];
+  const resolved = Array.isArray(tools) ? tools : [...(tools?.builtin || []), ...(tools?.custom || [])];
+  const required = agentConfig?.id === "manager" ? ["wait_for_persona", "delegate_task", "spawn_subtasks"] : [];
+  return [...new Set([...resolved, ...required])];
+}
+
+function includesAny(text, patterns) {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function normalizeText(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function acceptanceIsPlaceholder(acceptance = "") {
+  const normalized = normalizeText(acceptance).replace(/[#\-[\]\s.]/g, " ").replace(/\s+/g, " ").trim();
+  return !normalized
+    || normalized === "criterios de aceite criterio verificavel de pronto"
+    || normalized === "criterio verificavel de pronto"
+    || /criterio verificavel de pronto/.test(normalized)
+    || /funciona de ponta a ponta com evidencia/.test(normalized);
+}
+
+function managerRoutingContext(task, description = "", acceptance = "") {
+  const text = `${task.title || ""}\n${description}\n${acceptance}`.toLowerCase();
+  const code = includesAny(text, [/\b(api|bug|fix|corrigir|implementar|codigo|c[oó]digo|teste|refactor|frontend|backend|endpoint|schema|migra)/i]);
+  const architecture = includesAny(text, [/\b(api|endpoint|schema|migra|arquitet|contrato|integrac[aã]o|database|banco|refactor|cross-cutting)/i]);
+  const design = includesAny(text, [/\b(ui|ux|visual|layout|tela|design|figma|acessibilidade|interface)/i]);
+  const deploy = includesAny(text, [/\b(deploy|release|publicar|rollback|produ[cç][aã]o)/i]);
+  const review = includesAny(text, [/\b(review|revisar|merge|pull request|pr|diff)/i]);
+  const quality = includesAny(text, [/\b(validar|qa|quality|e2e|regress[aã]o|testar)/i]);
+  const product = includesAny(text, [/\b(prd|roadmap|escopo|persona de usu[aá]rio|crit[eé]rios de aceite|requisito|valor de produto)/i]);
+  const operational = includesAny(text, [/\b(pesquis|research|listar|resum|format|emit|colet|analis|relat[oó]rio|documentar)/i]);
+  const missingAcceptance = acceptanceIsPlaceholder(acceptance);
+  let targetRole = "generalist";
+  let classification = "direct_operational";
+  let order = "generalist -> quality -> done";
+  if (missingAcceptance) {
+    targetRole = "product";
+    classification = "contract_missing";
+    order = "product -> next persona";
+  } else if (deploy) {
+    targetRole = "deployment";
+    classification = "deployment";
+    order = "deployment -> done";
+  } else if (review) {
+    targetRole = "review";
+    classification = "review";
+    order = "review -> deployment";
+  } else if (quality) {
+    targetRole = "quality";
+    classification = "validation";
+    order = "quality -> review";
+  } else if (code && architecture) {
+    targetRole = "architecture";
+    classification = "technical_architecture";
+    order = design ? "design -> architecture -> engineering -> quality -> review" : "architecture -> engineering -> quality -> review";
+  } else if (code) {
+    targetRole = "engineering";
+    classification = "technical_implementation";
+    order = design ? "design -> engineering -> quality -> review" : "engineering -> quality -> review";
+  } else if (design) {
+    targetRole = "design";
+    classification = "design";
+    order = "design -> engineering";
+  } else if (product && !operational) {
+    targetRole = "product";
+    classification = "product_discovery";
+    order = "product -> design/engineering";
+  }
+  const managerMode = missingAcceptance || classification === "product_discovery"
+    ? "intake"
+    : ["deployment", "review", "validation"].includes(classification)
+      ? "progress_control"
+      : "execution_planning";
+  return {
+    classification,
+    managerMode,
+    targetRole,
+    recommendedTool: "wait_for_persona",
+    order,
+    direct: !missingAcceptance && operational && !code && !design && !product,
+    reason: missingAcceptance
+      ? "Acceptance is missing or placeholder; product must define the contract before execution, QA, or review."
+      : operational && !code && !design && !product
+        ? "Direct research/listing/formatting work with concrete acceptance should go to generalist."
+        : "Route by dominant work type; use product only when product decisions are missing."
+  };
+}
+
+function managerRoutingSection(context) {
+  if (!context) return "";
+  return [
+    "# Manager Routing Context",
+    `classification: ${context.classification}`,
+    `manager_mode: ${context.managerMode}`,
+    `recommended_tool: ${context.recommendedTool}`,
+    `target_persona: ${context.targetRole}`,
+    `suggested_order: ${context.order}`,
+    `direct_task: ${context.direct ? "yes" : "no"}`,
+    `reason: ${context.reason}`,
+    "Rules:",
+    "- manager_mode=intake: route unclear work to product or human until the product contract is explicit.",
+    "- manager_mode=contract_review: compare the product contract with the original user request before execution.",
+    "- manager_mode=execution_planning: define phases, persona owners, dependencies, checkpoints, and optionally emit artifacts/execution-plan.md.",
+    "- manager_mode=progress_control: process blockers/results and choose the next incremental action.",
+    "- Use wait_for_persona for single-persona handoff.",
+    "- If acceptance is missing or placeholder, route to product before execution, quality, or review.",
+    "- Use product only when product intent, scope, value, or acceptance is missing.",
+    "- Use architecture for complex code/API/schema/migration planning before engineering.",
+    "- Use quality for functional validation; use review only for code/diff merge readiness.",
+    "- Use spawn_subtasks only when independent work can run in parallel with explicit needs/provides.",
+    "- Text alone does not finish a run; call complete_task, report_blocker, wait_for_persona, delegate_task, or request_user_input."
+  ].join("\n");
+}
+
+function formatChatMessages(messages = []) {
+  const visible = messages.filter((message) => message?.text).slice(-12);
+  if (!visible.length) return "";
+  return [
+    "# Recent Task Chat",
+    ...visible.map((message) => {
+      const who = message.role === "user" ? "user" : message.persona || message.agentId || "assistant";
+      const disposition = message.disposition ? ` [${message.disposition}]` : "";
+      return `- ${who}${disposition}: ${String(message.text).replace(/\s+/g, " ").slice(0, 1000)}`;
+    })
+  ].join("\n");
 }
 
 export async function buildAgentChat(task, root, { persona = task.routing?.currentRole || task.routing?.currentAgent || "assistant", agentId = task.routing?.currentAgent || persona, provider, model, effort } = {}) {
@@ -42,6 +166,7 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
   try {
     planning = await readFile(join(p.tasks, task.id, "planning.yaml"), "utf8");
   } catch {}
+  const managerRouting = persona === "manager" ? managerRoutingContext(task, description, acceptance) : null;
   const messages = await readChatHistory(root, { scope: "task", taskId: task.id, persona, limit: 200 });
   const tools = toolsForAgent(agentConfig).map((name) => ({ name }));
   const modelConfig = agentConfig?.model || role?.model || {};
@@ -55,9 +180,12 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
       "Use typed tools for disposition, handoff, human wait, artifacts, and completion.",
       "Agents do not share raw chat context; only explicit artifacts and delegation messages cross personas.",
       "Every chat message from an agent must include persona.",
+      "A run is terminal only after a state-changing tool call such as complete_task, report_blocker, wait_for_persona, delegate_task, or request_user_input.",
+      "Prompt-only safety contract: treat the task worktree as the only allowed filesystem scope; do not read or write outside it.",
       `Persona: ${persona}.`,
       role?.gate ? `Gate: ${role.gate}` : "",
-      instructions
+      instructions,
+      managerRoutingSection(managerRouting)
     ].filter(Boolean).join("\n")
   };
   const taskContext = {
@@ -70,6 +198,7 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
       `persona: ${persona}`,
       `agent: ${agentId}`,
       `run: ${task.agent?.currentRunId || ""}`,
+      "allowed_filesystem_scope: task worktree only",
       "description:",
       description,
       "acceptance:",
@@ -77,7 +206,8 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
       "planning:",
       planning,
       `dependencies: ${JSON.stringify(task.dependencies || {})}`,
-      `worktree: ${JSON.stringify(task.worktree || {})}`
+      `worktree: ${JSON.stringify(task.worktree || {})}`,
+      "scope_note: The current implementation communicates this scope in the prompt; host-level filesystem sandboxing remains pending."
     ].join("\n")
   };
   const toolcalls = messages.flatMap((message) => [...(message.toolCalls || []), ...(message.toolResults || [])]);
@@ -97,6 +227,7 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
     messages,
     toolcalls,
     tools,
+    managerRouting,
     sourceRefs,
     promptHash: createHash("sha256").update(hashInput).digest("hex")
   };
@@ -107,7 +238,8 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
 export async function startRun(task, root, agentId = task.routing?.currentAgent || "assistant", options = {}) {
   logStep("agent-runtime", "startRun.start", { taskId: task.id, agentId });
   const p = paths(root);
-  const runId = createRunId(task.id, agentId);
+  const runId = options.runId || createRunId(task.id, agentId);
+  logStep("agent", "run.start", { taskId: task.id, agentId, runId });
   const sessionDir = join(p.runtime, "sessions", task.id, agentId);
   const sessionRef = join("settings/runtime/sessions", task.id, agentId, "session.jsonl");
   const summaryRef = join("summaries", `run-${runId}.md`);
@@ -170,25 +302,71 @@ export async function startRun(task, root, agentId = task.routing?.currentAgent 
   const prompt = [
     chatBuild.system.content,
     chatBuild.task.content,
+    chatBuild.tools?.length ? `# Allowed Tools\n\n${chatBuild.tools.map((tool) => `- ${tool.name}`).join("\n")}` : "",
+    formatChatMessages(chatBuild.messages),
     previousSummary ? `# Previous Session Summary\n\n${previousSummary}` : ""
   ].filter(Boolean).join("\n\n");
   const promptHash = createHash("sha256").update(prompt).digest("hex");
-  const adapter = await startPiSession({
-    task,
-    agentId,
-    runId,
-    cwd: task.worktree?.path || task.worktree?.branch || task.id,
-    sessionDir,
-    prompt,
-    previousSessionFile: previousSessionRef ? join(p.root, previousSessionRef) : undefined,
-    instructionsPath: agentConfig?.instructionsPath,
-    skills: configuredSkills.filter(Boolean)
-  });
-  logStep("agent-runtime", "startRun.adapter_ready", { taskId: task.id, agentId, runId });
+  const runRecord = { ts: new Date().toISOString(), type: "agent.run", actor: "orchestrator", taskId: task.id, runId, agentId, role, scope, allowedTools, promptHash, provider: chatBuild.provider, model: chatBuild.model, effort: chatBuild.effort, chatBuild };
   await appendJsonl(join(sessionDir, "session.jsonl"), started);
-  await appendJsonl(join(sessionDir, "session.jsonl"), { ts: new Date().toISOString(), type: "agent.run", actor: "orchestrator", taskId: task.id, runId, agentId, role, scope, allowedTools, promptHash, provider: chatBuild.provider, model: chatBuild.model, effort: chatBuild.effort, chatBuild });
+  await appendJsonl(join(sessionDir, "session.jsonl"), runRecord);
   await appendJsonl(join(sessionDir, "session.jsonl"), { ts: new Date().toISOString(), type: "agent.config", actor: "orchestrator", taskId: task.id, runId, agent: agentConfig, skills: configuredSkills.filter(Boolean), resume: { previousSessionRef, previousSummaryRef } });
+  if (chatBuild.managerRouting) {
+    const routingEvent = { ts: new Date().toISOString(), type: "manager.routing_context", actor: "orchestrator", taskId: task.id, runId, ...chatBuild.managerRouting };
+    await appendJsonl(join(sessionDir, "session.jsonl"), routingEvent);
+    await appendJsonl(join(p.tasks, task.id, "events.jsonl"), routingEvent);
+  }
+  await options.beforePrompt?.({ runId, agentId, role, scope, allowedTools, promptHash, sessionRef, summaryRef, previousSessionRef, previousSummaryRef, event: started, chatBuild });
+  let transcriptStreamLogged = false;
+  const onToolEvent = async (event) => {
+    const entry = { ts: new Date().toISOString(), actor: role, taskId: task.id, runId, ...event };
+    if (event.type === "agent.transcript") {
+      if (!transcriptStreamLogged) {
+        transcriptStreamLogged = true;
+        logStep("agent", "stream.start", { taskId: task.id, runId, agentId, role });
+      }
+    } else {
+      logStep("agent", event.type || "event", { taskId: task.id, runId, agentId, role, tool: event.tool, ok: event.ok });
+    }
+    await appendJsonl(join(sessionDir, "session.jsonl"), entry);
+    await appendJsonl(join(p.tasks, task.id, "events.jsonl"), entry);
+  };
+  let adapter;
+  try {
+    adapter = await startPiSession({
+      task,
+      agentId,
+      runId,
+      cwd: task.worktree?.path || p.root,
+      sessionDir,
+      prompt,
+      previousSessionFile: previousSessionRef ? join(p.root, previousSessionRef) : undefined,
+      instructionsPath: agentConfig?.instructionsPath,
+      skills: configuredSkills.filter(Boolean),
+      runPrompt: true,
+      customToolFactory: ({ sdkExports }) => buildTaskAgentTools({
+        sdkExports,
+        taskId: task.id,
+        runId,
+        agentId,
+        role,
+        executeCommand: options.executeCommand,
+        onEvent: onToolEvent
+      }, { allowedTools }),
+      onEvent: onToolEvent
+    });
+  } finally {
+    if (transcriptStreamLogged) logStep("agent", "stream.end", { taskId: task.id, runId, agentId, role });
+  }
+  logStep("agent-runtime", "startRun.adapter_ready", { taskId: task.id, agentId, runId });
   await appendJsonl(join(sessionDir, "session.jsonl"), { ts: new Date().toISOString(), type: "agent.adapter", actor: "orchestrator", taskId: task.id, runId, adapter });
+  if (adapter.promptSent) {
+    const promptSent = { ts: new Date().toISOString(), type: "agent.prompt_sent", actor: "orchestrator", taskId: task.id, runId, agentId, cwd: adapter.cwd };
+    logStep("agent", "prompt.sent", { taskId: task.id, runId, agentId, cwd: adapter.cwd });
+    await appendJsonl(join(sessionDir, "session.jsonl"), promptSent);
+    await appendJsonl(join(p.tasks, task.id, "events.jsonl"), promptSent);
+  }
+  logStep("agent", adapter.reason ? "run.adapter_result" : "run.ready", { taskId: task.id, runId, agentId, mode: adapter.mode, reason: adapter.reason });
   logStep("agent-runtime", "startRun.done", { taskId: task.id, agentId, runId });
   return { runId, agentId, role, scope, allowedTools, promptHash, sessionRef, summaryRef, previousSessionRef, previousSummaryRef, event: started, adapter };
 }

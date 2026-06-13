@@ -2,6 +2,15 @@ import type { BoardSnapshot, OrchestratorStatus } from "./types";
 
 export const daemonBase = (window as typeof window & { KCA_DAEMON_URL?: string }).KCA_DAEMON_URL || import.meta.env.VITE_KCA_DAEMON_URL || "http://127.0.0.1:15000";
 
+export function daemonWebSocketUrl() {
+  const url = new URL(daemonBase);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = "/api/rpc";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,

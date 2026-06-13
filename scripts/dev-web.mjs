@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createServer } from "node:net";
 
 // Suppress EPIPE/EIO errors when stdin is closed or disconnected (common in some terminals)
 process.stdin.on("error", (err) => {
@@ -7,12 +8,44 @@ process.stdin.on("error", (err) => {
 });
 process.stdin.resume();
 
-const daemonPort = process.env.KCA_DAEMON_PORT || "15000";
+const requestedDaemonPort = process.env.KCA_DAEMON_PORT || "15000";
+const reuseExistingDaemon = !process.env.KCA_DAEMON_PORT && await isDaemonHealthy(`http://127.0.0.1:${requestedDaemonPort}`);
+const daemonPort = reuseExistingDaemon ? requestedDaemonPort : process.env.KCA_DAEMON_PORT || String(await findAvailablePort(15000));
 const daemonUrl = `http://127.0.0.1:${daemonPort}`;
 const webArgs = process.argv.slice(2);
 if (webArgs[0] === "--") webArgs.shift();
 if (!webArgs.includes("--port")) webArgs.push("--port", process.env.KCA_WEB_PORT || "15001");
 const children = new Set();
+
+async function findAvailablePort(startPort) {
+  for (let port = startPort; port < startPort + 100; port += 1) {
+    if (await isPortAvailable(port)) return port;
+  }
+  throw new Error(`no available daemon port found from ${startPort} to ${startPort + 99}`);
+}
+
+function isPortAvailable(port) {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", (error) => {
+      if (error.code === "EADDRINUSE") resolve(false);
+      else reject(error);
+    });
+    server.once("listening", () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+async function isDaemonHealthy(url) {
+  try {
+    const response = await fetch(`${url}/health`);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
 
 function spawnCommand(command, args, env = {}) {
   const child = spawn(command, args, {
@@ -66,15 +99,15 @@ process.on("SIGTERM", () => {
 });
 
 await runInit();
-const daemon = spawnCommand("pnpm", ["--filter", "@kca/daemon", "dev"], { KCA_DAEMON_PORT: daemonPort });
-await waitForDaemon(daemon);
+const daemon = reuseExistingDaemon ? null : spawnCommand("pnpm", ["--filter", "@kca/daemon", "dev"], { KCA_DAEMON_PORT: daemonPort });
+if (daemon) await waitForDaemon(daemon);
 const web = spawnCommand("pnpm", ["--filter", "@kca/web", "dev", ...webArgs], { VITE_KCA_DAEMON_URL: daemonUrl });
 
 web.on("exit", (code) => {
   stopAll();
   process.exit(code ?? 0);
 });
-daemon.on("exit", (code) => {
+daemon?.on("exit", (code) => {
   stopAll();
   process.exit(code ?? 0);
 });

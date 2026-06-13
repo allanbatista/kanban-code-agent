@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -6,8 +6,11 @@ import assert from "node:assert/strict";
 import YAML from "yaml";
 import { handleCommand, handleQuery } from "../../packages/orchestrator/src/index.js";
 import { planningArtifactsForTask } from "../../packages/orchestrator/src/planning-service.js";
-import { addProject } from "../../packages/fsdb/src/index.js";
+import { addProject, appendJsonl, paths } from "../../packages/fsdb/src/index.js";
 import { createRepoFixture } from "../../packages/git-worktree/src/index.js";
+import { buildAgentChat } from "../../packages/agent-runtime/src/index.js";
+
+const realOrchestratorPromptSmokeEnabled = process.env.KCA_PI_ORCH_PROMPT_SMOKE === "1";
 
 test("orchestrator applies idempotent task create commands", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-orch-"));
@@ -45,7 +48,7 @@ test("moving a task into an autoStart column drains the scheduler", async () => 
   const created = await handleCommand({
     type: "task.create",
     commandId: "cmd-auto-start-create",
-    input: { title: "Auto start on definition", projectTargets: ["kanban-code-agent"] }
+    input: { title: "Auto start on definition", column: "inbox", projectTargets: ["kanban-code-agent"] }
   }, root);
   const moved = await handleCommand({
     type: "task.move",
@@ -60,22 +63,195 @@ test("moving a task into an autoStart column drains the scheduler", async () => 
   assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
 });
 
+test("creating a task directly in an autoStart column drains the scheduler", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-auto-start-create-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-direct-auto-start-create",
+    input: { title: "Auto start direct create", column: "product", projectTargets: [] }
+  }, root);
+  assert.equal(created.task.column, "product");
+  assert.equal(created.task.status, "queued");
+  assert.equal(created.task.routing.currentRole, "product");
+  assert.deepEqual(created.scheduler.started.map((item) => item.taskId), [created.task.id]);
+  assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
+});
+
+test("draft tasks stay hidden until moved and support attachments", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-draft-task-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-draft-create",
+    input: { title: "", description: "Implementar fluxo draft", column: "inbox", draft: true, projectTargets: [] }
+  }, root);
+  assert.equal(created.task.status, "draft");
+  assert.equal(created.task.title, "Implementar fluxo draft");
+  assert.equal(created.scheduler, undefined);
+  assert.equal((await handleQuery({ type: "board.snapshot" }, root)).tasks.some((task) => task.id === created.task.id), false);
+
+  const uploaded = await handleCommand({
+    type: "task.attachment.write",
+    commandId: "cmd-draft-attachment",
+    taskId: created.task.id,
+    fileName: "../clipboard image.png",
+    contentType: "image/png",
+    dataBase64: Buffer.from("png-data").toString("base64")
+  }, root);
+  assert.match(uploaded.path, /^attachments\/\d+-clipboard-image\.png$/);
+  assert.equal(await readFile(join(paths(root).tasks, created.task.id, uploaded.path), "utf8"), "png-data");
+  assert.equal((await handleQuery({ type: "task.files", taskId: created.task.id }, root)).files.includes(uploaded.path), true);
+
+  const moved = await handleCommand({
+    type: "task.move",
+    commandId: "cmd-draft-move",
+    taskId: created.task.id,
+    toColumn: "manager"
+  }, root);
+  assert.equal(moved.task.column, "manager");
+  assert.equal(moved.task.status, "queued");
+  assert.equal(moved.task.routing.currentRole, "manager");
+  assert.equal((await handleQuery({ type: "board.snapshot" }, root)).tasks.some((task) => task.id === created.task.id), true);
+});
+
+test("manager task without title infers title from actionable prompt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-title-infer-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-title-infer",
+    input: { title: "", description: "Implementar fluxo de login com validacao de email", projectTargets: [] }
+  }, root);
+  assert.equal(created.task.title, "Implementar fluxo de login com validacao de email");
+  assert.equal(created.task.column, "manager");
+  assert.equal(created.task.status, "queued");
+});
+
+test("manager task without actionable title waits for human input", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-title-human-wait-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-title-human-wait",
+    input: { title: "", description: "preciso de ajuda", projectTargets: [] }
+  }, root);
+  assert.equal(created.task.title, "Aguardando detalhes da tarefa");
+  assert.equal(created.task.column, "human_wait");
+  assert.equal(created.task.status, "idle");
+  assert.equal(created.scheduler, undefined);
+  assert.match(await readFile(join(paths(root).tasks, created.task.id, "comments.jsonl"), "utf8"), /Preciso de mais informações/);
+  assert.match(await readFile(join(paths(root).tasks, created.task.id, "events.jsonl"), "utf8"), /missing_actionable_task_intent/);
+});
+
+test("moving a running task into an autoStart column queues the target agent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-running-move-autostart-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-running-move-create",
+    input: { title: "Running move", column: "product", status: "queued", routing: { currentAgent: "product", currentRole: "product", manualOverride: { active: false } } }
+  }, root);
+  const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+  assert.equal(detail.status, "running");
+  await appendJsonl(join(paths(root).tasks, created.task.id, "events.jsonl"), { ts: new Date().toISOString(), type: "gate.failed", actor: "quality", taskId: created.task.id, reason: "status:queued" });
+  assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).failure.reason, "status:queued");
+  const moved = await handleCommand({
+    type: "task.move",
+    commandId: "cmd-running-move-manager",
+    taskId: created.task.id,
+    toColumn: "manager"
+  }, root);
+  assert.equal(moved.task.column, "manager");
+  assert.equal(moved.task.status, "queued");
+  assert.equal(moved.task.routing.currentAgent, "manager");
+  assert.equal(moved.task.routing.currentRole, "manager");
+  assert.equal(moved.task.routing.manualOverride.active, false);
+  assert.deepEqual(moved.scheduler.started.map((item) => item.taskId), [created.task.id]);
+  const latest = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+  assert.equal(latest.status, "running");
+  assert.equal(latest.routing.currentAgent, "manager");
+  assert.equal(latest.failure, undefined);
+});
+
+test("moving a task to the same column is a no-op without scheduler drain", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-same-column-move-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-same-column-create",
+    input: { title: "Same column move", column: "inbox", projectTargets: [] }
+  }, root);
+  const moved = await handleCommand({
+    type: "task.move",
+    commandId: "cmd-same-column-move",
+    taskId: created.task.id,
+    toColumn: "inbox"
+  }, root);
+  assert.equal(moved.noop, true);
+  assert.equal(moved.scheduler, undefined);
+  const files = await handleQuery({ type: "task.files", taskId: created.task.id }, root);
+  assert.equal(files.events.some((event) => event.type === "task.moved"), false);
+});
+
+test("moving a task to inbox clears active agent and leaves it idle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-inbox-special-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-inbox-special-create",
+    input: { title: "Inbox special", column: "product", status: "queued", routing: { currentAgent: "product", currentRole: "product", lastAgent: "engineering", lastRole: "engineering", manualOverride: { active: false } } }
+  }, root);
+  assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
+  const moved = await handleCommand({
+    type: "task.move",
+    commandId: "cmd-inbox-special-move",
+    taskId: created.task.id,
+    toColumn: "inbox"
+  }, root);
+  assert.equal(moved.task.column, "inbox");
+  assert.equal(moved.task.status, "idle");
+  assert.equal(moved.task.routing.currentAgent, null);
+  assert.equal(moved.task.routing.currentRole, null);
+  assert.equal(moved.task.routing.lastAgent, "engineering");
+  assert.equal(moved.task.routing.lastRole, "engineering");
+  assert.equal(moved.task.routing.manualOverride.active, false);
+  assert.equal(moved.scheduler.started.length, 0);
+});
+
+test("moving to legacy definition column keeps task visible on that board", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-legacy-definition-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-legacy-definition-create",
+    input: { title: "Legacy definition move", column: "inbox", projectTargets: [] }
+  }, root);
+  const boardPath = join(root, "settings", "boards", "default.yaml");
+  const board = YAML.parse(await readFile(boardPath, "utf8"));
+  board.columns = board.columns.map((column) => column.id === "product" ? { ...column, id: "definition", label: "Definição" } : column);
+  await writeFile(boardPath, YAML.stringify(board));
+
+  const moved = await handleCommand({
+    type: "task.move",
+    commandId: "cmd-legacy-definition-move",
+    taskId: created.task.id,
+    toColumn: "definition"
+  }, root);
+  const snapshot = await handleQuery({ type: "board.snapshot" }, root);
+  assert.equal(moved.task.column, "definition");
+  assert.equal(snapshot.columns.some((column) => column.id === "definition"), true);
+  assert.equal(snapshot.tasks.find((task) => task.id === created.task.id)?.column, "definition");
+});
+
 test("orchestrator starts, completes and summarizes a task session", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-orch-"));
   const created = await handleCommand({
     type: "task.create",
     commandId: "cmd-create-3",
-    input: { title: "Executar agent", projectTargets: ["kanban-code-agent"] }
+    input: { title: "Executar agent", column: "inbox", projectTargets: ["kanban-code-agent"] }
   }, root);
   const started = await handleCommand({
     type: "task.run",
     commandId: "cmd-run-3",
     taskId: created.task.id,
-    agentId: "engineer"
+    agentId: "engineering"
   }, root);
   assert.equal(started.task.status, "running");
   assert.match(started.run.sessionRef, /settings\/runtime\/sessions/);
-  const session = await readFile(join(root, "settings", "runtime", "sessions", created.task.id, "engineer", "session.jsonl"), "utf8");
+  const session = await readFile(join(root, "settings", "runtime", "sessions", created.task.id, "engineering", "session.jsonl"), "utf8");
   assert.match(session, /agent.config/);
   assert.match(session, /agent.run/);
   assert.match(session, /promptHash/);
@@ -98,20 +274,210 @@ test("orchestrator starts, completes and summarizes a task session", async () =>
   assert.match(await readFile(join(root, autoRun.run.sessionRef), "utf8"), /previousSummaryRef/);
 });
 
+test("task run sends Pi prompt and persists prompt-sent evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-prompt-sent-"));
+  const modulePath = join(root, "mock-pi-sdk.mjs");
+  await writeFile(modulePath, `
+    export const VERSION = "0.79.1";
+    export const SessionManager = { create: () => ({ getSessionId: () => "mock-session", getSessionFile: () => "mock-session.jsonl" }) };
+    export const defineTool = (tool) => tool;
+    export async function createAgentSession({ customTools }) {
+      const subscribers = [];
+      return {
+        session: {
+          sessionId: "mock-session",
+          sessionFile: "mock-session.jsonl",
+          setSessionName() {},
+          getActiveToolNames() { return (customTools || []).map((tool) => tool.name); },
+          subscribe(callback) { subscribers.push(callback); return () => {}; },
+          async prompt(text) {
+            if (!String(text).includes("Recent Task Chat")) throw new Error("missing recent chat in prompt");
+            if (!String(text).includes("Use run_command before completion.")) throw new Error("missing task chat message in prompt");
+            subscribers.forEach((callback) => callback({ type: "message", message: { role: "assistant", content: "ok" } }));
+            subscribers.forEach((callback) => callback({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "call-list", name: "subagent", arguments: { description: "List project files" } }] } }));
+            subscribers.forEach((callback) => callback({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "call-list", name: "subagent", arguments: { description: "List project files" } }] } }));
+          },
+          dispose() {}
+        },
+        modelFallbackMessage: null
+      };
+    }
+  `);
+  const previousPackage = process.env.KCA_PI_SDK_PACKAGE;
+  const previousAdapter = process.env.KCA_PI_ADAPTER;
+  process.env.KCA_PI_SDK_PACKAGE = modulePath;
+  delete process.env.KCA_PI_ADAPTER;
+  try {
+    const created = await handleCommand({
+      type: "task.create",
+      commandId: "cmd-prompt-sent-create",
+      input: { title: "Prompt sent", column: "engineering", projectTargets: [], routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } } }
+    }, root);
+    await handleCommand({
+      type: "agent.message",
+      commandId: "cmd-prompt-sent-context",
+      message: { scope: "task", taskId: created.task.id, persona: "engineering", agentId: "engineering", text: "Use run_command before completion." }
+    }, root);
+    const started = await handleCommand({
+      type: "task.run",
+      commandId: "cmd-prompt-sent-run",
+      taskId: created.task.id,
+      agentId: "engineering"
+    }, root);
+    assert.equal(started.task.status, "running");
+    assert.equal(started.run.adapter.promptSent, true);
+    const session = await readFile(join(root, started.run.sessionRef), "utf8");
+    assert.match(session, /agent.prompt_sent/);
+    assert.match(session, /agent.transcript/);
+    assert.match(session, /"text":"ok"/);
+    assert.match(session, /complete_task/);
+    assert.equal(started.run.adapter.activeTools.includes("run_command"), true);
+    assert.equal(started.run.adapter.activeTools.includes("deploy_task"), false);
+    assert.equal(started.run.adapter.activeTools.includes("review_task"), false);
+    assert.equal(started.run.adapter.activeTools.includes("spawn_subtasks"), false);
+    const logs = await handleQuery({ type: "agent.logs", taskId: created.task.id, limit: 20 }, root);
+    assert.equal(logs.items.some((item) => item.type === "agent.transcript" && item.text === "ok"), true);
+    assert.equal(logs.items.filter((item) => item.type === "agent.transcript" && item.category === "tool_call" && item.text.includes("subagent")).length, 1);
+  } finally {
+    if (previousPackage === undefined) delete process.env.KCA_PI_SDK_PACKAGE;
+    else process.env.KCA_PI_SDK_PACKAGE = previousPackage;
+    if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
+    else process.env.KCA_PI_ADAPTER = previousAdapter;
+  }
+});
+
+test("run_command records command evidence without changing task status", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-run-command-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-run-command-create",
+    input: { title: "Run command", column: "engineering", status: "running", routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } } }
+  }, root);
+  await handleCommand({
+    type: "task.update",
+    commandId: "cmd-run-command-active",
+    taskId: created.task.id,
+    patch: { agent: { currentRunId: "run-command", currentSessionRef: "session.jsonl", resumeMode: "continue" } }
+  }, root);
+  const result = await handleCommand({
+    type: "agent.run_command",
+    commandId: "cmd-run-command",
+    taskId: created.task.id,
+    runId: "run-command",
+    command: process.execPath,
+    args: ["-e", "console.log('validated')"]
+  }, root);
+  assert.equal(result.ok, true);
+  assert.match(result.stdout, /validated/);
+  const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+  assert.equal(detail.status, "running");
+  const events = (await handleQuery({ type: "task.files", taskId: created.task.id }, root)).events;
+  assert.equal(events.some((event) => event.type === "agent.command" && event.exitCode === 0), true);
+  await assert.rejects(handleCommand({
+    type: "agent.run_command",
+    commandId: "cmd-run-command-escape",
+    taskId: created.task.id,
+    runId: "run-command",
+    command: process.execPath,
+    cwd: "..",
+    args: ["-e", "console.log('outside')"]
+  }, root), /cwd_outside_task_workspace/);
+});
+
+test("report_blocker writes one visible manager comment for repeated blocker text", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-blocker-dedupe-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-blocker-dedupe-create",
+    input: { title: "Blocker dedupe", column: "engineering", status: "running", routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } } }
+  }, root);
+  await handleCommand({
+    type: "task.update",
+    commandId: "cmd-blocker-dedupe-active",
+    taskId: created.task.id,
+    patch: { agent: { currentRunId: "run-blocker", currentSessionRef: "session.jsonl", resumeMode: "continue" } }
+  }, root);
+  const blocker = "Subagent tool unavailable; use run_command instead.";
+  await handleCommand({ type: "agent.report_blocker", commandId: "cmd-blocker-dedupe-a", taskId: created.task.id, runId: "run-blocker", blocker }, root);
+  const comments = await handleQuery({ type: "task.comments", taskId: created.task.id }, root);
+  assert.equal(comments.filter((message) => message.text === blocker).length, 1);
+});
+
+test("task run preserves terminal tool state produced during prompt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-prompt-tool-terminal-"));
+  const modulePath = join(root, "tool-calling-pi-sdk.mjs");
+  await writeFile(modulePath, `
+    export const VERSION = "0.79.1";
+    export const SessionManager = { create: () => ({ getSessionId: () => "tool-session", getSessionFile: () => "tool-session.jsonl" }) };
+    export const defineTool = (tool) => tool;
+    export async function createAgentSession({ customTools }) {
+      return {
+        session: {
+          sessionId: "tool-session",
+          sessionFile: "tool-session.jsonl",
+          setSessionName() {},
+          getActiveToolNames() { return (customTools || []).map((tool) => tool.name); },
+          subscribe() { return () => {}; },
+          async prompt(_text, options) {
+            options?.preflightResult?.(true);
+            await customTools.find((tool) => tool.name === "complete_task").execute("call-complete", { nextColumn: "done", summary: "Concluido pelo prompt." });
+          },
+          dispose() {}
+        },
+        modelFallbackMessage: null
+      };
+    }
+  `);
+  const previousPackage = process.env.KCA_PI_SDK_PACKAGE;
+  const previousAdapter = process.env.KCA_PI_ADAPTER;
+  process.env.KCA_PI_SDK_PACKAGE = modulePath;
+  delete process.env.KCA_PI_ADAPTER;
+  try {
+    const created = await handleCommand({
+      type: "task.create",
+      commandId: "cmd-prompt-tool-create",
+      input: { title: "Prompt tool terminal", column: "inbox", projectTargets: [] }
+    }, root);
+    const run = await handleCommand({
+      type: "task.run",
+      commandId: "cmd-prompt-tool-run",
+      taskId: created.task.id,
+      agentId: "engineering"
+    }, root);
+    assert.equal(run.ok, true);
+    assert.equal(run.task.status, "done");
+    assert.equal(run.task.column, "done");
+    const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+    assert.equal(detail.status, "done");
+    const events = (await handleQuery({ type: "task.files", taskId: created.task.id }, root)).events;
+    assert.equal(events.some((event) => event.type === "agent.tool_call" && event.tool === "complete_task"), true);
+    assert.equal(events.some((event) => event.type === "agent.run_recorded"), true);
+  } finally {
+    if (previousPackage === undefined) delete process.env.KCA_PI_SDK_PACKAGE;
+    else process.env.KCA_PI_SDK_PACKAGE = previousPackage;
+    if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
+    else process.env.KCA_PI_ADAPTER = previousAdapter;
+  }
+});
+
 test("all default agents load editable prompts and can start sessions", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-agents-"));
   await handleCommand({
     type: "settings.update",
     commandId: "cmd-agent-capacity",
     scope: "app",
-    patch: { runtime: { maxParallelTasks: 20, agentTokens: { assistant: 2, architect: 2, engineer: 2, validator: 2, reviewer: 2, "hook-agent": 2 }, projectTokens: { "kanban-code-agent": 20 } } }
+    patch: { runtime: { maxParallelTasks: 20, agentTokens: { assistant: 2, manager: 2, product: 2, design: 2, architecture: 2, generalist: 2, engineering: 2, quality: 2, review: 2, deployment: 2, "hook-agent": 2 }, projectTokens: { "kanban-code-agent": 20 } } }
   }, root);
-  const agents = ["assistant", "architect", "engineer", "validator", "reviewer", "hook-agent"];
+  const agents = ["assistant", "manager", "product", "design", "architecture", "generalist", "engineering", "quality", "review", "deployment", "hook-agent"];
+  const settingsAgents = await handleQuery({ type: "settings.scope", scope: "agents" }, root);
+  for (const legacy of ["architect", "engineer", "validator", "reviewer"]) {
+    assert.equal(settingsAgents.agents.some((agent) => agent.id === legacy), false);
+  }
   for (const agentId of agents) {
     const created = await handleCommand({
       type: "task.create",
       commandId: `cmd-agent-${agentId}`,
-      input: { title: `Agent ${agentId}`, projectTargets: ["kanban-code-agent"] }
+      input: { title: `Agent ${agentId}`, column: "inbox", projectTargets: ["kanban-code-agent"] }
     }, root);
     const started = await handleCommand({
       type: "task.run",
@@ -145,6 +511,47 @@ test("assistant chat creates an agent session and can create tasks", async () =>
   assert.equal(history.length, 2);
   assert.equal(history[0].role, "user");
   assert.equal(history[1].role, "assistant");
+  const reset = await handleCommand({
+    type: "chat.reset_board",
+    commandId: "cmd-agent-chat-reset",
+    agentId: "assistant"
+  }, root);
+  assert.equal(reset.chat.messageCount, 2);
+  assert.equal((await handleQuery({ type: "chat.history", scope: "board" }, root)).length, 0);
+});
+
+test("assistant chat creates tasks from recent context and defaults to manager", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-chat-context-create-"));
+  const unclear = await handleCommand({
+    type: "agent.chat",
+    commandId: "cmd-agent-chat-unclear-create",
+    scope: "board",
+    agentId: "assistant",
+    prompt: "crie uma task para buscar essa informação"
+  }, root);
+  assert.equal(unclear.action, null);
+  assert.match(unclear.reply, /Qual informação/);
+
+  await handleCommand({
+    type: "agent.chat",
+    commandId: "cmd-agent-chat-context",
+    scope: "board",
+    agentId: "assistant",
+    prompt: "nome do pais e temperatura."
+  }, root);
+  const created = await handleCommand({
+    type: "agent.chat",
+    commandId: "cmd-agent-chat-context-create",
+    scope: "board",
+    agentId: "assistant",
+    prompt: "eu quero que vc crie uma task"
+  }, root);
+  assert.equal(created.action.type, "task.created");
+  assert.equal(created.action.column, "manager");
+  const snapshot = await handleQuery({ type: "board.snapshot" }, root);
+  const task = snapshot.tasks.find((item) => item.id === created.action.taskId);
+  assert.equal(task.title, "nome do pais e temperatura");
+  assert.equal(task.column, "manager");
 });
 
 test("assistant chat can move and rename the selected task", async () => {
@@ -152,7 +559,7 @@ test("assistant chat can move and rename the selected task", async () => {
   const created = await handleCommand({
     type: "task.create",
     commandId: "cmd-agent-chat-selected-create",
-    input: { title: "Selecionada", projectTargets: ["kanban-code-agent"] }
+    input: { title: "Selecionada", column: "inbox", projectTargets: ["kanban-code-agent"] }
   }, root);
   const moved = await handleCommand({
     type: "agent.chat",
@@ -183,7 +590,7 @@ test("task assistant can update acceptance and decompose by task scope", async (
   const created = await handleCommand({
     type: "task.create",
     commandId: "cmd-agent-chat-task-create",
-    input: { title: "Task scoped assistant", projectTargets: ["kanban-code-agent"] }
+    input: { title: "Task scoped assistant", column: "inbox", projectTargets: ["kanban-code-agent"] }
   }, root);
   const acceptance = await handleCommand({
     type: "agent.chat",
@@ -209,6 +616,94 @@ test("task assistant can update acceptance and decompose by task scope", async (
   assert.equal(snapshot.tasks.some((task) => task.id === `${created.task.id}-01`), true);
 });
 
+test("task comments answer agent input and auto resume requester role", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-comments-resume-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-comments-create",
+    input: {
+      title: "Needs human answer",
+      column: "engineering",
+      status: "queued",
+      routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } }
+    }
+  }, root);
+  const active = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+  const input = await handleCommand({
+    type: "agent.request_user_input",
+    commandId: "cmd-comments-input",
+    taskId: created.task.id,
+    runId: active.agent?.currentRunId,
+    question: "Qual branch alvo?"
+  }, root);
+  assert.equal(input.task.status, "idle");
+  assert.equal(input.task.column, "human_wait");
+
+  const commentsAfterQuestion = await handleQuery({ type: "task.comments", taskId: created.task.id }, root);
+  assert.equal(commentsAfterQuestion.some((message) => message.text === "Qual branch alvo?" && message.role === "assistant"), true);
+
+  const answer = await handleCommand({
+    type: "task.comment",
+    commandId: "cmd-comments-answer",
+    taskId: created.task.id,
+    text: "Use main."
+  }, root);
+  assert.equal(answer.resumed, true);
+
+  const commentsAfterAnswer = await handleQuery({ type: "task.comments", taskId: created.task.id }, root);
+  assert.equal(commentsAfterAnswer.some((message) => message.text === "Use main." && message.role === "user"), true);
+  const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+  assert.equal(detail.column, "engineering");
+  assert.equal(["queued", "running"].includes(detail.status), true);
+
+  const logSample = await handleQuery({ type: "agent.logs", taskId: created.task.id, limit: 20 }, root);
+  assert.equal(logSample.items.some((item) => item.type === "task.comment" || item.type === "human.input_received"), true);
+  const firstLogs = await handleQuery({ type: "agent.logs", taskId: created.task.id, limit: 2 }, root);
+  assert.equal(firstLogs.items.length <= 2, true);
+  if (firstLogs.nextCursor) {
+    const olderLogs = await handleQuery({ type: "agent.logs", taskId: created.task.id, limit: 2, cursor: firstLogs.nextCursor }, root);
+    assert.equal(olderLogs.items.length <= 2, true);
+  }
+});
+
+test("task comments during a running agent requeue the same agent after completion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-comments-deferred-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-comments-deferred-create",
+    input: { title: "Deferred comment", column: "inbox", projectTargets: [] }
+  }, root);
+  const started = await handleCommand({
+    type: "task.run",
+    commandId: "cmd-comments-deferred-run",
+    taskId: created.task.id,
+    agentId: "engineering"
+  }, root);
+  const comment = await handleCommand({
+    type: "task.comment",
+    commandId: "cmd-comments-deferred-comment",
+    taskId: created.task.id,
+    text: "Considere este detalhe antes de finalizar."
+  }, root);
+  assert.equal(comment.deferred, true);
+  const completed = await handleCommand({
+    type: "agent.complete_task",
+    commandId: "cmd-comments-deferred-complete",
+    taskId: created.task.id,
+    runId: started.run.runId,
+    nextColumn: "done",
+    summary: "Tentaria finalizar."
+  }, root);
+  assert.equal(completed.task.status, "queued");
+  assert.equal(completed.task.routing.currentAgent, "engineering");
+  assert.deepEqual(completed.scheduler.started.map((item) => item.taskId), [created.task.id]);
+  const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+  assert.equal(detail.status, "running");
+  assert.equal(detail.routing.currentAgent, "engineering");
+  const comments = await handleQuery({ type: "task.comments", taskId: created.task.id }, root);
+  assert.equal(comments.some((message) => message.text === "Considere este detalhe antes de finalizar."), true);
+});
+
 test("manual override rejects stale agent completion", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-orch-"));
   const created = await handleCommand({
@@ -220,7 +715,7 @@ test("manual override rejects stale agent completion", async () => {
     type: "task.run",
     commandId: "cmd-stale-run",
     taskId: created.task.id,
-    agentId: "engineer"
+    agentId: "engineering"
   }, root);
   await handleCommand({
     type: "task.interrupt",
@@ -241,6 +736,32 @@ test("manual override rejects stale agent completion", async () => {
   );
 });
 
+test("mutating agent tools reject stale run ids", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-stale-tool-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-stale-tool-create",
+    input: { title: "Stale tool", column: "engineering", status: "running", routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } } }
+  }, root);
+  await handleCommand({
+    type: "task.update",
+    commandId: "cmd-stale-tool-active",
+    taskId: created.task.id,
+    patch: { agent: { currentRunId: "run-current", currentSessionRef: "session.jsonl", resumeMode: "continue" } }
+  }, root);
+  await assert.rejects(
+    () => handleCommand({
+      type: "agent.emit_artifact",
+      commandId: "cmd-stale-tool-emit",
+      taskId: created.task.id,
+      runId: "run-old",
+      path: "stale.md",
+      content: "stale"
+    }, root),
+    /run_mismatch/
+  );
+});
+
 test("task run creates configured project worktree and merge command blocks invalid parent", async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "kca-git-orch-"));
   const fixture = await createRepoFixture({ root: fixtureRoot, name: "repo" });
@@ -257,7 +778,7 @@ test("task run creates configured project worktree and merge command blocks inva
     type: "task.run",
     commandId: "cmd-worktree-run",
     taskId: created.task.id,
-    agentId: "engineer"
+    agentId: "engineering"
   }, root);
   assert.match(started.task.worktree.path, /settings\/runtime\/worktrees|kca-orch-/);
 
@@ -269,7 +790,35 @@ test("task run creates configured project worktree and merge command blocks inva
     subtaskBranch: "kca/missing"
   }, root);
   assert.equal(merge.ok, false);
-  assert.equal(merge.task.status, "blocked");
+  assert.equal(merge.task.status, "queued");
+  assert.equal(merge.task.column, "manager");
+  assert.equal((await handleQuery({ type: "task.comments", taskId: created.task.id }, root)).some((message) => message.persona === "manager"), true);
+});
+
+test("task run blocks configured projects without repoPath", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-missing-repo-"));
+  await handleCommand({
+    type: "settings.update",
+    commandId: "cmd-missing-repo-settings",
+    scope: "projects",
+    patch: { id: "missing-repo", label: "Missing repo" }
+  }, root);
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-missing-repo-create",
+    input: { title: "Needs repo", column: "inbox", projectTargets: ["missing-repo"] }
+  }, root);
+  const run = await handleCommand({
+    type: "task.run",
+    commandId: "cmd-missing-repo-run",
+    taskId: created.task.id,
+    agentId: "engineering"
+  }, root);
+  assert.equal(run.ok, false);
+  assert.equal(run.task.status, "queued");
+  assert.equal(run.task.column, "manager");
+  assert.match(run.why.reasons.join(" "), /repoPath/);
+  assert.equal((await handleQuery({ type: "task.comments", taskId: created.task.id }, root)).some((message) => /repoPath/.test(message.text)), true);
 });
 
 test("merge command is sequential per parent task", async () => {
@@ -298,7 +847,8 @@ test("merge command is sequential per parent task", async () => {
     subtaskBranch: "kca/b"
   }, root);
   assert.equal(blocked.merge.reason, "parent_merge_busy");
-  assert.equal(blocked.task.status, "blocked");
+  assert.equal(blocked.task.status, "queued");
+  assert.equal(blocked.task.column, "manager");
 });
 
 test("orchestrator blocks run when file locks conflict", async () => {
@@ -329,7 +879,7 @@ test("orchestrator blocks run when file locks conflict", async () => {
     type: "task.run",
     commandId: "cmd-lock-b-run",
     taskId: second.task.id,
-    agentId: "engineer"
+    agentId: "engineering"
   }, root);
   assert.equal(run.ok, false);
   assert.match(run.why.reasons.join(" "), /packages\/core/);
@@ -347,12 +897,14 @@ test("orchestrator decomposes a master task into queued subtasks", async () => {
     commandId: "cmd-decompose",
     taskId: parent.task.id,
     subtasks: [
-      { title: "Implementar runtime", needs: [], provides: ["runtime:agent"], fileLocks: ["packages/agent-runtime/**"], agentId: "engineer" },
+      { title: "Implementar runtime", needs: [], provides: ["runtime:agent"], fileLocks: ["packages/agent-runtime/**"], role: "engineering" },
       { title: "Validar runtime", needs: ["runtime:agent"], provides: ["runtime:validated"], fileLocks: ["tests/**"], agentId: "validator" }
     ]
   }, root);
   assert.equal(decomposed.subtasks.length, 2);
   assert.equal(decomposed.subtasks[0].kind, "subtask");
+  assert.equal(decomposed.subtasks[0].routing.currentRole, "engineering");
+  assert.equal(decomposed.subtasks[1].routing.currentRole, "quality");
   assert.equal(decomposed.subtasks[0].worktree.parentTaskId, parent.task.id);
   assert.equal(decomposed.subtasks[1].dependencies.needs[0], "runtime:agent");
   const subtasksFile = YAML.parse(await readFile(join(root, "tasks", parent.task.id, "subtasks.yaml"), "utf8"));
@@ -367,6 +919,7 @@ test("orchestrator decomposes a master task into queued subtasks", async () => {
 test("planning service creates planning and acceptance artifacts for a master task", () => {
   const artifacts = planningArtifactsForTask({ id: "KCA-PLAN", title: "Master ready" });
   assert.equal(artifacts.planning.taskId, "KCA-PLAN");
+  assert.equal(artifacts.planning.roles.required.includes("architecture"), true);
   assert.equal(artifacts.planning.roles.required.includes("deployment"), true);
   assert.match(artifacts.acceptance, /Master ready funciona de ponta a ponta/);
 });
@@ -383,7 +936,7 @@ test("orchestrator decomposes a master task into N subtasks with DAG edges", asy
     needs: index === 0 ? [] : [`contract:${index}`],
     provides: [`contract:${index + 1}`],
     fileLocks: index < 2 ? ["packages/core/**"] : [],
-    agentId: "engineer"
+    agentId: "engineering"
   }));
   const result = await handleCommand({ type: "task.decompose", commandId: "cmd-dag-decompose", taskId: parent.task.id, subtasks }, root);
   assert.equal(result.subtasks.length, 6);
@@ -392,9 +945,34 @@ test("orchestrator decomposes a master task into N subtasks with DAG edges", asy
   assert.equal(subtasksFile.edges.length, 5);
 });
 
+test("orchestrator rejects invalid DAG decomposition with manager triage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-orch-dag-invalid-"));
+  const parent = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-dag-invalid-parent",
+    input: { title: "Invalid DAG", kind: "master", projectTargets: ["kanban-code-agent"] }
+  }, root);
+  const result = await handleCommand({
+    type: "task.decompose",
+    commandId: "cmd-dag-invalid-decompose",
+    taskId: parent.task.id,
+    subtasks: [
+      { id: `${parent.task.id}-a`, title: "A", needs: ["b"], provides: ["a"], agentId: "engineering" },
+      { id: `${parent.task.id}-b`, title: "B", needs: ["a"], provides: ["b"], agentId: "engineering" }
+    ]
+  }, root);
+  assert.equal(result.ok, false);
+  assert.equal(result.task.status, "queued");
+  assert.equal(result.task.column, "manager");
+  assert.equal(result.errors.some((error) => error.type === "cycle"), true);
+  const files = await handleQuery({ type: "task.files", taskId: parent.task.id }, root);
+  assert.equal(files.events.some((event) => event.type === "task.decompose.failed"), true);
+  assert.equal((await handleQuery({ type: "task.comments", taskId: parent.task.id }, root)).some((message) => /Invalid subtask DAG/.test(message.text)), true);
+});
+
 test("scheduler explains global limits, agent/project tokens and semaphores", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-orch-"));
-  await handleCommand({ type: "settings.update", commandId: "cmd-settings-limits", scope: "app", patch: { runtime: { maxParallelTasks: 1, agentTokens: { engineer: 1 }, projectTokens: { "kanban-code-agent": 1 } } } }, root);
+  await handleCommand({ type: "settings.update", commandId: "cmd-settings-limits", scope: "app", patch: { runtime: { maxParallelTasks: 1, agentTokens: { engineering: 1 }, projectTokens: { "kanban-code-agent": 1 } } } }, root);
   const running = await handleCommand({
     type: "task.create",
     commandId: "cmd-running-limit",
@@ -409,17 +987,17 @@ test("scheduler explains global limits, agent/project tokens and semaphores", as
     type: "task.update",
     commandId: "cmd-running-limit-update",
     taskId: running.task.id,
-    patch: { status: "running", routing: { ...running.task.routing, currentAgent: "engineer" }, dependencies: { ...running.task.dependencies, semaphores: [{ name: "global:merge", tokens: 1 }] } }
+    patch: { status: "running", routing: { ...running.task.routing, currentAgent: "engineering" }, dependencies: { ...running.task.dependencies, semaphores: [{ name: "global:merge", tokens: 1 }] } }
   }, root);
   await handleCommand({
     type: "task.update",
     commandId: "cmd-queued-limit-update",
     taskId: queued.task.id,
-    patch: { status: "queued", routing: { ...queued.task.routing, currentAgent: "engineer" }, dependencies: { ...queued.task.dependencies, semaphores: [{ name: "global:merge", tokens: 1 }] } }
+    patch: { status: "queued", routing: { ...queued.task.routing, currentAgent: "engineering" }, dependencies: { ...queued.task.dependencies, semaphores: [{ name: "global:merge", tokens: 1 }] } }
   }, root);
   const why = await handleQuery({ type: "why_not_running", taskId: queued.task.id }, root);
   assert.match(why.reasons.join(" "), /Limite global/);
-  assert.match(why.reasons.join(" "), /Tokens do agent engineer/);
+  assert.match(why.reasons.join(" "), /Tokens do agent engineering/);
   assert.match(why.reasons.join(" "), /Tokens de projeto/);
   assert.match(why.reasons.join(" "), /global:merge/);
 
@@ -435,19 +1013,19 @@ test("settings scopes map to concrete settings files", async () => {
   assert.equal(workspace.workspace.name, "Kanban Code Agent");
 
   const columns = await handleQuery({ type: "settings.scope", scope: "columns" }, root);
-  assert.equal(columns.columns.length, 10);
+  assert.equal(columns.columns.length, 12);
 
   const agentUpdate = await handleCommand({
     type: "settings.update",
     commandId: "cmd-agent-settings",
     scope: "agents",
-    patch: { id: "engineer", limits: { tokens: 3 }, skills: ["implementation", "testing"] }
+    patch: { id: "engineering", limits: { tokens: 3 }, skills: ["implementation", "testing"] }
   }, root);
   assert.equal(agentUpdate.settings.limits.tokens, 3);
-  assert.match(await readFile(join(root, "settings", "agents", "engineer.yaml"), "utf8"), /tokens: 3/);
+  assert.match(await readFile(join(root, "settings", "agents", "engineering.yaml"), "utf8"), /tokens: 3/);
 
   const agents = await handleQuery({ type: "settings.scope", scope: "agents" }, root);
-  assert.equal(agents.agents.some((agent) => agent.id === "engineer" && agent.limits.tokens === 3), true);
+  assert.equal(agents.agents.some((agent) => agent.id === "engineering" && agent.limits.tokens === 3), true);
 
   const boardUpdate = await handleCommand({
     type: "settings.update",
@@ -457,6 +1035,115 @@ test("settings scopes map to concrete settings files", async () => {
   }, root);
   assert.equal(boardUpdate.settings.columns[0].wipLimit, 1);
   assert.match(await readFile(join(root, "settings", "boards", "default.yaml"), "utf8"), /wipLimit: 1/);
+});
+
+test("current role prompts include benchmark-required sections", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-prompt-sections-"));
+  const settings = await handleQuery({ type: "settings.scope", scope: "agents" }, root);
+  const requiredRoles = ["manager", "product", "design", "architecture", "generalist", "engineering", "quality", "review", "deployment"];
+  const sections = ["Mission:", "Inputs:", "Allowed tools:", "Decision ladder:", "Evidence:", "Handoff:", "Stop conditions:", "Forbidden actions:"];
+  for (const role of requiredRoles) {
+    const prompt = settings.agents.find((agent) => agent.id === role)?.instructionsBody || "";
+    for (const section of sections) assert.match(prompt, new RegExp(section.replace(":", ":")), `${role} missing ${section}`);
+  }
+  const managerPrompt = settings.agents.find((agent) => agent.id === "manager")?.instructionsBody || "";
+  assert.match(managerPrompt, /Modes:/);
+  for (const mode of ["intake", "contract_review", "execution_planning", "progress_control"]) assert.match(managerPrompt, new RegExp(mode));
+  assert.equal(settings.agents.some((agent) => agent.id === "project_manager"), false);
+});
+
+test("manager prompt classifies direct research for generalist handoff", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-manager-routing-"));
+  const task = {
+    id: "KCA-MANAGER-ROUTING",
+    title: "Pesquisar e listar os 10 paises com as temperaturas mais baixas registradas hoje.",
+    column: "manager",
+    status: "queued",
+    projectTargets: [],
+    routing: { currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } },
+    dependencies: { needs: [], provides: [], blockedBy: [], fileLocks: [], semaphores: [] },
+    worktree: { enabled: false },
+    skills: { active: [] }
+  };
+  await mkdir(join(root, "tasks", task.id), { recursive: true });
+  await writeFile(join(root, "tasks", task.id, "description.md"), `# ${task.title}\n`);
+  await writeFile(join(root, "tasks", task.id, "acceptance.md"), "- [ ] Lista entregue.\n");
+  await writeFile(join(root, "tasks", task.id, "planning.yaml"), "status: draft\n");
+  const chat = await buildAgentChat(task, root, { persona: "manager", agentId: "manager" });
+  assert.equal(chat.managerRouting.classification, "direct_operational");
+  assert.equal(chat.managerRouting.managerMode, "execution_planning");
+  assert.equal(chat.managerRouting.targetRole, "generalist");
+  assert.match(chat.system.content, /manager_mode: execution_planning/);
+  assert.match(chat.system.content, /Direct research\/listing\/formatting work with concrete acceptance should go to generalist/);
+  assert.equal(chat.tools.some((tool) => tool.name === "wait_for_persona"), true);
+  assert.equal(chat.tools.some((tool) => tool.name === "delegate_task"), true);
+});
+
+test("manager prompt routes placeholder acceptance to product before review or quality", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-manager-placeholder-routing-"));
+  const task = {
+    id: "KCA-MANAGER-PLACEHOLDER",
+    title: "Pesquisar e listar os 10 paises com as temperaturas mais baixas registradas hoje.",
+    column: "manager",
+    status: "queued",
+    projectTargets: [],
+    routing: { currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } },
+    dependencies: { needs: [], provides: [], blockedBy: [], fileLocks: [], semaphores: [] },
+    worktree: { enabled: false },
+    skills: { active: [] }
+  };
+  await mkdir(join(root, "tasks", task.id), { recursive: true });
+  await writeFile(join(root, "tasks", task.id, "description.md"), `# ${task.title}\n`);
+  await writeFile(join(root, "tasks", task.id, "acceptance.md"), "# Critérios de aceite\n\n- [ ] Critério verificável de pronto.\n");
+  await writeFile(join(root, "tasks", task.id, "planning.yaml"), "status: draft\n");
+  const chat = await buildAgentChat(task, root, { persona: "manager", agentId: "manager" });
+  assert.equal(chat.managerRouting.classification, "contract_missing");
+  assert.equal(chat.managerRouting.managerMode, "intake");
+  assert.equal(chat.managerRouting.targetRole, "product");
+  assert.match(chat.system.content, /Acceptance is missing or placeholder/);
+});
+
+test("manager prompt plans concrete endpoint work through architecture before engineering", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-manager-endpoint-routing-"));
+  const task = {
+    id: "KCA-MANAGER-ENDPOINT",
+    title: "Implementar endpoint API de relatorio com schema de resposta",
+    column: "manager",
+    status: "queued",
+    projectTargets: [],
+    routing: { currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } },
+    dependencies: { needs: [], provides: [], blockedBy: [], fileLocks: [], semaphores: [] },
+    worktree: { enabled: false },
+    skills: { active: [] }
+  };
+  await mkdir(join(root, "tasks", task.id), { recursive: true });
+  await writeFile(join(root, "tasks", task.id, "description.md"), `# ${task.title}\n`);
+  await writeFile(join(root, "tasks", task.id, "acceptance.md"), "- [ ] Endpoint retorna schema documentado.\n");
+  await writeFile(join(root, "tasks", task.id, "planning.yaml"), "status: draft\n");
+  const chat = await buildAgentChat(task, root, { persona: "manager", agentId: "manager" });
+  assert.equal(chat.managerRouting.classification, "technical_architecture");
+  assert.equal(chat.managerRouting.managerMode, "execution_planning");
+  assert.equal(chat.managerRouting.targetRole, "architecture");
+  assert.equal(chat.managerRouting.order, "architecture -> engineering -> quality -> review");
+});
+
+test("init migrates existing boards with missing default manager column", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-board-migrate-"));
+  const boardDir = join(root, "settings", "boards");
+  await mkdir(boardDir, { recursive: true });
+  await writeFile(join(boardDir, "default.yaml"), YAML.stringify({
+    schema: "kanban-code-agent/board@1",
+    id: "default",
+    columns: [
+      { id: "inbox", label: "Entrada", agent: "assistant", autoStart: false },
+      { id: "product", label: "Produto", agent: "product", autoStart: true },
+      { id: "done", label: "Pronto", agent: null, autoStart: false }
+    ]
+  }));
+  const columns = await handleQuery({ type: "settings.scope", scope: "columns" }, root);
+  const ids = columns.columns.map((column) => column.id);
+  assert.equal(ids.includes("manager"), true);
+  assert.equal(ids.indexOf("manager") < ids.indexOf("product"), true);
 });
 
 test("orchestrator runs hooks on move and supports input/artifact tools", async () => {
@@ -490,9 +1177,11 @@ test("orchestrator runs hooks on move and supports input/artifact tools", async 
     taskId: created.task.id,
     question: "Aprovar merge?"
   }, root);
-  assert.equal(input.task.status, "blocked");
+  assert.equal(input.task.status, "idle");
   assert.equal(input.task.column, "human_wait");
   assert.match(await readFile(join(root, "tasks", created.task.id, input.inputPath), "utf8"), /Aprovar merge/);
+  const comments = await handleQuery({ type: "task.comments", taskId: created.task.id }, root);
+  assert.equal(comments.some((message) => message.text === "Aprovar merge?"), true);
 });
 
 test("agentic workflow handoffs keep persona context and human wait distinct from persona wait", async () => {
@@ -542,7 +1231,7 @@ test("agentic workflow handoffs keep persona context and human wait distinct fro
     options: ["Aprovar", "Cancelar"]
   }, root);
   assert.equal(human.task.column, "human_wait");
-  assert.equal(human.task.status, "waiting_human");
+  assert.equal(human.task.status, "idle");
 
   const answered = await handleCommand({
     type: "task.answer_input",
@@ -587,7 +1276,7 @@ test("provider model settings block runs when required env is missing", async ()
   const created = await handleCommand({
     type: "task.create",
     commandId: "cmd-provider-create",
-    input: { title: "Provider missing env", status: "queued", routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } } }
+    input: { title: "Provider missing env", column: "inbox", status: "queued", routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } } }
   }, root);
   await handleCommand({
     type: "settings.update",
@@ -598,6 +1287,72 @@ test("provider model settings block runs when required env is missing", async ()
   const why = await handleQuery({ type: "why_not_running", taskId: created.task.id }, root);
   assert.equal(why.runnable, false);
   assert.match(why.reasons.join(" "), /OPENAI_COMPATIBLE_API_KEY|OPENAI_COMPATIBLE_BASE_URL/);
+});
+
+test("real Pi orchestrator prompt smoke runs one task through multiple personas", { skip: realOrchestratorPromptSmokeEnabled ? false : "set KCA_PI_ORCH_PROMPT_SMOKE=1 to run real orchestrator prompt smoke" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-real-orch-smoke-"));
+  const route = [
+    ["product", "design"],
+    ["design", "generalist"],
+    ["generalist", "engineering"],
+    ["engineering", "quality"],
+    ["quality", "review"],
+    ["review", "done"]
+  ];
+  const previousAdapter = process.env.KCA_PI_ADAPTER;
+  delete process.env.KCA_PI_ADAPTER;
+  try {
+    await handleCommand({
+      type: "settings.update",
+      commandId: "cmd-real-smoke-capacity",
+      scope: "app",
+      patch: { runtime: { maxParallelTasks: 1, agentTokens: { product: 1, design: 1, generalist: 1, engineering: 1, quality: 1, review: 1 } } }
+    }, root);
+    for (const [role, nextColumn] of route) {
+      await handleCommand({
+        type: "settings.update",
+        commandId: `cmd-real-smoke-agent-${role}`,
+        scope: "agents",
+        patch: {
+          id: role,
+          provider: "pi",
+          model: { provider: "pi", name: "default", effort: "low" },
+          instructionsBody: `# ${role}\n\nFor this validation smoke, immediately call complete_task with nextColumn "${nextColumn}" and summary "${role} real smoke". Do not call any other tool.`
+        }
+      }, root);
+    }
+    const created = await handleCommand({
+      type: "task.create",
+      commandId: "cmd-real-smoke-create-chain",
+      input: {
+        title: "Real Pi chained agentic smoke",
+        status: "queued",
+        routing: { currentAgent: "product", currentRole: "product", manualOverride: { active: false } },
+        projectTargets: []
+      }
+    }, root);
+    const run = await handleCommand({
+      type: "task.run",
+      commandId: "cmd-real-smoke-run-chain",
+      taskId: created.task.id,
+      agentId: "product"
+    }, root);
+    assert.equal(run.ok, true);
+    const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+    assert.equal(detail.status, "done");
+    assert.equal(detail.column, "done");
+    const files = await handleQuery({ type: "task.files", taskId: created.task.id }, root);
+    const promptRoles = new Set(files.events.filter((event) => event.type === "agent.prompt_sent").map((event) => event.agentId));
+    const toolRoles = new Set(files.events.filter((event) => event.type === "agent.tool_call" && event.tool === "complete_task").map((event) => event.actor));
+    for (const [role] of route) {
+      assert.equal(promptRoles.has(role), true);
+      assert.equal(toolRoles.has(role), true);
+    }
+    assert.equal(files.events.filter((event) => event.type === "agent.tool_result" && event.tool === "complete_task" && event.ok === true).length >= route.length, true);
+  } finally {
+    if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
+    else process.env.KCA_PI_ADAPTER = previousAdapter;
+  }
 });
 
 test("runtime auto-compacts active persona chat before a run", async () => {
@@ -611,7 +1366,7 @@ test("runtime auto-compacts active persona chat before a run", async () => {
   const created = await handleCommand({
     type: "task.create",
     commandId: "cmd-auto-compact-create",
-    input: { title: "Auto compact", status: "queued", routing: { currentAgent: "product", currentRole: "product", manualOverride: { active: false } } }
+    input: { title: "Auto compact", column: "product", status: "queued", routing: { currentAgent: "product", currentRole: "product", manualOverride: { active: false } } }
   }, root);
   await handleCommand({ type: "agent.message", commandId: "cmd-auto-compact-msg-a", message: { scope: "task", taskId: created.task.id, persona: "product", agentId: "product", text: "Mensagem A" } }, root);
   await handleCommand({ type: "agent.message", commandId: "cmd-auto-compact-msg-b", message: { scope: "task", taskId: created.task.id, persona: "product", agentId: "product", text: "Mensagem B" } }, root);

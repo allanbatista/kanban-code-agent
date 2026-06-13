@@ -1,7 +1,12 @@
 import { createServer } from "node:http";
+import { readdir, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { WebSocketServer } from "ws";
+import { createEventBus } from "@kca/application/event-bus";
+import { createBoardService } from "@kca/board-service";
 import { createTask, initStorage, listTasks } from "@kca/fsdb";
 import { handleCommand, handleQuery } from "@kca/orchestrator";
+import { recoverStaleRuns } from "@kca/orchestrator/scheduler";
 import { initialState } from "@kca/core";
 import { logStep } from "@kca/core/log";
 
@@ -13,8 +18,11 @@ const seedFixtures = process.env.KCA_SEED_FIXTURES === "1";
 const fsdbPollMs = Number(process.env.KCA_FSDB_POLL_MS || 1000);
 const clients = new Set();
 const sockets = new Set();
+const eventBus = createEventBus();
 let schedulerTickRunning = false;
 let readyPromise;
+let boardService;
+let eventBusConfigured = false;
 
 function json(res, status, body) {
   res.writeHead(status, {
@@ -35,9 +43,25 @@ function broadcast(event) {
   }
 }
 
-function broadcastCommandResult(result) {
-  broadcast({ type: "command.result", result });
-  if (result?.scheduler) broadcast({ type: "scheduler.tick", result: result.scheduler });
+function configureEventBus() {
+  if (eventBusConfigured) return;
+  eventBusConfigured = true;
+  eventBus.subscribe("command.result", (event) => {
+    boardService?.invalidate?.("command.result");
+    broadcast({ type: "command.result", result: event.result });
+    if (event.result?.scheduler) broadcast({ type: "scheduler.tick", result: event.result.scheduler });
+  });
+  eventBus.subscribe("scheduler.tick", (event) => broadcast({ type: "scheduler.tick", result: event.result }));
+  eventBus.subscribe("scheduler.error", (event) => broadcast({ type: "scheduler.error", ts: event.ts, message: event.message }));
+  eventBus.subscribe("fsdb.changed", (event) => {
+    boardService?.invalidate?.("external-fsdb-change");
+    broadcast({ type: "fsdb.changed", ts: event.ts });
+  });
+  eventBus.subscribe("fsdb.watch_error", (event) => broadcast({ type: "fsdb.watch_error", ts: event.ts, message: event.message }));
+}
+
+async function broadcastCommandResult(result) {
+  await eventBus.publish({ type: "command.result", result });
 }
 
 async function executeRpcMessage(message) {
@@ -47,7 +71,7 @@ async function executeRpcMessage(message) {
   }
   if (message.type === "command") {
     const result = await handleCommand(message.command, root);
-    broadcastCommandResult(result);
+    await broadcastCommandResult(result);
     return { id: message.id, type: "command.result", ok: true, result };
   }
   if (message.type === "subscribe") {
@@ -96,6 +120,8 @@ async function ensureReady() {
   readyPromise ??= (async () => {
     logStep("daemon", "ensureReady.start");
     const storage = await initStorage(root);
+    boardService = createBoardService(root);
+    configureEventBus();
     await seedIfEmpty();
     logStep("daemon", "ensureReady.done", { root: storage.root });
     return storage;
@@ -111,22 +137,39 @@ function stateFingerprint(state) {
   });
 }
 
+async function fileFingerprint(rootPath) {
+  async function walk(dir) {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    const rows = [];
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (path.includes(`${join("settings", "runtime")}${"/"}`) || path.endsWith(join("settings", "runtime"))) continue;
+      if (entry.isDirectory()) rows.push(...await walk(path));
+      else {
+        const info = await stat(path).catch(() => null);
+        if (info) rows.push(`${path}:${info.mtimeMs}:${info.size}`);
+      }
+    }
+    return rows;
+  }
+  return (await walk(rootPath)).sort().join("|");
+}
+
 async function startFsdbPoller() {
   if (fsdbPollMs <= 0) return;
   logStep("daemon", "fsdbPoller.start", { fsdbPollMs });
-  await ensureReady();
-  let last = stateFingerprint(await handleQuery({ type: "board.snapshot" }, root));
+  const storage = await ensureReady();
+  let last = await fileFingerprint(storage.root);
   const timer = setInterval(async () => {
     try {
-      const state = await handleQuery({ type: "board.snapshot" }, root);
-      const next = stateFingerprint(state);
+      const next = await fileFingerprint(storage.root);
       if (next === last) return;
       last = next;
       logStep("daemon", "fsdbPoller.changed");
-      broadcast({ type: "fsdb.changed", ts: new Date().toISOString() });
+      await eventBus.publish({ type: "fsdb.changed", ts: new Date().toISOString() });
     } catch (error) {
       logStep("daemon", "fsdbPoller.error", { message: error.message });
-      broadcast({ type: "fsdb.watch_error", ts: new Date().toISOString(), message: error.message });
+      await eventBus.publish({ type: "fsdb.watch_error", ts: new Date().toISOString(), message: error.message });
     }
   }, fsdbPollMs);
   timer.unref?.();
@@ -138,16 +181,16 @@ async function runSchedulerTick(source = "startup") {
   try {
     logStep("daemon", "schedulerTick.start", { source });
     await ensureReady();
-    const state = await handleQuery({ type: "board.snapshot" }, root);
+    const state = await boardService.snapshot();
     if (!state.tasks?.some((task) => task.status === "queued")) return null;
     const result = await handleCommand({ type: "scheduler.tick", commandId: `scheduler-${source}-${Date.now()}` }, root);
     if (result.started?.length || result.blocked?.length || result.skipped?.length) {
       logStep("daemon", "schedulerTick.result", { source, started: result.started?.map((item) => item.taskId) || [], blocked: result.blocked?.length || 0, skipped: result.skipped?.length || 0 });
     }
-    broadcast({ type: "scheduler.tick", result });
+    await eventBus.publish({ type: "scheduler.tick", result });
     return result;
   } catch (error) {
-    broadcast({ type: "scheduler.error", ts: new Date().toISOString(), message: error.message });
+    await eventBus.publish({ type: "scheduler.error", ts: new Date().toISOString(), message: error.message });
     logStep("daemon", "schedulerTick.error", { source, message: error.message });
     return { ok: false, error: error.message };
   } finally {
@@ -157,6 +200,7 @@ async function runSchedulerTick(source = "startup") {
 
 async function startSchedulerRecovery() {
   logStep("daemon", "schedulerRecovery.start");
+  await recoverStaleRuns(root);
   await runSchedulerTick("startup");
 }
 
@@ -166,7 +210,7 @@ const server = createServer(async (req, res) => {
     logStep("daemon", "http.request", { method: req.method, url: req.url });
     if (req.method === "OPTIONS") return json(res, 204, {});
     if (req.url === "/health") return json(res, 200, { ok: true, storageRoot: storage.root, seededFixtures: seedFixtures, schedulerMode: "event-driven", schedulerPollMs: 0 });
-    if (req.url === "/api/state" && req.method === "GET") return json(res, 200, await handleQuery({ type: "board.snapshot" }, root));
+    if (req.url === "/api/state" && req.method === "GET") return json(res, 200, await boardService.snapshot());
     if (req.url === "/api/query" && req.method === "POST") return json(res, 200, await handleQuery(await body(req), root));
     if (req.url === "/api/events" && req.method === "GET") {
       logStep("daemon", "sse.connect");
@@ -183,21 +227,21 @@ const server = createServer(async (req, res) => {
     }
     if (req.url === "/api/command" && req.method === "POST") {
       const result = await handleCommand(await body(req), root);
-      broadcastCommandResult(result);
+      await broadcastCommandResult(result);
       return json(res, 200, result);
     }
 
     if (req.url === "/api/task.move" && req.method === "POST") {
       const input = await body(req);
       const result = await handleCommand({ type: "task.move", taskId: input.taskId, toColumn: input.toColumn, mode: input.mode, commandId: input.commandId || `cmd-${Date.now()}` }, root);
-      broadcastCommandResult(result);
+      await broadcastCommandResult(result);
       return json(res, 200, result);
     }
 
     if (req.url === "/api/settings.update" && req.method === "POST") {
       const input = await body(req);
       const result = await handleCommand({ type: "settings.update", scope: input.scope || "app", patch: input.patch || {}, commandId: input.commandId || `cmd-${Date.now()}` }, root);
-      broadcastCommandResult(result);
+      await broadcastCommandResult(result);
       return json(res, 200, result);
     }
 
@@ -208,29 +252,35 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(port, "127.0.0.1", () => {
-  logStep("daemon", "listen", { url: `http://127.0.0.1:${port}` });
+function startWebSocketServer() {
+  const wss = new WebSocketServer({ server, path: "/api/rpc" });
+  wss.on("connection", async (socket) => {
+    logStep("daemon", "ws.connect");
+    sockets.add(socket);
+    socket.send(JSON.stringify({ type: "connected", transport: "websocket", ts: new Date().toISOString() }));
+    socket.on("close", () => sockets.delete(socket));
+    socket.on("message", async (raw) => {
+      try {
+        logStep("daemon", "ws.message");
+        await ensureReady();
+        const response = await executeRpcMessage(JSON.parse(raw.toString("utf8")));
+        socket.send(JSON.stringify(response));
+      } catch (error) {
+        logStep("daemon", "ws.error", { message: error.message });
+        socket.send(JSON.stringify({ type: "error", ok: false, error: "internal_error", message: error.message }));
+      }
+    });
+  });
+}
+
+server.on("error", (error) => {
+  logStep("daemon", "listen.error", { code: error.code, message: error.message, port });
+  process.exitCode = 1;
 });
 
-void startFsdbPoller();
-void startSchedulerRecovery();
-
-const wss = new WebSocketServer({ server, path: "/api/rpc" });
-
-wss.on("connection", async (socket) => {
-  logStep("daemon", "ws.connect");
-  sockets.add(socket);
-  socket.send(JSON.stringify({ type: "connected", transport: "websocket", ts: new Date().toISOString() }));
-  socket.on("close", () => sockets.delete(socket));
-  socket.on("message", async (raw) => {
-    try {
-      logStep("daemon", "ws.message");
-      await ensureReady();
-      const response = await executeRpcMessage(JSON.parse(raw.toString("utf8")));
-      socket.send(JSON.stringify(response));
-    } catch (error) {
-      logStep("daemon", "ws.error", { message: error.message });
-      socket.send(JSON.stringify({ type: "error", ok: false, error: "internal_error", message: error.message }));
-    }
-  });
+server.listen(port, "127.0.0.1", () => {
+  logStep("daemon", "listen", { url: `http://127.0.0.1:${port}` });
+  startWebSocketServer();
+  void startFsdbPoller();
+  void startSchedulerRecovery();
 });

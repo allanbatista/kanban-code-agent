@@ -1,7 +1,9 @@
 export const columns = [
   { id: "inbox", label: "Entrada", agent: "assistant", autoStart: false, wip: null },
+  { id: "manager", label: "Manager", agent: "manager", role: "manager", autoStart: true, wip: 2 },
   { id: "product", label: "Produto", agent: "product", role: "product", autoStart: true, wip: 3 },
   { id: "design", label: "Design", agent: "design", role: "design", autoStart: true, wip: 2 },
+  { id: "architecture", label: "Arquitetura", agent: "architecture", role: "architecture", autoStart: true, wip: 2 },
   { id: "generalist", label: "Generalista", agent: "generalist", role: "generalist", autoStart: true, wip: 3 },
   { id: "engineering", label: "Engenharia", agent: "engineering", role: "engineering", autoStart: true, wip: 4 },
   { id: "quality", label: "Qualidade", agent: "quality", role: "quality", autoStart: true, wip: 2 },
@@ -13,10 +15,14 @@ export const columns = [
 
 export const agents = [
   { id: "assistant", label: "Assistant", status: "online" },
-  { id: "architect", label: "Architect", status: "idle" },
-  { id: "engineer", label: "Engineer", status: "running" },
-  { id: "validator", label: "Validator", status: "idle" },
-  { id: "reviewer", label: "Reviewer", status: "idle" },
+  { id: "manager", label: "Manager", status: "idle" },
+  { id: "product", label: "Product", status: "idle" },
+  { id: "design", label: "Design", status: "idle" },
+  { id: "architecture", label: "Architecture", status: "idle" },
+  { id: "engineering", label: "Engineering", status: "running" },
+  { id: "quality", label: "Quality", status: "idle" },
+  { id: "review", label: "Review", status: "idle" },
+  { id: "deployment", label: "Deployment", status: "idle" },
   { id: "generalist", label: "Generalist", status: "idle" }
 ];
 

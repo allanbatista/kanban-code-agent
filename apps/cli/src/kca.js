@@ -72,7 +72,7 @@ async function main() {
       description: value("--description", ""),
       projectTargets: values("--project"),
       kind: value("--kind", "task"),
-      column: value("--column", "inbox")
+      column: value("--column", "manager")
     }, root());
     console.log(JSON.stringify(task, null, 2));
     return;

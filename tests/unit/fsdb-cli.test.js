@@ -64,7 +64,7 @@ test("kca task run interrupt decompose and why use orchestrator commands", async
   const root = await mkdtemp(join(tmpdir(), "kca-"));
   const { stdout } = await run(["task", "create", "--title", "CLI runtime", "--kind", "master"], root);
   const task = JSON.parse(stdout);
-  const runResult = JSON.parse((await run(["task", "run", task.id, "--agent", "engineer"], root)).stdout);
+  const runResult = JSON.parse((await run(["task", "run", task.id, "--agent", "engineering"], root)).stdout);
   assert.equal(runResult.task.status, "running");
 
   const interruptResult = JSON.parse((await run(["task", "interrupt", task.id, "--mode", "hard"], root)).stdout);

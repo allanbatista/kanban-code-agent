@@ -1,17 +1,24 @@
 import { z } from "zod";
 
-export const TaskStatus = z.enum(["idle", "queued", "running", "interrupting", "validating", "waiting", "waiting_human", "blocked", "merge_pending", "done", "failed", "canceled", "paused"]);
+export const TaskStatus = z.enum(["draft", "idle", "queued", "running", "interrupting", "validating", "waiting", "waiting_human", "blocked", "merge_pending", "done", "failed", "canceled", "paused"]);
 export const TaskKind = z.enum(["task", "master", "subtask", "spike", "bug", "chore"]);
 export const EventType = z.enum([
   "task.created",
   "task.updated",
+  "task.file.updated",
+  "task.attachment.created",
   "task.move_requested",
   "task.moved",
+  "task.comment",
   "task.blocked",
+  "task.problem",
+  "task.run.blocked",
   "task.unblocked",
+  "task.unassigned",
   "agent.queued",
   "agent.started",
   "agent.event",
+  "agent.transcript",
   "agent.message",
   "agent.waiting_for_persona",
   "agent.waiting_for_human",
@@ -19,6 +26,7 @@ export const EventType = z.enum([
   "agent.interrupted",
   "agent.completed",
   "agent.failed",
+  "agent.command",
   "agent.input_requested",
   "role.handoff",
   "human.input_requested",
@@ -57,7 +65,7 @@ export const SemaphoreSchema = z.union([
 
 export const RoleSettingsSchema = z.object({
   schema: z.literal("kanban-code-agent/role@1"),
-  id: z.enum(["manager", "product", "design", "generalist", "engineering", "quality", "review", "deployment"]),
+  id: z.enum(["manager", "product", "design", "architecture", "generalist", "engineering", "quality", "review", "deployment"]),
   label: z.string().min(1),
   agentId: z.string().min(1),
   scope: z.enum(["board", "task"]).default("task"),
@@ -347,11 +355,11 @@ export const CommandSchema = z.discriminatedUnion("type", [
     type: z.literal("task.create"),
     input: z.object({
       id: z.string().optional(),
-      title: z.string().min(1),
+      title: z.string().optional(),
       description: z.string().optional(),
       projectTargets: z.array(z.string()).default([]),
-      kind: TaskKind.default("task"),
-      column: z.string().default("inbox")
+      column: z.string().default("manager"),
+      draft: z.boolean().optional()
     }).passthrough()
   }),
   commandBase.extend({
@@ -399,8 +407,13 @@ export const CommandSchema = z.discriminatedUnion("type", [
     tokenStats: z.record(z.string(), z.any()).default({})
   }),
   commandBase.extend({
+    type: z.literal("chat.reset_board"),
+    agentId: z.string().min(1).default("assistant")
+  }),
+  commandBase.extend({
     type: z.literal("agent.review_task"),
     taskId: z.string().min(1),
+    runId: z.string().optional(),
     findings: z.array(z.object({ severity: z.string().optional(), message: z.string().optional() }).passthrough()).default([]),
     evidence: z.array(z.any()).default([]),
     passColumn: z.string().default("deployment"),
@@ -409,6 +422,7 @@ export const CommandSchema = z.discriminatedUnion("type", [
   commandBase.extend({
     type: z.literal("agent.deploy_task"),
     taskId: z.string().min(1),
+    runId: z.string().optional(),
     command: z.string().min(1),
     args: z.array(z.string()).default([]),
     cwd: z.string().optional(),
@@ -419,6 +433,12 @@ export const CommandSchema = z.discriminatedUnion("type", [
     taskId: z.string().min(1),
     answer: z.string().min(1),
     returnRole: z.string().optional()
+  }),
+  commandBase.extend({
+    type: z.literal("task.comment"),
+    taskId: z.string().min(1),
+    text: z.string().min(1),
+    replyToMessageId: z.string().optional()
   }),
   commandBase.extend({
     type: z.literal("role.route_task"),
@@ -436,6 +456,13 @@ export const CommandSchema = z.discriminatedUnion("type", [
     taskId: z.string().min(1),
     path: z.enum(["acceptance.md", "description.md"]),
     content: z.string().default("")
+  }),
+  commandBase.extend({
+    type: z.literal("task.attachment.write"),
+    taskId: z.string().min(1),
+    fileName: z.string().min(1),
+    contentType: z.string().optional(),
+    dataBase64: z.string().min(1)
   }),
   commandBase.extend({
     type: z.literal("task.move"),
@@ -462,6 +489,7 @@ export const CommandSchema = z.discriminatedUnion("type", [
       needs: z.array(z.string()).default([]),
       provides: z.array(z.string()).default([]),
       fileLocks: z.array(z.string()).default([]),
+      role: z.string().optional(),
       agentId: z.string().optional()
     }).passthrough()).optional()
   }),
@@ -502,6 +530,15 @@ export const CommandSchema = z.discriminatedUnion("type", [
     content: z.string().default("")
   }),
   commandBase.extend({
+    type: z.literal("agent.run_command"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    command: z.string().min(1),
+    args: z.array(z.string()).default([]),
+    cwd: z.string().default("worktree"),
+    timeoutMs: z.number().int().positive().default(120000)
+  }),
+  commandBase.extend({
     type: z.literal("agent.chat"),
     agentId: z.string().default("assistant"),
     scope: z.enum(["board", "task"]).default("board"),
@@ -523,6 +560,8 @@ export const QuerySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("task.files"), taskId: z.string().min(1) }),
   z.object({ type: z.literal("settings.scope"), scope: z.string().default("app") }),
   z.object({ type: z.literal("chat.history"), scope: z.enum(["board", "task"]).default("board"), taskId: z.string().optional(), persona: z.string().default("assistant"), limit: z.number().int().positive().max(500).default(100) }),
+  z.object({ type: z.literal("task.comments"), taskId: z.string().min(1), limit: z.number().int().positive().max(500).default(100) }),
+  z.object({ type: z.literal("agent.logs"), taskId: z.string().min(1), limit: z.number().int().positive().max(200).default(50), cursor: z.string().optional(), agentId: z.string().optional(), runId: z.string().optional() }),
   z.object({ type: z.literal("chat.build"), taskId: z.string().min(1), persona: z.string().min(1).default("assistant") }),
   z.object({ type: z.literal("provider.discover") }),
   z.object({ type: z.literal("why_not_running"), taskId: z.string().min(1) })

@@ -1,18 +1,20 @@
 import { constants } from "node:fs";
-import { access, appendFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, open, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { DEFAULT_ROLES } from "@kca/core/roles";
 import { logStep } from "@kca/core/log";
 import YAML from "yaml";
 
-export const DEFAULT_COLUMNS = ["inbox", "product", "design", "generalist", "engineering", "quality", "review", "deployment", "human_wait", "done"];
+export const DEFAULT_COLUMNS = ["inbox", "manager", "product", "design", "architecture", "generalist", "engineering", "quality", "review", "deployment", "human_wait", "done"];
 const storageInitCache = new Map();
 
 const DEFAULT_COLUMN_META = {
   inbox: { label: "Entrada", agent: "assistant", autoStart: false, wip: null },
+  manager: { label: "Manager", agent: "manager", role: "manager", autoStart: true, wip: 2 },
   product: { label: "Produto", agent: "product", role: "product", autoStart: true, wip: null },
   design: { label: "Design", agent: "design", role: "design", autoStart: true, wip: null },
+  architecture: { label: "Arquitetura", agent: "architecture", role: "architecture", autoStart: true, wip: 2 },
   generalist: { label: "Generalista", agent: "generalist", role: "generalist", autoStart: true, wip: 3 },
   engineering: { label: "Engenharia", agent: "engineering", role: "engineering", autoStart: true, wip: 4 },
   quality: { label: "Qualidade", agent: "quality", role: "quality", autoStart: true, wip: 2 },
@@ -26,6 +28,13 @@ const COLUMN_ALIASES = { definition: "product", build: "engineering", validate: 
 
 export function normalizeColumnId(columnId) {
   return COLUMN_ALIASES[columnId] || columnId;
+}
+
+async function resolveStoredColumnId(columnId, p) {
+  const requested = columnId || "manager";
+  const board = await readYaml(join(p.settings, "boards", "default.yaml"), { columns: [] });
+  const ids = new Set((board.columns || []).map((column) => column.id));
+  return ids.has(requested) ? requested : normalizeColumnId(requested);
 }
 
 export function storageRoot(root = process.env.KCA_STORAGE_ROOT) {
@@ -78,6 +87,26 @@ export async function readYaml(path, fallback = null) {
   }
 }
 
+function defaultColumnSettings(id) {
+  const meta = DEFAULT_COLUMN_META[id];
+  return { id, label: meta.label, agent: meta.agent, role: meta.role, autoStart: meta.autoStart, wip: meta.wip, wipLimit: meta.wip, hooks: { onEnter: id === "human_wait" ? ["summarize-blocker"] : id === "quality" ? ["run-checks"] : [], beforeLeave: [], onAgentComplete: [] } };
+}
+
+async function ensureDefaultBoardColumns(boardPath) {
+  const board = await readYaml(boardPath, null);
+  if (!board || !Array.isArray(board.columns)) return;
+  const columns = [...board.columns];
+  let changed = false;
+  for (const id of DEFAULT_COLUMNS) {
+    if (columns.some((column) => column.id === id)) continue;
+    const previousDefault = DEFAULT_COLUMNS[DEFAULT_COLUMNS.indexOf(id) - 1];
+    const previousIndex = previousDefault ? columns.findIndex((column) => column.id === previousDefault) : -1;
+    columns.splice(previousIndex >= 0 ? previousIndex + 1 : columns.length, 0, defaultColumnSettings(id));
+    changed = true;
+  }
+  if (changed) await writeYaml(boardPath, { ...board, columns });
+}
+
 async function readSkillMarkdown(skillDir, id) {
   try {
     const body = await readFile(join(skillDir, "SKILL.md"), "utf8");
@@ -103,6 +132,182 @@ export async function readJsonl(path) {
   } catch {
     return [];
   }
+}
+
+const UNCLEAR_TASK_TITLE = "Aguardando detalhes da tarefa";
+const TASK_INTENT_STOPWORDS = new Set([
+  "a", "as", "o", "os", "um", "uma", "uns", "umas", "de", "da", "do", "das", "dos", "em", "no", "na", "nos", "nas",
+  "para", "por", "com", "sem", "que", "qual", "quais", "como", "quando", "onde", "e", "ou", "se", "me", "eu", "voce",
+  "voces", "porfavor", "favor", "preciso", "quero", "gostaria", "deve", "deveria", "fazer", "faz", "isso",
+  "isto", "aquilo", "algo", "alguma", "coisa", "coisas", "tarefa", "task", "app", "aplicacao", "sistema", "produto"
+]);
+const TASK_INTENT_ACTIONS = new Set([
+  "adicionar", "ajustar", "alterar", "analisar", "atualizar", "configurar", "construir", "corrigir", "criar",
+  "documentar", "explicar", "implementar", "integrar", "investigar", "listar", "melhorar", "migrar", "pesquisar",
+  "planejar", "refatorar", "remover", "revisar", "testar", "validar",
+  "adicione", "ajuste", "altere", "analise", "atualize", "configure", "construa", "corrija", "crie", "documente",
+  "explique", "faca", "implemente", "integre", "investigue", "liste", "melhore", "migre", "pesquise", "planeje",
+  "refatore", "remova", "revise", "teste", "valide"
+]);
+
+function normalizeIntentToken(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function taskTitleSource(input = {}) {
+  const explicit = String(input.title || "").trim();
+  if (explicit) return explicit;
+  const description = String(input.description || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[#*_>`[\]()!-]/g, " ")
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (description) return description.slice(0, 80);
+  const attachment = Array.isArray(input.attachments) ? input.attachments.find((item) => item?.fileName || item?.name) : null;
+  return String(attachment?.fileName || attachment?.name || "Rascunho sem titulo").slice(0, 80);
+}
+
+function fallbackTaskTitle(input = {}) {
+  return taskTitleSource(input).slice(0, 80);
+}
+
+function taskHasActionableIntent(input = {}) {
+  if (String(input.title || "").trim() || input.draft) return true;
+  const text = normalizeIntentToken(`${input.description || ""} ${input.prompt || ""}`).replace(/[^a-z0-9]+/g, " ");
+  const tokens = text.split(/\s+/).filter(Boolean);
+  const hasAction = tokens.some((token) => TASK_INTENT_ACTIONS.has(token));
+  const concreteTokens = tokens.filter((token) => token.length > 2 && !TASK_INTENT_STOPWORDS.has(token) && !TASK_INTENT_ACTIONS.has(token));
+  return hasAction && concreteTokens.length > 0;
+}
+
+function safeAttachmentName(fileName) {
+  const base = basename(String(fileName || "attachment").replaceAll("\\", "/")).replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  const safe = base || "attachment";
+  const dot = safe.lastIndexOf(".");
+  const name = dot > 0 ? safe.slice(0, dot) : safe;
+  const ext = dot > 0 ? safe.slice(dot) : "";
+  return `${name.slice(0, 96)}${ext.slice(0, 24)}`;
+}
+
+async function readJsonlReversePage(path, { limit = 50, beforeTs } = {}) {
+  const rows = [];
+  let handle;
+  try {
+    handle = await open(path, "r");
+    const { size } = await handle.stat();
+    const chunkSize = 64 * 1024;
+    let position = size;
+    let carry = "";
+    while (position > 0 && rows.length < limit) {
+      const readSize = Math.min(chunkSize, position);
+      position -= readSize;
+      const buffer = Buffer.allocUnsafe(readSize);
+      await handle.read(buffer, 0, readSize, position);
+      const parts = `${buffer.toString("utf8")}${carry}`.split("\n");
+      carry = parts.shift() || "";
+      for (let index = parts.length - 1; index >= 0 && rows.length < limit; index -= 1) {
+        const line = parts[index].trim();
+        if (!line) continue;
+        try {
+          const row = JSON.parse(line);
+          if (beforeTs && row.ts && row.ts >= beforeTs) continue;
+          rows.push(row);
+        } catch {}
+      }
+    }
+    if (position === 0 && carry.trim() && rows.length < limit) {
+      try {
+        const row = JSON.parse(carry.trim());
+        if (!beforeTs || !row.ts || row.ts < beforeTs) rows.push(row);
+      } catch {}
+    }
+  } catch {
+    return [];
+  } finally {
+    await handle?.close();
+  }
+  return rows;
+}
+
+function shortText(value, max = 260) {
+  const text = typeof value === "string" ? value : JSON.stringify(value || "");
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+function logText(event) {
+  if (event.text) return event.text;
+  if (event.category === "tool_call" && event.toolCall) return `${event.toolCall.name || event.toolCall.tool || "tool"} ${shortText(event.toolCall.input || event.toolCall.arguments || event.toolCall.params || "", 180)}`;
+  if (event.category === "tool_result" && event.toolResult) return shortText(event.toolResult.text || event.toolResult.output || event.toolResult.content || event.toolResult, 220);
+  if (event.message?.text) return event.message.text;
+  if (event.question) return event.question;
+  if (event.blocker) return event.blocker;
+  if (event.reason) return event.reason;
+  if (event.summary) return event.summary;
+  if (event.reply) return event.reply;
+  if (event.prompt) return event.prompt;
+  if (event.tool) return `${event.tool}${event.ok === undefined ? "" : ` ok=${event.ok}`}`;
+  return event.path || event.type || "event";
+}
+
+async function taskSessionLogFiles(p, taskId) {
+  const base = join(p.runtime, "sessions", taskId);
+  const agents = await readdir(base, { withFileTypes: true }).catch(() => []);
+  return agents
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => ({ path: join(base, entry.name, "session.jsonl"), source: `session:${entry.name}`, agentId: entry.name }));
+}
+
+export async function readAgentLogs(rootInput, { taskId, limit = 50, cursor, agentId, runId } = {}) {
+  const p = paths(rootInput);
+  logStep("fsdb", "readAgentLogs", { taskId, limit, cursor: cursor || null, agentId: agentId || null, runId: runId || null });
+  const files = [
+    { path: join(p.tasks, taskId, "events.jsonl"), source: "events" },
+    ...await taskSessionLogFiles(p, taskId)
+  ].filter((file) => !agentId || !file.agentId || file.agentId === agentId);
+  const rows = (await Promise.all(files.map(async (file) => {
+    const events = await readJsonlReversePage(file.path, { limit: limit * 3, beforeTs: cursor });
+    return events.map((event) => ({ event, file }));
+  }))).flat();
+  const deduped = [];
+  const seen = new Set();
+  for (const row of rows
+    .filter(({ event }) => !runId || event.runId === runId)
+    .sort((a, b) => String(b.event.ts || "").localeCompare(String(a.event.ts || "")))) {
+    const { event, file } = row;
+    const eventAgent = typeof event.agent === "string" ? event.agent : undefined;
+    const signature = [
+      event.runId || "",
+      event.type || "event",
+      event.category || "",
+      event.role || "",
+      event.actor || eventAgent || file.agentId || "",
+      logText(event)
+    ].join("\u0001");
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    deduped.push(row);
+    if (deduped.length >= limit) break;
+  }
+  const items = deduped.map(({ event, file }, index) => {
+    const eventAgent = typeof event.agent === "string" ? event.agent : undefined;
+    return {
+      id: `${file.source}:${event.ts || "no-ts"}:${event.type || "event"}:${index}`,
+      ts: event.ts || "",
+      source: file.source,
+      type: event.type || "event",
+      actor: event.actor || eventAgent || file.agentId || "system",
+      taskId: event.taskId || taskId,
+      agentId: event.agentId || eventAgent || file.agentId,
+      runId: event.runId,
+      category: event.category,
+      role: event.role,
+      text: shortText(logText(event)),
+      raw: event
+    };
+  });
+  const nextCursor = items.length ? items[items.length - 1].ts : undefined;
+  return { items, nextCursor, hasMore: items.length === limit };
 }
 
 function deepMerge(base, patch) {
@@ -164,7 +369,7 @@ export async function initStorage(rootInput) {
           agentSessionRetentionDays: 30,
           resumeSessions: true,
           chatCompaction: { maxActiveMessages: 50 },
-          agentTokens: { assistant: 1, architect: 1, engineer: 2, validator: 1, reviewer: 1, manager: 1, product: 1, design: 1, generalist: 1, engineering: 2, quality: 1, review: 1, deployment: 1 },
+          agentTokens: { assistant: 1, "hook-agent": 1, manager: 1, product: 1, design: 1, architecture: 1, generalist: 1, engineering: 2, quality: 1, review: 1, deployment: 1 },
           projectTokens: { "kanban-code-agent": 2 }
         },
         manualMove: { confirmWhenRunning: true, defaultInterruptPolicy: "ask" },
@@ -175,15 +380,13 @@ export async function initStorage(rootInput) {
       await ensureYaml(join(p.settings, "boards", "default.yaml"), {
         schema: "kanban-code-agent/board@1",
         id: "default",
-        columns: DEFAULT_COLUMNS.map((id) => {
-          const meta = DEFAULT_COLUMN_META[id];
-          return { id, label: meta.label, agent: meta.agent, role: meta.role, autoStart: meta.autoStart, wip: meta.wip, wipLimit: meta.wip, hooks: { onEnter: id === "human_wait" ? ["summarize-blocker"] : id === "quality" ? ["run-checks"] : [], beforeLeave: [], onAgentComplete: [] } };
-        })
+        columns: DEFAULT_COLUMNS.map(defaultColumnSettings)
       });
+      await ensureDefaultBoardColumns(join(p.settings, "boards", "default.yaml"));
       await ensureYaml(join(p.settings, "hooks", "summarize-blocker.yaml"), {
         schema: "kanban-code-agent/hook@1",
         id: "summarize-blocker",
-        label: "Resumir bloqueio",
+        label: "Resumir espera humana",
         kind: "agent-action",
         agent: "hook-agent",
         trigger: "onEnter",
@@ -203,9 +406,9 @@ export async function initStorage(rootInput) {
           id: "manager",
           label: "Manager",
           skills: ["kanban-management"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "wait_for_persona", "delegate_task", "spawn_subtasks"],
           tokens: 1,
-          prompt: "# Manager\n\nClassify demand, choose the next responsible persona, and unblock work with concise operational decisions.\n"
+          prompt: "# Manager\n\nMission: choose exactly one simplest next operational action for the task.\n\nInputs: task metadata, acceptance, planning, recent task chat, artifacts, blockers, tool results, and Manager Routing Context.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, wait_for_persona, delegate_task, spawn_subtasks.\n\nOwns: triage, routing, unblocking, contract review, execution planning after product approval, and deciding the next responsible persona.\n\nDoes not own: product contract, UX spec, system architecture, implementation, QA, code review, or deployment.\n\nModes: intake routes unclear work to product or human; contract_review checks the product contract against the original user request; execution_planning defines phases, inputs, persona owners, dependencies, checkpoints, and may emit artifacts/execution-plan.md before subtasks; progress_control consumes outputs/blockers and picks the next incremental action.\n\nDecision ladder: if acceptance is missing or placeholder, use intake and route to product; if a product contract exists, use contract_review before execution; direct research/listing/docs with concrete acceptance uses execution_planning for generalist -> quality -> done; UI/UX goes to design; complex API/schema/migration/system planning goes to architecture before engineering; accepted code/config/API/tests go to engineering; functional validation, review, and deployment results use progress_control to pick the next action.\n\nEvidence: cite the task fact or blocker that justifies the action.\n\nHandoff: include target persona, concrete request, expected output, and stop after the handoff.\n\nRequired output: exactly one visible decision, one tool call, or an execution-plan artifact when planning is needed.\n\nStop conditions: after one visible decision or one tool call, stop. Never repeat the same blocker, delegation, or comment. Text alone does not finish the run; use a terminal tool.\n\nForbidden actions: do not implement code, define acceptance, validate behavior, review code, deploy, or create files unless the task explicitly needs a manager artifact.\n"
         },
         {
           id: "product",
@@ -213,7 +416,7 @@ export async function initStorage(rootInput) {
           skills: ["planning"],
           tools: ["complete_task", "request_user_input", "emit_artifact", "spawn_subtasks"],
           tokens: 1,
-          prompt: "# Product\n\nDefine problem, value, acceptance criteria, risks, and the next responsible persona.\n"
+          prompt: "# Product\n\nMission: turn the request into clear product intent and acceptance criteria.\n\nInputs: user request, task description, recent chat, existing acceptance, planning, and artifacts.\n\nAllowed tools: complete_task, request_user_input, emit_artifact, spawn_subtasks.\n\nOwns: problem, value, scope, acceptance criteria, data freshness/source requirements, and product risks.\n\nDoes not own: implementation, QA execution, code review, deployment, or technical architecture beyond product constraints.\n\nDecision ladder: clarify only blocking ambiguity; replace placeholder acceptance with verifiable criteria; define expected artifact/output; route UI to design, complex technical planning to architecture, direct operational work to generalist, or accepted build work to engineering.\n\nEvidence: acceptance criteria must be verifiable by a human or automated check.\n\nHandoff: name the next persona and the exact product contract they should satisfy.\n\nRequired output: explicit acceptance criteria and next responsible persona.\n\nStop conditions: complete after the product contract is explicit enough for the next role.\n\nForbidden actions: do not implement, validate, review, deploy, or invent external constraints without marking them as assumptions.\n"
         },
         {
           id: "design",
@@ -221,7 +424,15 @@ export async function initStorage(rootInput) {
           skills: ["planning"],
           tools: ["complete_task", "request_user_input", "emit_artifact"],
           tokens: 1,
-          prompt: "# Design\n\nDefine UX flow, states, accessibility, visual handoff, and evidence.\n"
+          prompt: "# Design\n\nMission: define UX flow, states, accessibility, and visual handoff when design work is relevant.\n\nInputs: product contract, task description, acceptance, recent chat, and existing artifacts.\n\nAllowed tools: complete_task, request_user_input, emit_artifact.\n\nOwns: UX behavior, screen states, accessibility expectations, visual constraints, and design handoff.\n\nDoes not own: product scope, implementation, QA execution, code review, or deployment.\n\nDecision ladder: mark design not applicable when no UI/UX is affected; otherwise define flow, states, accessibility, and visual constraints; hand off to architecture for complex technical UX implications or engineering for straightforward implementation.\n\nEvidence: artifact or summary must state the affected screens/states and accessibility expectations.\n\nHandoff: provide concise implementation guidance and validation expectations.\n\nRequired output: design constraints or a clear no-design-impact decision.\n\nStop conditions: complete once the next persona can proceed without guessing UX behavior.\n\nForbidden actions: do not implement code, deploy, or review merge readiness.\n"
+        },
+        {
+          id: "architecture",
+          label: "Architecture",
+          skills: ["planning"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"],
+          tokens: 1,
+          prompt: "# Architecture\n\nMission: define technical approach, internal contracts, risks, and implementation sequencing for complex development work.\n\nInputs: product contract, design handoff, task description, acceptance, planning, artifacts, dependencies, and worktree path.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, spawn_subtasks.\n\nOwns: architecture decisions, API/schema contracts, migration strategy, risk boundaries, file ownership, and subtask decomposition.\n\nDoes not own: product scope, UX choices, implementation, QA execution, code review, or deployment.\n\nDecision ladder: inspect product/design context; ask only for blocking technical decisions; emit a concise technical plan; spawn subtasks only when independent work can run in parallel; hand off accepted build work to engineering.\n\nEvidence: cite contracts, affected modules, risks, and validation expectations.\n\nHandoff: provide exact engineering request, expected files or surfaces, and validation gates.\n\nRequired output: implementation-ready technical plan or a blocker with the missing decision.\n\nStop conditions: complete after engineering can implement without architectural guessing.\n\nForbidden actions: do not implement code, validate behavior, review code, deploy, or redefine product acceptance.\n"
         },
         {
           id: "generalist",
@@ -229,31 +440,31 @@ export async function initStorage(rootInput) {
           skills: ["kanban-management"],
           tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
           tokens: 1,
-          prompt: "# Generalist\n\nExecute non-engineering work with evidence, or delegate to Engineering when code or architecture is required.\n"
+          prompt: "# Generalist\n\nMission: execute non-code operational work with evidence or delegate technical work.\n\nInputs: task description, concrete acceptance, recent chat, artifacts, and prior persona handoffs.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact.\n\nOwns: research, listing, summarization, formatting, documentation, and non-code artifacts.\n\nDoes not own: product acceptance definition, implementation, QA, code review, or deployment.\n\nDecision ladder: if acceptance is missing, report blocker to manager/product; complete non-code research/docs/coordination with source evidence; ask human for missing required input; report blocker if blocked; delegate technical work to architecture or engineering.\n\nEvidence: cite the source, artifact, or result that proves completion.\n\nHandoff: include exact architecture or engineering request when technical work is needed.\n\nRequired output: completed artifact plus source/evidence, or one blocker.\n\nStop conditions: complete, block, or hand off once.\n\nForbidden actions: do not edit code, deploy, validate implementation, or review merge readiness.\n"
         },
         {
           id: "engineering",
           label: "Engineering",
           skills: ["implementation"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"],
           tokens: 2,
-          prompt: "# Engineering\n\nImplement the task inside the dedicated worktree when available. Keep changes scoped and validate locally.\n"
+          prompt: "# Engineering\n\nMission: implement the accepted technical change in the task worktree and prove it works locally.\n\nInputs: product contract, architecture/design handoff when present, acceptance, planning, recent engineering chat, prior summaries, artifacts, dependencies, and worktree path.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command.\n\nOwns: code/config/test implementation and local developer validation.\n\nDoes not own: product acceptance, UX decisions, architecture for complex unresolved changes, QA signoff, code review, or deployment.\n\nDecision ladder: inspect task context; block if acceptance is placeholder; request architecture if technical design is missing for complex work; edit only needed files in the worktree; run targeted validation with run_command; complete to quality only after local validation passes.\n\nEvidence: include changed files and exact validation command/output summary.\n\nHandoff: report blockers with the missing prerequisite and next step; ask human only for required input unavailable from context.\n\nRequired output: implemented change, changed files, and local validation evidence.\n\nStop conditions: after completion or blocker, stop. Do not retry the same failing tool more than twice.\n\nForbidden actions: do not deploy, review code, spawn subtasks, use unrelated filesystem paths, or claim shell is unavailable before trying run_command.\n"
         },
         {
           id: "quality",
           label: "Quality",
           skills: ["validation"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"],
           tokens: 1,
-          prompt: "# Quality\n\nValidate acceptance criteria with concrete evidence and route failures to the responsible persona.\n"
+          prompt: "# Quality\n\nMission: validate that the delivered behavior satisfies acceptance criteria with concrete evidence.\n\nInputs: concrete acceptance, implementation artifacts, recent chat, changed files, and validation outputs.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command.\n\nOwns: functional QA, acceptance mapping, regression checks, browser/API/consumer validation, and pass/fail evidence.\n\nDoes not own: product scope, implementation fixes, code review, merge readiness, or deployment.\n\nDecision ladder: block to manager/product if acceptance is missing or placeholder; map acceptance to checks; run or inspect validation evidence; emit audit artifact if useful; pass code changes to review only when behavior satisfies acceptance; complete non-code tasks to done when acceptance is satisfied.\n\nEvidence: every pass/fail must cite a command, artifact, screenshot, source, or observed output.\n\nHandoff: failures go to the responsible persona with exact reproduction and expected fix.\n\nRequired output: QA decision with acceptance-to-evidence mapping.\n\nStop conditions: complete or report one blocker; do not loop validation after a definitive failure.\n\nForbidden actions: do not implement fixes, deploy, or decide code merge readiness.\n"
         },
         {
           id: "review",
           label: "Review",
           skills: ["review"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"],
           tokens: 1,
-          prompt: "# Review\n\nReview risks, regressions, missing tests, and merge readiness.\n"
+          prompt: "# Review\n\nMission: perform code review and decide diff/merge readiness after QA evidence exists.\n\nInputs: diff/artifacts, changed files, validation evidence, recent chat, and task history.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command.\n\nOwns: code review, maintainability, security risks, regressions visible in the diff, and merge readiness.\n\nDoes not own: product acceptance definition, functional QA signoff, implementation fixes, deployment, or research/data verification.\n\nDecision ladder: block to quality if QA evidence is missing; inspect diff and evidence; run lightweight verification if needed; list blocking findings first; pass to deployment only when code is merge-ready.\n\nEvidence: findings need severity, reason, and file/artifact reference when available.\n\nHandoff: blockers go back to engineering with exact corrective action.\n\nRequired output: merge-ready decision or blocking code-review findings.\n\nStop conditions: finish after one review decision.\n\nForbidden actions: do not implement broad fixes, validate product acceptance, or deploy.\n"
         },
         {
           id: "deployment",
@@ -261,7 +472,7 @@ export async function initStorage(rootInput) {
           skills: ["automation"],
           tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
           tokens: 1,
-          prompt: "# Deployment\n\nRun release/deploy gates, record rollback notes, or request human credentials/approval.\n"
+          prompt: "# Deployment\n\nMission: run release/deployment gates and record rollback evidence.\n\nInputs: review decision, validation evidence, deployment instructions, recent chat, and task artifacts.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact.\n\nOwns: release gate, deployment record, approval/secret checks, and rollback note.\n\nDoes not own: product scope, implementation, QA, code review, or bypassing prior gates.\n\nDecision ladder: verify approval/evidence; request credentials or approval if missing; record deployment/rollback notes; complete only when release criteria are satisfied.\n\nEvidence: deployment summary must include command/gate, result, and rollback note.\n\nHandoff: report deployment blockers with required human action or missing secret.\n\nRequired output: deployment summary or one deployment blocker.\n\nStop conditions: complete or block once; do not retry unsafe deploy commands blindly.\n\nForbidden actions: do not change implementation scope or bypass review.\n"
         },
         {
           id: "assistant",
@@ -270,38 +481,6 @@ export async function initStorage(rootInput) {
           tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"],
           tokens: 1,
           prompt: "# Board Assistant\n\nManage the Kanban board through typed tools. Create, update, move, explain, decompose, and route tasks without editing storage files directly.\n"
-        },
-        {
-          id: "architect",
-          label: "Architect",
-          skills: ["planning"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"],
-          tokens: 1,
-          prompt: "# Architect\n\nRefine scope, acceptance criteria, risks, dependencies, file locks, and subtask plans. Produce executable plans with validation evidence.\n"
-        },
-        {
-          id: "engineer",
-          label: "Engineer",
-          skills: ["implementation"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
-          tokens: 2,
-          prompt: "# Engineer\n\nImplement the task inside the dedicated worktree when available. Keep changes scoped, run validation, emit artifacts when useful, and complete via typed tool only.\n"
-        },
-        {
-          id: "validator",
-          label: "Validator",
-          skills: ["validation"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
-          tokens: 1,
-          prompt: "# Validator\n\nValidate behavior against acceptance criteria with concrete evidence. Report blockers for failures and complete only when evidence proves the task is ready.\n"
-        },
-        {
-          id: "reviewer",
-          label: "Reviewer",
-          skills: ["review"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
-          tokens: 1,
-          prompt: "# Reviewer\n\nReview risks, regressions, missing tests, and merge readiness. Prioritize actionable findings with file and evidence references.\n"
         },
         {
           id: "hook-agent",
@@ -342,6 +521,7 @@ export async function initStorage(rootInput) {
           "agent:manager": 1,
           "agent:product": 1,
           "agent:design": 1,
+          "agent:architecture": 1,
           "agent:generalist": 1,
           "agent:engineering": 2,
           "agent:quality": 1,
@@ -410,23 +590,29 @@ export async function addProject(input, rootInput) {
 
 export async function createTask(input, rootInput) {
   const p = await initStorage(rootInput);
-  logStep("fsdb", "createTask.start", { title: input.title, column: input.column || "inbox" });
+  logStep("fsdb", "createTask.start", { title: input.title, column: input.column || "manager" });
   const id = input.id || `KCA-${String(Date.now()).slice(-6)}`;
   const taskDir = join(p.tasks, id);
   const now = new Date().toISOString();
+  const requestedColumn = input.column || (input.draft ? "inbox" : "manager");
+  const needsHumanIntake = !input.draft && normalizeColumnId(requestedColumn) === "manager" && !taskHasActionableIntent(input);
+  const column = needsHumanIntake ? "human_wait" : await resolveStoredColumnId(requestedColumn, p);
+  const title = needsHumanIntake ? UNCLEAR_TASK_TITLE : fallbackTaskTitle(input);
   const task = {
     schema: "kanban-code-agent/task@1",
     id,
-    title: input.title,
+    title,
     kind: input.kind || "task",
-    column: normalizeColumnId(input.column || "inbox"),
-    status: input.status || "idle",
+    column,
+    status: needsHumanIntake ? "idle" : input.status || (input.draft ? "draft" : "idle"),
     priority: input.priority || "medium",
     createdAt: now,
     updatedAt: now,
     createdBy: "user",
     projectTargets: input.projectTargets || [],
-    routing: input.routing || { currentAgent: input.agent || "assistant", currentRole: input.role || input.agent || "assistant", manualOverride: { active: false } },
+    routing: needsHumanIntake
+      ? { currentAgent: null, currentRole: null, lastAgent: input.agent || "manager", lastRole: input.role || input.agent || "manager", manualOverride: { active: false } }
+      : input.routing || { currentAgent: input.agent || "manager", currentRole: input.role || input.agent || "manager", manualOverride: { active: false } },
     worktree: input.worktree || { enabled: true, kind: input.kind || "task", branch: input.branch || `kca/${id}`, pathRef: "worktree.yaml", parentTaskId: null, mergeTarget: "main" },
     dependencies: input.dependencies || { needs: [], provides: [], blockedBy: [], fileLocks: [], semaphores: [] },
     hooks: input.hooks || { active: [] },
@@ -443,7 +629,7 @@ export async function createTask(input, rootInput) {
     status: "draft",
     createdByRole: "product",
     roles: {
-      required: ["product", "design", "engineering", "quality", "review", "deployment"],
+      required: ["product", "design", "architecture", "engineering", "quality", "review", "deployment"],
       optional: ["manager"]
     },
     artifacts: {
@@ -455,8 +641,9 @@ export async function createTask(input, rootInput) {
   await writeYaml(join(taskDir, "dependencies.yaml"), { schema: "kanban-code-agent/dependencies@1", ...task.dependencies });
   await writeYaml(join(taskDir, "subtasks.yaml"), { schema: "kanban-code-agent/subtasks@2", taskId: id, parentTaskId: id, strategy: "dag", mergePolicy: "sequential-into-parent-feature", nodes: [], subtasks: [], edges: [] });
   await writeYaml(join(taskDir, "worktree.yaml"), { schema: "kanban-code-agent/worktree@1", taskId: id, branch: task.worktree.branch });
-  await appendJsonl(join(taskDir, "comments.jsonl"), { ts: now, type: "comment.system", actor: "system", taskId: id, body: "Task criada." });
+  await appendJsonl(join(taskDir, "comments.jsonl"), { ts: now, type: "comment.system", actor: needsHumanIntake ? "manager" : "system", taskId: id, body: needsHumanIntake ? "Preciso de mais informações para criar a task: informe o objetivo e o que deve ser feito." : "Task criada." });
   await appendJsonl(join(taskDir, "events.jsonl"), { ts: now, type: "task.created", actor: "user", taskId: id, task });
+  if (needsHumanIntake) await appendJsonl(join(taskDir, "events.jsonl"), { ts: now, type: "human.input_requested", actor: "manager", taskId: id, reason: "missing_actionable_task_intent" });
   logStep("fsdb", "createTask.done", { id, column: task.column, status: task.status });
   return task;
 }
@@ -466,7 +653,7 @@ export async function listTasks(rootInput) {
   logStep("fsdb", "listTasks.start", { root: p.root });
   const ids = await readdir(p.tasks);
   const tasks = await Promise.all(ids.map(async (id) => {
-    const task = await readYaml(join(p.tasks, id, "task.yaml"));
+    const task = await readTaskWithRuntime(id, p);
     if (!task) return null;
     try {
       const description = (await readFile(join(p.tasks, id, "description.md"), "utf8")).replace(/^# .*\n\n?/, "").trim();
@@ -483,7 +670,40 @@ export async function listTasks(rootInput) {
 export async function getTask(taskId, rootInput) {
   const p = paths(rootInput);
   logStep("fsdb", "getTask", { taskId });
-  return readYaml(join(p.tasks, taskId, "task.yaml"));
+  return readTaskWithRuntime(taskId, p);
+}
+
+async function readTaskWithRuntime(taskId, p) {
+  const task = await readYaml(join(p.tasks, taskId, "task.yaml"));
+  if (!task) return null;
+  const events = await readJsonl(join(p.tasks, taskId, "events.jsonl"));
+  const failure = latestFailure(events);
+  return failure ? { ...task, failure } : task;
+}
+
+function latestFailure(events = []) {
+  const failureTypes = ["agent.failed", "task.blocked", "task.run.blocked", "task.decompose.failed", "gate.failed", "merge.blocked"];
+  const clearTypes = ["agent.queued", "agent.started", "task.unblocked", "gate.passed"];
+  const failedIndex = events.findLastIndex((event) => failureTypes.includes(event.type));
+  if (failedIndex < 0) return null;
+  if (events.slice(failedIndex + 1).some((event) => clearTypes.includes(event.type))) return null;
+  const failed = events[failedIndex];
+  if (!failed) return null;
+  const reason = failed.reason
+    || failed.error
+    || failed.message
+    || failed.blocker
+    || (failed.errors ? JSON.stringify(failed.errors) : "")
+    || (failed.patch?.dependencies?.blockedBy ? failed.patch.dependencies.blockedBy.join(", ") : "")
+    || (failed.patch?.status ? `status:${failed.patch.status}` : "")
+    || failed.type;
+  return {
+    type: failed.type,
+    reason: String(reason),
+    ts: failed.ts,
+    actor: failed.actor,
+    runId: failed.runId
+  };
 }
 
 export async function updateTask(taskId, patch, rootInput, eventType = "task.updated") {
@@ -508,6 +728,31 @@ export async function writeTaskFile(taskId, relativePath, content, rootInput) {
   return relativePath;
 }
 
+export async function writeTaskAttachment(taskId, fileName, data, rootInput) {
+  const p = paths(rootInput);
+  const safeName = safeAttachmentName(fileName);
+  const relativePath = `attachments/${Date.now()}-${safeName}`;
+  logStep("fsdb", "writeTaskAttachment", { taskId, relativePath });
+  await writeAtomic(join(p.tasks, taskId, relativePath), data);
+  return relativePath;
+}
+
+export async function listTaskFiles(taskId, rootInput) {
+  const p = paths(rootInput);
+  const taskDir = join(p.tasks, taskId);
+  async function walk(dir, prefix = "") {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    const rows = [];
+    for (const entry of entries) {
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) rows.push(...await walk(join(dir, entry.name), relative));
+      else rows.push(relative);
+    }
+    return rows;
+  }
+  return (await walk(taskDir)).sort();
+}
+
 export async function moveTask(taskId, toColumn, rootInput) {
   const p = paths(rootInput);
   logStep("fsdb", "moveTask.start", { taskId, toColumn });
@@ -515,8 +760,8 @@ export async function moveTask(taskId, toColumn, rootInput) {
   const task = await readYaml(taskPath);
   if (!task) throw new Error(`Task not found: ${taskId}`);
   const from = task.column;
-  task.column = normalizeColumnId(toColumn);
-  task.status = toColumn === "done" ? "done" : task.status;
+  task.column = await resolveStoredColumnId(toColumn, p);
+  task.status = task.column === "done" ? "done" : task.status;
   task.updatedAt = new Date().toISOString();
   await writeYaml(taskPath, task);
   await appendJsonl(join(p.tasks, taskId, "events.jsonl"), { ts: task.updatedAt, type: "task.moved", actor: "user", taskId, from, to: task.column, patch: { column: task.column, status: task.status } });
@@ -538,12 +783,20 @@ function appScopeKey(scope) {
 }
 
 async function readAgentWithPrompt(settingsDir, agent) {
-  if (!agent?.instructionsPath) return agent;
+  const normalized = normalizeAgentSettings(agent);
+  if (!normalized?.instructionsPath) return normalized;
   try {
-    return { ...agent, instructionsBody: await readFile(join(settingsDir, "agents", agent.instructionsPath), "utf8") };
+    return { ...normalized, instructionsBody: await readFile(join(settingsDir, "agents", normalized.instructionsPath), "utf8") };
   } catch {
-    return agent;
+    return normalized;
   }
+}
+
+function normalizeAgentSettings(agent) {
+  if (!agent || agent.id !== "manager") return agent;
+  const required = ["wait_for_persona", "delegate_task", "spawn_subtasks"];
+  if (Array.isArray(agent.tools)) return { ...agent, tools: [...new Set([...agent.tools, ...required])] };
+  return { ...agent, tools: { ...(agent.tools || {}), custom: [...new Set([...(agent.tools?.custom || []), ...required])] } };
 }
 
 export async function readSettingsScope(scope = "app", rootInput) {
@@ -645,7 +898,7 @@ export async function readHook(hookId, rootInput) {
 export async function readAgent(agentId, rootInput) {
   const p = await initStorage(rootInput);
   logStep("fsdb", "readAgent", { agentId });
-  return readYaml(join(p.settings, "agents", `${agentId}.yaml`), null);
+  return normalizeAgentSettings(await readYaml(join(p.settings, "agents", `${agentId}.yaml`), null));
 }
 
 export async function readSkill(skillId, rootInput) {
@@ -685,7 +938,7 @@ export async function rebuildTaskFromEvents(taskId, rootInput) {
 export async function rebuildIndexes(rootInput) {
   const p = await initStorage(rootInput);
   logStep("fsdb", "rebuildIndexes.start", { root: p.root });
-  const tasks = await listTasks(rootInput);
+  const tasks = (await listTasks(rootInput)).filter((task) => task.status !== "draft");
   await writeAtomic(join(p.runtime, "indexes", "tasks.json"), JSON.stringify(tasks.map(({ id, title, column, status }) => ({ id, title, column, status })), null, 2));
   logStep("fsdb", "rebuildIndexes.done", { taskCount: tasks.length });
   return { taskCount: tasks.length, indexPath: join(p.runtime, "indexes", "tasks.json") };
@@ -695,7 +948,7 @@ export async function boardSnapshot(rootInput) {
   const p = await initStorage(rootInput);
   logStep("fsdb", "boardSnapshot.start", { root: p.root });
   const board = await readYaml(join(p.settings, "boards", "default.yaml"), { columns: [] });
-  const tasks = await listTasks(rootInput);
+  const tasks = (await listTasks(rootInput)).filter((task) => task.status !== "draft");
   const settings = await readSettings(rootInput);
   const result = {
     schema: "kanban-code-agent/state@1",

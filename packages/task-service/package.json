@@ -1,0 +1,14 @@
+{
+  "name": "@kca/task-service",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@kca/core": "workspace:*",
+    "@kca/fsdb": "workspace:*",
+    "@kca/schemas": "workspace:*"
+  }
+}

@@ -20,7 +20,7 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
     { id: "all", label: "Tudo" },
     { id: "running", label: "Rodando" },
     { id: "queued", label: "Fila" },
-    { id: "blocked", label: "Bloqueadas" },
+    { id: "failed", label: "Falhas" },
     { id: "merge_pending", label: "Merge" },
     { id: "done", label: "Concluídas" }
   ];
@@ -28,12 +28,12 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
     idle: "Fila",
     queued: "Fila",
     running: "Rodando",
-    blocked: "Bloqueada",
+    failed: "Falhou",
     done: "Concluída",
     merge_pending: "Merge",
     validating: "Validando"
   };
-  const progressByStatus: Record<string, number> = { idle: 0, queued: 8, running: 50, blocked: 18, merge_pending: 92, validating: 80, done: 100 };
+  const progressByStatus: Record<string, number> = { idle: 0, queued: 8, running: 50, blocked: 18, failed: 18, merge_pending: 92, validating: 80, done: 100 };
 
   return (
     <div className="main-area">
@@ -64,7 +64,8 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                 onDrop={(event) => {
                   event.preventDefault();
                   const taskId = event.dataTransfer.getData("text/task-id");
-                  if (taskId && taskId !== column.id) onMoveTask(taskId, column.id);
+                  const task = tasks.find((item) => item.id === taskId);
+                  if (task && task.column !== column.id) onMoveTask(task.id, column.id);
                 }}
               >
                 <header className="column-head">
@@ -74,6 +75,7 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                 <div className="cards">
                   {columnTasks.map((task) => {
                     const progress = progressByStatus[task.status] ?? 0;
+                    const isInboxIdle = task.column === "inbox" && task.status === "idle";
                     return (
                       <article
                         key={task.id}
@@ -91,10 +93,9 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                             <MoreHorizontal className="task-menu" size={16} />
                           </div>
                           {task.description ? <p className="task-copy">{task.description}</p> : null}
+                          {task.failure?.reason ? <p className="task-failure">Falha: {task.failure.reason}</p> : null}
                           <div className="task-tags">
-                            <span className={clsx("pill", task.status)}>{statusLabels[task.status] || task.status}</span>
-                            {task.routing?.currentRole ? <span className="pill soft">{task.routing.currentRole}</span> : null}
-                            {task.routing?.currentAgent && task.routing.currentAgent !== task.routing.currentRole ? <span className="pill soft">{task.routing.currentAgent}</span> : null}
+                            {!isInboxIdle ? <span className={clsx("pill", task.status)}>{statusLabels[task.status] || task.status}</span> : null}
                             {task.routing?.lastAgent ? <span className="pill soft">prev {task.routing.lastAgent}</span> : null}
                             {task.routing?.nextSuggestedColumn ? <span className="pill soft">next {task.routing.nextSuggestedColumn}</span> : null}
                             {(task.projectTargets || []).map((project) => <span className="pill" key={project}>{project}</span>)}
@@ -102,8 +103,6 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                           <div className="progress" aria-label={`Progresso ${progress}%`}><span style={{ width: `${progress}%` }} /></div>
                           <div className="task-footer">
                             <span className="mini-meta"><GitBranch size={13} />{task.worktree?.branch || "sem branch"}</span>
-                            <span className="mini-meta">role: {task.routing?.currentRole || task.routing?.currentAgent || "user"}</span>
-                            <span className="mini-meta">parallel: {["queued", "running"].includes(task.status) ? "ativo" : "idle"}</span>
                           </div>
                         </button>
                         <div className="task-actions">

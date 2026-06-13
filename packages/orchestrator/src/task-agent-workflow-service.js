@@ -1,0 +1,226 @@
+import { execFile } from "node:child_process";
+import { resolve } from "node:path";
+import { promisify } from "node:util";
+import { interruptRun, startRun, writeRunSummary } from "@kca/agent-runtime";
+import { createWorktree } from "@kca/git-worktree";
+import { appendJsonl, boardSnapshot, getTask, normalizeColumnId, paths, readJsonl, readProject, updateTask, writeTaskFile } from "@kca/fsdb";
+import { appendChatMessage } from "@kca/fsdb/chat-store";
+import { releaseSemaphoreLeases } from "@kca/fsdb/runtime-store";
+import { TaskSchema } from "@kca/schemas";
+import { logStep } from "@kca/core/log";
+import { roleById } from "@kca/core/roles";
+
+const exec = promisify(execFile);
+
+function roleColumn(roleId) {
+  if (roleId === "done") return "done";
+  return roleById(roleId)?.columnIds?.[0] || normalizeColumnId(roleId);
+}
+
+function assertActiveRun(task, runId) {
+  if (!runId) return;
+  if (task.agent?.currentRunId && task.agent.currentRunId !== runId) throw new Error("run_mismatch");
+  if (task.routing?.manualOverride?.active && task.routing.manualOverride.invalidatesRunId === runId) throw new Error("manual_override_active");
+}
+
+async function routeProblemToManager(task, root, message, eventType = "task.problem") {
+  await appendChatMessage(root, { scope: "task", taskId: task.id, role: "assistant", persona: "manager", agentId: "manager", disposition: eventType, text: message, visibility: "both" });
+  return TaskSchema.parse(await updateTask(task.id, {
+    status: "queued",
+    column: "manager",
+    routing: { ...task.routing, lastAgent: task.routing?.currentAgent || null, lastRole: task.routing?.currentRole || null, currentAgent: "manager", currentRole: "manager" },
+    dependencies: { ...task.dependencies, blockedBy: [] }
+  }, root, eventType));
+}
+
+async function deferredCommentsForRun(root, taskId, runId) {
+  if (!runId) return [];
+  const events = await readJsonl(`${paths(root).tasks}/${taskId}/events.jsonl`);
+  return events.filter((event) => event.type === "task.comment" && event.deferredForRunId === runId);
+}
+
+export async function runTaskWorkflow(command, root, whyNotRunning, executeCommand) {
+  logStep("orchestrator", "task.run.start", { commandId: command.commandId, taskId: command.taskId });
+  const current = await getTask(command.taskId, root);
+  if (!current) throw new Error(`Task not found: ${command.taskId}`);
+  const why = await whyNotRunning(current, root);
+  if (!why.runnable) {
+    logStep("orchestrator", "task.run.blocked", { taskId: command.taskId, reasons: why.reasons });
+    const task = TaskSchema.parse(await updateTask(command.taskId, { status: "queued" }, root, "agent.queued"));
+    return { ok: false, commandId: command.commandId, task, why };
+  }
+  logStep("orchestrator", "task.run.launch", { taskId: command.taskId, agentId: command.agentId });
+  let runnableTask = current;
+  if (current.worktree?.enabled && !current.worktree.path) {
+    const project = current.projectTargets?.[0] ? await readProject(current.projectTargets[0], root) : null;
+    if (project?.repoPath) {
+      const worktree = await createWorktree({ repoPath: project.repoPath, taskId: current.id, branch: current.worktree.branch, root: `${paths(root).runtime}/worktrees` });
+      if (worktree.ok) {
+        await appendJsonl(`${paths(root).tasks}/${current.id}/events.jsonl`, { ts: new Date().toISOString(), type: "worktree.created", actor: "orchestrator", taskId: current.id, path: worktree.worktreePath, branch: worktree.branch });
+        runnableTask = await updateTask(current.id, { worktree: { ...current.worktree, path: worktree.worktreePath, repoPath: project.repoPath } }, root, "worktree.updated");
+      }
+    } else if (project && !project.repoPath) {
+      const reason = `Project ${project.id} has no repoPath configured.`;
+      const task = await routeProblemToManager(current, root, reason, "task.run.blocked");
+      await appendJsonl(`${paths(root).tasks}/${current.id}/events.jsonl`, { ts: new Date().toISOString(), type: "task.run.blocked", actor: "orchestrator", taskId: current.id, reason });
+      return { ok: false, commandId: command.commandId, task, why: { runnable: false, reasons: [reason] } };
+    }
+  }
+  const run = await startRun(runnableTask, root, command.agentId, {
+    executeCommand: (toolCommand) => executeCommand(toolCommand, root),
+    beforePrompt: ({ runId, sessionRef, summaryRef, agentId, role }) => updateTask(command.taskId, {
+      status: "running",
+      routing: { ...runnableTask.routing, currentAgent: agentId, currentRole: role || runnableTask.routing?.currentRole || agentId },
+      agent: { currentRunId: runId, currentSessionRef: sessionRef, resumeMode: "continue", lastSummary: summaryRef }
+    }, root, "agent.started")
+  });
+  if (run.adapter?.promptSent === false || ["session_timeout", "prompt_timeout"].includes(run.adapter?.reason)) {
+    const reason = run.adapter.reason || "prompt_not_sent";
+    const task = TaskSchema.parse(await updateTask(command.taskId, {
+      status: "failed",
+      agent: { currentRunId: run.runId, currentSessionRef: run.sessionRef, resumeMode: "continue", lastSummary: run.summaryRef }
+    }, root, "agent.failed"));
+    await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "agent.failed", actor: "orchestrator", taskId: command.taskId, runId: run.runId, reason });
+    await releaseSemaphoreLeases({ root, taskId: command.taskId });
+    return { ok: false, commandId: command.commandId, task, run, reason };
+  }
+  const latest = await getTask(command.taskId, root);
+  if (latest && (latest.status !== runnableTask.status || latest.column !== runnableTask.column)) {
+    const task = TaskSchema.parse(await updateTask(command.taskId, {
+      routing: { ...latest.routing, currentAgent: latest.routing?.currentAgent || run.agentId, currentRole: latest.routing?.currentRole || run.role || run.agentId },
+      agent: { ...latest.agent, currentRunId: run.runId, currentSessionRef: run.sessionRef, resumeMode: "continue", lastSummary: latest.agent?.lastSummary || run.summaryRef }
+    }, root, "agent.run_recorded"));
+    logStep("orchestrator", "task.run.tool_mutated", { taskId: command.taskId, runId: run.runId, status: task.status, column: task.column });
+    return { ok: true, commandId: command.commandId, task, run };
+  }
+  const task = TaskSchema.parse(await updateTask(command.taskId, {
+    status: "running",
+    routing: { ...runnableTask.routing, currentAgent: run.agentId, currentRole: run.role || runnableTask.routing?.currentRole || run.agentId },
+    agent: { currentRunId: run.runId, currentSessionRef: run.sessionRef, resumeMode: "continue", lastSummary: run.summaryRef }
+  }, root, "agent.started"));
+  logStep("orchestrator", "task.run.done", { taskId: command.taskId, runId: run.runId });
+  return { ok: true, commandId: command.commandId, task, run };
+}
+
+export async function interruptTaskWorkflow(command, root) {
+  logStep("orchestrator", "task.interrupt", { commandId: command.commandId, taskId: command.taskId, mode: command.mode });
+  const current = await getTask(command.taskId, root);
+  if (!current) throw new Error(`Task not found: ${command.taskId}`);
+  const event = await interruptRun(current, root, command.mode);
+  const task = TaskSchema.parse(await updateTask(command.taskId, {
+    status: command.mode === "hard" ? "idle" : "interrupting",
+    routing: { ...current.routing, manualOverride: { active: true, lastManualMoveAt: event.ts, invalidatesRunId: current.agent?.currentRunId || null } }
+  }, root, "agent.interrupted"));
+  return { ok: true, commandId: command.commandId, task, event };
+}
+
+export async function completeTaskWorkflow(command, root) {
+  logStep("orchestrator", "agent.complete_task", { commandId: command.commandId, taskId: command.taskId, runId: command.runId });
+  logStep("agent", "task.complete", { taskId: command.taskId, runId: command.runId, nextColumn: command.nextColumn });
+  const current = await getTask(command.taskId, root);
+  if (!current) throw new Error(`Task not found: ${command.taskId}`);
+  assertActiveRun(current, command.runId);
+  const summaryRef = await writeRunSummary(current, root, command.runId, command.summary);
+  const deferredComments = await deferredCommentsForRun(root, command.taskId, command.runId);
+  if (deferredComments.length) {
+    const task = TaskSchema.parse(await updateTask(command.taskId, {
+      status: "queued",
+      column: current.column,
+      routing: { ...current.routing, currentAgent: current.routing?.currentAgent || current.agent?.currentAgent || "manager", currentRole: current.routing?.currentRole || current.routing?.currentAgent || "manager" },
+      agent: { ...current.agent, lastSummary: summaryRef }
+    }, root, "agent.completed"));
+    await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: current.routing?.currentRole || current.routing?.currentAgent || "assistant", agentId: current.routing?.currentAgent || "assistant", runId: command.runId, disposition: "agent.completed_pending_comment", text: command.summary || "Run concluído; comentários novos serão processados em seguida.", visibility: "both" });
+    await releaseSemaphoreLeases({ root, taskId: command.taskId });
+    return { ok: true, commandId: command.commandId, task, summaryRef, deferredComments: deferredComments.length };
+  }
+  const nextColumn = normalizeColumnId(command.nextColumn);
+  const target = (await boardSnapshot(root)).columns.find((column) => column.id === nextColumn);
+  const task = TaskSchema.parse(await updateTask(command.taskId, {
+    status: nextColumn === "done" ? "done" : "queued",
+    column: nextColumn,
+    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: target?.agent || current.routing?.currentAgent, currentRole: target?.role || target?.agent || current.routing?.currentRole },
+    agent: { ...current.agent, lastSummary: summaryRef }
+  }, root, "agent.completed"));
+  await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: current.routing?.currentRole || current.routing?.currentAgent || "assistant", agentId: current.routing?.currentAgent || "assistant", runId: command.runId, disposition: "agent.completed", text: command.summary || "Task concluida pelo agent.", visibility: "both" });
+  await releaseSemaphoreLeases({ root, taskId: command.taskId });
+  return { ok: true, commandId: command.commandId, task, summaryRef };
+}
+
+export async function reportBlockerWorkflow(command, root) {
+  logStep("orchestrator", "agent.report_blocker", { commandId: command.commandId, taskId: command.taskId, blocker: command.blocker });
+  logStep("agent", "task.blocker", { taskId: command.taskId, runId: command.runId, blocker: command.blocker });
+  const current = await getTask(command.taskId, root);
+  if (!current) throw new Error(`Task not found: ${command.taskId}`);
+  assertActiveRun(current, command.runId);
+  const task = await routeProblemToManager(current, root, command.blocker, "task.problem");
+  await releaseSemaphoreLeases({ root, taskId: command.taskId });
+  return { ok: true, commandId: command.commandId, task };
+}
+
+export async function requestUserInputWorkflow(command, root) {
+  logStep("orchestrator", "agent.request_user_input", { commandId: command.commandId, taskId: command.taskId });
+  logStep("agent", "wait.human", { taskId: command.taskId, runId: command.runId, question: command.question });
+  const current = await getTask(command.taskId, root);
+  if (!current) throw new Error(`Task not found: ${command.taskId}`);
+  assertActiveRun(current, command.runId);
+  const relativePath = `summaries/input-${Date.now()}.md`;
+  await writeTaskFile(command.taskId, relativePath, `# Input solicitado\n\n${command.question}\n`, root);
+  const requester = current.routing?.currentRole || current.routing?.currentAgent || "assistant";
+  const message = await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: requester, agentId: current.routing?.currentAgent || requester, runId: command.runId, disposition: "wait_for_human", text: command.question, visibility: "both" });
+  const task = TaskSchema.parse(await updateTask(command.taskId, {
+    status: "idle",
+    column: "human_wait",
+    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: requester, currentAgent: null, currentRole: null },
+    dependencies: { ...current.dependencies, blockedBy: [] }
+  }, root, "agent.input_requested"));
+  await releaseSemaphoreLeases({ root, taskId: command.taskId });
+  await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "human.input_requested", actor: requester, taskId: command.taskId, inputPath: relativePath, messageId: message.id });
+  return { ok: true, commandId: command.commandId, task, inputPath: relativePath, message };
+}
+
+export async function emitArtifactWorkflow(command, root) {
+  logStep("orchestrator", "agent.emit_artifact", { commandId: command.commandId, taskId: command.taskId, path: command.path });
+  const current = await getTask(command.taskId, root);
+  if (!current) throw new Error(`Task not found: ${command.taskId}`);
+  assertActiveRun(current, command.runId);
+  const artifactPath = command.path.startsWith("artifacts/") ? command.path : `artifacts/${command.path}`;
+  await writeTaskFile(command.taskId, artifactPath, command.content, root);
+  await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "artifact.emitted", actor: "agent", taskId: command.taskId, runId: command.runId, path: artifactPath });
+  return { ok: true, commandId: command.commandId, task: TaskSchema.parse(current), artifactPath };
+}
+
+export async function runCommandWorkflow(command, root) {
+  logStep("orchestrator", "agent.run_command", { commandId: command.commandId, taskId: command.taskId, command: command.command });
+  const current = await getTask(command.taskId, root);
+  if (!current) throw new Error(`Task not found: ${command.taskId}`);
+  assertActiveRun(current, command.runId);
+  const baseCwd = resolve(current.worktree?.path || paths(root).root);
+  const cwd = command.cwd && command.cwd !== "worktree" ? resolve(baseCwd, command.cwd) : baseCwd;
+  if (cwd !== baseCwd && !cwd.startsWith(`${baseCwd}/`)) throw new Error("cwd_outside_task_workspace");
+  try {
+    const result = await exec(command.command, command.args || [], { cwd, timeout: command.timeoutMs || 120000 });
+    const output = { ok: true, commandId: command.commandId, task: TaskSchema.parse(current), cwd, stdout: result.stdout, stderr: result.stderr, exitCode: 0 };
+    await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "agent.command", actor: current.routing?.currentRole || current.routing?.currentAgent || "agent", taskId: command.taskId, runId: command.runId, command: command.command, args: command.args || [], cwd, exitCode: 0 });
+    return output;
+  } catch (error) {
+    const output = { ok: false, commandId: command.commandId, task: TaskSchema.parse(current), cwd, stdout: error.stdout || "", stderr: error.stderr || error.message, exitCode: error.code || 1 };
+    await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "agent.command", actor: current.routing?.currentRole || current.routing?.currentAgent || "agent", taskId: command.taskId, runId: command.runId, command: command.command, args: command.args || [], cwd, exitCode: output.exitCode, stderr: output.stderr });
+    return output;
+  }
+}
+
+export async function stepWorkflow(command, root, handleCommand) {
+  logStep("orchestrator", "agent.step", { commandId: command.commandId, taskId: command.taskId, disposition: command.disposition?.type });
+  const disposition = command.disposition;
+  if (disposition.type === "message_and_continue") return handleCommand({ type: "agent.message", commandId: `${command.commandId}:message`, message: disposition.message }, root);
+  if (disposition.type === "wait_for_persona") return handleCommand({ type: "agent.wait_for_persona", commandId: `${command.commandId}:persona`, taskId: command.taskId, runId: command.runId, targetRole: disposition.targetRole, question: disposition.question, expectedArtifact: disposition.expectedArtifact }, root);
+  if (disposition.type === "wait_for_human") return handleCommand({ type: "agent.wait_for_human", commandId: `${command.commandId}:human`, taskId: command.taskId, runId: command.runId, question: disposition.question, options: disposition.options, requestedByRole: disposition.requestedByRole }, root);
+  if (disposition.type === "complete_for_persona") return handleCommand({ type: "agent.complete_task", commandId: `${command.commandId}:complete`, taskId: command.taskId, runId: command.runId || "manual-step", nextColumn: roleColumn(disposition.nextRole), summary: disposition.summary }, root);
+  if (disposition.type === "fail_run") {
+    const current = await getTask(command.taskId, root);
+    const task = current ? await routeProblemToManager(current, root, disposition.reason, "agent.failed") : null;
+    return { ok: false, commandId: command.commandId, task, reason: disposition.reason, recoverable: disposition.recoverable };
+  }
+  const current = await getTask(command.taskId, root);
+  return { ok: true, commandId: command.commandId, task: current, disposition };
+}

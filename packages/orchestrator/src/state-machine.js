@@ -26,17 +26,18 @@ export function transitionTask(task, transition, payload = {}) {
   };
   if (transition === "wait_for_human") return {
     ...task,
-    status: "waiting_human",
+    status: "idle",
     column: "human_wait",
-    routing: { ...task.routing, lastAgent: task.routing?.currentAgent || null, lastRole: task.routing?.currentRole || null, currentAgent: null, currentRole: "manager" },
-    dependencies: { ...task.dependencies, blockedBy: [...(task.dependencies?.blockedBy || []), ...(payload.blockers || [])] },
+    routing: { ...task.routing, lastAgent: task.routing?.currentAgent || null, lastRole: task.routing?.currentRole || null, currentAgent: null, currentRole: null },
+    dependencies: { ...task.dependencies, blockedBy: [] },
     updatedAt: now
   };
   if (transition === "block") return {
     ...task,
-    status: "blocked",
-    column: "human_wait",
-    dependencies: { ...task.dependencies, blockedBy: [...(task.dependencies?.blockedBy || []), ...(payload.blockers || [])] },
+    status: "queued",
+    column: "manager",
+    routing: { ...task.routing, lastAgent: task.routing?.currentAgent || null, lastRole: task.routing?.currentRole || null, currentAgent: "manager", currentRole: "manager" },
+    dependencies: { ...task.dependencies, blockedBy: [] },
     updatedAt: now
   };
   if (transition === "manual_move") return {

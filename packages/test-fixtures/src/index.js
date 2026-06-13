@@ -37,7 +37,7 @@ export function planningFixture(overrides = {}) {
     status: "proposed",
     createdByRole: "product",
     roles: {
-      required: ["product", "design", "engineering", "quality", "review", "deployment"],
+      required: ["product", "design", "architecture", "engineering", "quality", "review", "deployment"],
       optional: ["manager"]
     },
     artifacts: {

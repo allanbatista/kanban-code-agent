@@ -39,9 +39,9 @@ test("schemas parse generated FSDB settings, task files and events", async () =>
   const task = JSON.parse(stdout);
 
   assert.equal(AppSettingsSchema.parse(await readYamlFile(join(root, "settings", "app.yaml"))).schema, "kanban-code-agent/app@1");
-  assert.equal(BoardSettingsSchema.parse(await readYamlFile(join(root, "settings", "boards", "default.yaml"))).columns.length, 10);
+  assert.equal(BoardSettingsSchema.parse(await readYamlFile(join(root, "settings", "boards", "default.yaml"))).columns.length, 12);
   assert.equal(ProjectSettingsSchema.parse(await readYamlFile(join(root, "settings", "projects", "kanban-code-agent.yaml"))).id, "kanban-code-agent");
-  assert.equal(AgentSettingsSchema.parse(await readYamlFile(join(root, "settings", "agents", "engineer.yaml"))).provider, "pi");
+  assert.equal(AgentSettingsSchema.parse(await readYamlFile(join(root, "settings", "agents", "engineering.yaml"))).provider, "pi");
   const role = RoleSettingsSchema.parse(await readYamlFile(join(root, "settings", "roles", "engineering.yaml")));
   assert.equal(role.id, "engineering");
   assert.equal(role.scope, "task");
@@ -54,7 +54,9 @@ test("schemas parse generated FSDB settings, task files and events", async () =>
   assert.match(await readFile(join(root, "settings", "skills", "implementation", "SKILL.md"), "utf8"), /Implementation Skill/);
 
   assert.equal(TaskSchema.parse(await readYamlFile(join(root, "tasks", task.id, "task.yaml"))).id, task.id);
-  assert.equal(PlanningSchema.parse(await readYamlFile(join(root, "tasks", task.id, "planning.yaml"))).roles.required.includes("deployment"), true);
+  const planning = PlanningSchema.parse(await readYamlFile(join(root, "tasks", task.id, "planning.yaml")));
+  assert.equal(planning.roles.required.includes("architecture"), true);
+  assert.equal(planning.roles.required.includes("deployment"), true);
   assert.equal(DependenciesSchema.parse(await readYamlFile(join(root, "tasks", task.id, "dependencies.yaml"))).needs.length, 0);
   assert.equal(WorktreeSchema.parse(await readYamlFile(join(root, "tasks", task.id, "worktree.yaml"))).branch, task.worktree.branch);
   assert.equal(SubtasksSchema.parse(await readYamlFile(join(root, "tasks", task.id, "subtasks.yaml"))).taskId, task.id);

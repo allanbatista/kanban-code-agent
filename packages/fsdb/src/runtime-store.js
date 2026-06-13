@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import YAML from "yaml";
@@ -17,6 +17,30 @@ async function writeAtomic(path, content) {
   const temp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   await writeFile(temp, content);
   await rename(temp, path);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withSemaphoreLock(rootInput, fn) {
+  const lockDir = runtimePath(rootInput, "semaphores.lock");
+  const deadline = Date.now() + 5000;
+  await mkdir(dirname(lockDir), { recursive: true });
+  while (true) {
+    try {
+      await mkdir(lockDir, { recursive: false });
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST" || Date.now() > deadline) throw error;
+      await sleep(10);
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    await rm(lockDir, { recursive: true, force: true });
+  }
 }
 
 export async function readSemaphoreState(rootInput) {
@@ -41,48 +65,52 @@ function activeLeases(state, now = Date.now()) {
 
 export async function acquireSemaphoreLeases(requests, { root, taskId, runId, role, ttlMs = 15 * 60 * 1000 } = {}) {
   logStep("fsdb", "acquireSemaphoreLeases.start", { taskId: taskId || null, runId: runId || null, requests: requests.length });
-  const state = await readSemaphoreState(root);
-  const leases = activeLeases(state);
-  const normalized = requests.map((item) => typeof item === "string" ? { name: item, tokens: 1 } : { tokens: 1, ...item });
-  const blocked = [];
-  for (const request of normalized) {
-    const capacity = request.capacity ?? state.tokens?.[request.name] ?? request.tokens ?? 1;
-    const used = leases.filter((lease) => lease.name === request.name).length;
-    if (used + (request.tokens || 1) > capacity) blocked.push({ name: request.name, used, capacity });
-  }
-  if (blocked.length) {
-    logStep("fsdb", "acquireSemaphoreLeases.blocked", { taskId: taskId || null, runId: runId || null, blocked: blocked.map((item) => item.name) });
-    return { ok: false, blocked, state: { ...state, leases } };
-  }
-  const acquiredAt = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + ttlMs).toISOString();
-  const leaseIdBase = `${taskId || "task"}-${runId || "run"}-${Date.now()}`;
-  const newLeases = normalized.flatMap((request) => Array.from({ length: request.tokens || 1 }, (_, index) => ({
-    name: request.name,
-    leaseId: `${leaseIdBase}-${index}`,
-    taskId,
-    runId,
-    role,
-    acquiredAt,
-    expiresAt
-  })));
-  const next = await writeSemaphoreState({ ...state, leases: [...leases, ...newLeases] }, root);
-  const result = { ok: true, leases: newLeases, state: next };
-  logStep("fsdb", "acquireSemaphoreLeases.done", { taskId: taskId || null, runId: runId || null, leases: newLeases.length });
-  return result;
+  return withSemaphoreLock(root, async () => {
+    const state = await readSemaphoreState(root);
+    const leases = activeLeases(state);
+    const normalized = requests.map((item) => typeof item === "string" ? { name: item, tokens: 1 } : { tokens: 1, ...item });
+    const blocked = [];
+    for (const request of normalized) {
+      const capacity = request.capacity ?? state.tokens?.[request.name] ?? request.tokens ?? 1;
+      const used = leases.filter((lease) => lease.name === request.name).length;
+      if (used + (request.tokens || 1) > capacity) blocked.push({ name: request.name, used, capacity });
+    }
+    if (blocked.length) {
+      logStep("fsdb", "acquireSemaphoreLeases.blocked", { taskId: taskId || null, runId: runId || null, blocked: blocked.map((item) => item.name) });
+      return { ok: false, blocked, state: { ...state, leases } };
+    }
+    const acquiredAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+    const leaseIdBase = `${taskId || "task"}-${runId || "run"}-${Date.now()}`;
+    const newLeases = normalized.flatMap((request) => Array.from({ length: request.tokens || 1 }, (_, index) => ({
+      name: request.name,
+      leaseId: `${leaseIdBase}-${index}`,
+      taskId,
+      runId,
+      role,
+      acquiredAt,
+      expiresAt
+    })));
+    const next = await writeSemaphoreState({ ...state, leases: [...leases, ...newLeases] }, root);
+    const result = { ok: true, leases: newLeases, state: next };
+    logStep("fsdb", "acquireSemaphoreLeases.done", { taskId: taskId || null, runId: runId || null, leases: newLeases.length });
+    return result;
+  });
 }
 
 export async function releaseSemaphoreLeases({ root, leaseIds = [], runId, taskId } = {}) {
   logStep("fsdb", "releaseSemaphoreLeases.start", { taskId: taskId || null, runId: runId || null, leaseIds: leaseIds.length });
-  const state = await readSemaphoreState(root);
-  const ids = new Set(leaseIds);
-  const leases = activeLeases(state).filter((lease) => {
-    if (ids.size && ids.has(lease.leaseId)) return false;
-    if (runId && lease.runId === runId) return false;
-    if (taskId && lease.taskId === taskId) return false;
-    return true;
+  return withSemaphoreLock(root, async () => {
+    const state = await readSemaphoreState(root);
+    const ids = new Set(leaseIds);
+    const leases = activeLeases(state).filter((lease) => {
+      if (ids.size && ids.has(lease.leaseId)) return false;
+      if (runId && lease.runId === runId) return false;
+      if (taskId && lease.taskId === taskId) return false;
+      return true;
+    });
+    const result = await writeSemaphoreState({ ...state, leases }, root);
+    logStep("fsdb", "releaseSemaphoreLeases.done", { taskId: taskId || null, runId: runId || null });
+    return result;
   });
-  const result = await writeSemaphoreState({ ...state, leases }, root);
-  logStep("fsdb", "releaseSemaphoreLeases.done", { taskId: taskId || null, runId: runId || null });
-  return result;
 }

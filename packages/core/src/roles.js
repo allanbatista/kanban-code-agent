@@ -1,18 +1,18 @@
-export const ROLE_IDS = ["manager", "product", "design", "generalist", "engineering", "quality", "review", "deployment"];
+export const ROLE_IDS = ["manager", "product", "design", "architecture", "generalist", "engineering", "quality", "review", "deployment"];
 
 export const DEFAULT_ROLES = [
   {
     id: "manager",
     label: "Gerente",
     agentId: "manager",
-    scope: "board",
+    scope: "task",
     promptPath: "../prompts/manager.md",
-    columnIds: ["inbox", "human_wait"],
-    tools: { custom: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"] },
+    columnIds: ["manager", "human_wait"],
+    tools: { custom: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "wait_for_persona", "delegate_task", "spawn_subtasks"] },
     limits: { tokens: 1 },
-    policies: { canCreateSubtasks: true, requiresWorktree: false, autoStart: false },
+    policies: { canCreateSubtasks: true, requiresWorktree: false, autoStart: true },
     model: { provider: "pi", name: "default", effort: "low" },
-    gate: "Task tem prioridade, dono, SLA e proxima acao."
+    gate: "Task foi classificada por tipo de trabalho e encaminhada para a primeira persona necessaria, evitando produto/decomposicao quando for trabalho direto."
   },
   {
     id: "product",
@@ -41,6 +41,19 @@ export const DEFAULT_ROLES = [
     gate: "Fluxos, estados e impacto visual documentados."
   },
   {
+    id: "architecture",
+    label: "Arquitetura",
+    agentId: "architecture",
+    scope: "task",
+    promptPath: "../prompts/architecture.md",
+    columnIds: ["architecture"],
+    tools: { custom: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"] },
+    limits: { tokens: 1 },
+    policies: { canCreateSubtasks: true, requiresWorktree: true, autoStart: true },
+    model: { provider: "pi", name: "default", effort: "high" },
+    gate: "Plano tecnico, contratos internos, riscos e sequencia de implementacao claros."
+  },
+  {
     id: "generalist",
     label: "Generalista",
     agentId: "generalist",
@@ -60,7 +73,7 @@ export const DEFAULT_ROLES = [
     scope: "task",
     promptPath: "../prompts/engineering.md",
     columnIds: ["engineering"],
-    tools: { custom: ["complete_task", "report_blocker", "emit_artifact"] },
+    tools: { custom: ["complete_task", "report_blocker", "emit_artifact", "run_command"] },
     limits: { tokens: 2 },
     policies: { canCreateSubtasks: false, requiresWorktree: true, autoStart: true },
     model: { provider: "pi", name: "default", effort: "high" },
@@ -73,7 +86,7 @@ export const DEFAULT_ROLES = [
     scope: "task",
     promptPath: "../prompts/quality.md",
     columnIds: ["quality"],
-    tools: { custom: ["complete_task", "report_blocker", "emit_artifact"] },
+    tools: { custom: ["complete_task", "report_blocker", "emit_artifact", "run_command"] },
     limits: { tokens: 1 },
     policies: { canCreateSubtasks: false, requiresWorktree: true, autoStart: true },
     model: { provider: "pi", name: "default", effort: "medium" },
@@ -86,7 +99,7 @@ export const DEFAULT_ROLES = [
     scope: "task",
     promptPath: "../prompts/review.md",
     columnIds: ["review"],
-    tools: { custom: ["complete_task", "report_blocker", "emit_artifact"] },
+    tools: { custom: ["complete_task", "report_blocker", "emit_artifact", "run_command"] },
     limits: { tokens: 1 },
     policies: { canCreateSubtasks: false, requiresWorktree: true, autoStart: true },
     model: { provider: "pi", name: "default", effort: "medium" },

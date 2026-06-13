@@ -8,6 +8,8 @@
     "start": "node src/server.js"
   },
   "dependencies": {
+    "@kca/application": "workspace:*",
+    "@kca/board-service": "workspace:*",
     "@kca/core": "workspace:*",
     "@kca/fsdb": "workspace:*",
     "@kca/orchestrator": "workspace:*",

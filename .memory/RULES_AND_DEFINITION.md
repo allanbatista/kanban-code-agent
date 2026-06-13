@@ -32,3 +32,19 @@ O Kanban Code Agent deve ter uma persona generalista. Toda próxima ação que n
 # Full Agentic E2E Validation
 
 A validação final do workflow agentico deve cobrir o fluxo completo ponta a ponta: criar uma task, planejar, rotear por personas, executar, validar, revisar/deployar quando aplicável, e encerrar em Pronto com evidências persistidas, chats/personas e eventos verificáveis.
+
+# Task Creation Requirements
+
+Ao criar uma nova task, o único requisito é entender o que o usuário está pedindo. Prioridade e tipo de task não devem ser solicitados nem expostos como requisito. Se o usuário não indicar coluna/local, o padrão é entrada/inbox. O agent deve interpretar se o usuário forneceu título ou descrição; se for descrição, deve inferir um título. Se houver referência subjetiva sem contexto suficiente, deve pedir clarificação objetiva.
+
+# Manager Task Triage and Prompt Sandbox
+
+Novas tasks devem passar primeiro pelo manager, que decide a ação mais simples: responder por comentário quando bastar, pedir input humano, rotear para a persona correta, ou só então criar/usar sandbox/worktree. O escopo de segurança por enquanto é contrato de prompt: agents devem trabalhar via ferramentas KCA e dentro do sandbox/worktree indicado; isolamento forte de filesystem é dívida técnica.
+
+# Optimistic Frontend Interactions
+
+Frontend interactions should be optimistic by default: immediately update the visible UI for user actions such as moving cards, then reconcile with the backend response or rollback on failure.
+
+# No BlockedBy Workflow
+
+O Kanban Code Agent não deve usar `dependencies.blockedBy` como conceito ativo. Quando um agent precisar de informação humana, deve perguntar nos comentários e colocar a task `idle` em `human_wait`. Quando houver problema técnico, deve registrar comentário explicando o problema e enviar a task `queued` para `manager` triar. Comentários adicionados durante execução entram depois do run atual e reexecutam o mesmo agent.

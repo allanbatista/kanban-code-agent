@@ -1,10 +1,10 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { handleCommand, handleQuery, whyNotRunning } from "../../packages/orchestrator/src/index.js";
-import { schedulerTick, semaphoreRequestsForTask } from "../../packages/orchestrator/src/scheduler.js";
+import { recoverStaleRuns, schedulerTick, semaphoreRequestsForTask } from "../../packages/orchestrator/src/scheduler.js";
 import { transitionTask } from "../../packages/orchestrator/src/state-machine.js";
 import { acquireSemaphoreLeases, readSemaphoreState, releaseSemaphoreLeases } from "../../packages/fsdb/src/runtime-store.js";
 
@@ -19,7 +19,8 @@ test("state machine applies core task transitions", () => {
   };
   assert.equal(transitionTask(task, "start", { runId: "run-2", agentId: "engineering" }).status, "running");
   assert.equal(transitionTask(task, "complete", { nextColumn: "done" }).status, "done");
-  assert.equal(transitionTask(task, "block", { blockers: ["missing-input"] }).dependencies.blockedBy[0], "missing-input");
+  assert.equal(transitionTask(task, "block", { blockers: ["missing-input"] }).column, "manager");
+  assert.equal(transitionTask(task, "block", { blockers: ["missing-input"] }).status, "queued");
   assert.equal(transitionTask(task, "manual_move", { toColumn: "validate" }).routing.manualOverride.active, true);
 });
 
@@ -34,6 +35,16 @@ test("runtime semaphore store acquires and releases leases", async () => {
   assert.equal(third.ok, true);
 });
 
+test("runtime semaphore acquire is atomic under concurrent attempts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-semaphore-race-"));
+  const attempts = await Promise.all(Array.from({ length: 8 }, (_, index) => acquireSemaphoreLeases(
+    [{ name: "resource:race", tokens: 1, capacity: 1 }],
+    { root, taskId: `T${index}`, runId: `run-${index}`, role: "engineering" }
+  )));
+  assert.equal(attempts.filter((attempt) => attempt.ok).length, 1);
+  assert.equal((await readSemaphoreState(root)).leases.filter((lease) => lease.name === "resource:race").length, 1);
+});
+
 test("scheduler tick starts queued runnable tasks and records leases", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-scheduler-"));
   await handleCommand({
@@ -45,12 +56,12 @@ test("scheduler tick starts queued runnable tasks and records leases", async () 
   const first = await handleCommand({
     type: "task.create",
     commandId: "scheduler-create-a",
-    input: { title: "Runnable A", column: "build", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued" }
+    input: { title: "Runnable A", column: "inbox", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued" }
   }, root);
   const second = await handleCommand({
     type: "task.create",
     commandId: "scheduler-create-b",
-    input: { title: "Runnable B", column: "build", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued" }
+    input: { title: "Runnable B", column: "inbox", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued" }
   }, root);
   assert.equal(semaphoreRequestsForTask(first.task, { runtime: {} }).some((request) => request.name === "global:tasks"), true);
   const tick = await schedulerTick(root, {
@@ -64,6 +75,29 @@ test("scheduler tick starts queued runnable tasks and records leases", async () 
   assert.equal((await readSemaphoreState(root)).leases.some((lease) => lease.taskId === first.task.id), true);
 });
 
+test("scheduler recovery fails running tasks whose prompt was not sent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-recover-prompt-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "recover-prompt-create",
+    input: { title: "Recover prompt", projectTargets: [] }
+  }, root);
+  const sessionRef = `settings/runtime/sessions/${created.task.id}/engineering/session.jsonl`;
+  await mkdir(join(root, "settings", "runtime", "sessions", created.task.id, "engineering"), { recursive: true });
+  await writeFile(join(root, sessionRef), `${JSON.stringify({ type: "agent.adapter", adapter: { promptSent: false } })}\n`);
+  await handleCommand({
+    type: "task.update",
+    commandId: "recover-prompt-running",
+    taskId: created.task.id,
+    patch: { status: "running", agent: { currentRunId: "run-prompt-false", currentSessionRef: sessionRef } }
+  }, root);
+  const recovery = await recoverStaleRuns(root);
+  assert.deepEqual(recovery.recovered.map((item) => item.taskId), [created.task.id]);
+  const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+  assert.equal(detail.status, "failed");
+  assert.equal(detail.failure.reason, "prompt_not_sent");
+});
+
 test("scheduler tick blocks dependent subtasks until contracts are provided", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-scheduler-dag-"));
   await handleCommand({
@@ -75,12 +109,12 @@ test("scheduler tick blocks dependent subtasks until contracts are provided", as
   const first = await handleCommand({
     type: "task.create",
     commandId: "scheduler-dag-a",
-    input: { title: "Provider", column: "build", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued", dependencies: { needs: [], provides: ["contract:ready"], blockedBy: [], fileLocks: [], semaphores: [] } }
+    input: { title: "Provider", column: "inbox", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued", dependencies: { needs: [], provides: ["contract:ready"], blockedBy: [], fileLocks: [], semaphores: [] } }
   }, root);
   const second = await handleCommand({
     type: "task.create",
     commandId: "scheduler-dag-b",
-    input: { title: "Dependent", column: "build", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued", dependencies: { needs: ["contract:ready"], provides: ["contract:done"], blockedBy: [], fileLocks: [], semaphores: [] } }
+    input: { title: "Dependent", column: "inbox", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued", dependencies: { needs: ["contract:ready"], provides: ["contract:done"], blockedBy: [], fileLocks: [], semaphores: [] } }
   }, root);
   const tick = await schedulerTick(root, {
     whyNotRunning,

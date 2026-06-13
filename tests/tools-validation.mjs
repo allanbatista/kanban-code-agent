@@ -41,7 +41,7 @@ const ctx = {
     const parent = await getTask(taskId, root);
     const created = [];
     for (let i = 0; i < (subtasks.length || 2); i++) {
-      const def = subtasks[i] || { title: `${parent.title}: subtask ${i + 1}`, agent: i === 0 ? "engineer" : "validator" };
+      const def = subtasks[i] || { title: `${parent.title}: subtask ${i + 1}`, agent: i === 0 ? "engineering" : "quality" };
       const task = await createTask({
         id: `${taskId}-${String(i + 1).padStart(2, "0")}`,
         title: def.title,
@@ -49,7 +49,7 @@ const ctx = {
         column: "definition",
         status: "queued",
         projectTargets: parent.projectTargets || [],
-        agent: def.agent || "engineer",
+        agent: def.agent || "engineering",
         dependencies: { needs: def.needs || [], provides: def.provides || [`subtask:${taskId}:subtask-${i + 1}`], blockedBy: [], fileLocks: [], semaphores: [] }
       }, root);
       created.push(task.id);
@@ -61,7 +61,7 @@ const ctx = {
     const { updateSettings: fsdbUpdateSettings } = await import("../packages/fsdb/src/index.js");
     return fsdbUpdateSettings(scope, patch, root);
   },
-  runTask: async (taskId, agentIdOverride) => ({ agentId: agentIdOverride || "engineer", runId: `run-test-${Date.now()}` }),
+  runTask: async (taskId, agentIdOverride) => ({ agentId: agentIdOverride || "engineering", runId: `run-test-${Date.now()}` }),
   interruptTask: async (taskId, mode) => ({ event: "interrupted", taskId, mode }),
   orchestratorStatus: async () => {
     const tasks = await listTasks(root);
@@ -115,8 +115,8 @@ console.log("✓ 6/12 kca_why_not_running: runnable:", why.runnable);
 
 // 7. decomposeTask
 const decomposed = await ctx.decomposeTask(t2.id, [
-  { title: "Implement beta", agent: "engineer", needs: [], provides: ["beta:impl"] },
-  { title: "Validate beta", agent: "validator", needs: ["beta:impl"], provides: ["beta:valid"] }
+  { title: "Implement beta", agent: "engineering", needs: [], provides: ["beta:impl"] },
+  { title: "Validate beta", agent: "quality", needs: ["beta:impl"], provides: ["beta:valid"] }
 ]);
 assert.equal(decomposed.taskIds.length, 2);
 console.log("✓ 7/12 kca_decompose_task:", decomposed.taskIds.join(", "));
@@ -136,7 +136,7 @@ assert.equal(updated.title, "Alpha renamed");
 console.log("✓ 9/12 kca_update_task:", updated.title);
 
 // 10. runTask
-const run = await ctx.runTask(t1.id, "engineer");
+const run = await ctx.runTask(t1.id, "engineering");
 assert.ok(run.agentId);
 console.log("✓ 10/12 kca_run_task: agent:", run.agentId);
 

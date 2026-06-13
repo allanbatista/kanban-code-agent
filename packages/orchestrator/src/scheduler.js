@@ -1,4 +1,6 @@
-import { appendJsonl, boardSnapshot, getTask, listTasks, paths, readSettings } from "@kca/fsdb";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { appendJsonl, boardSnapshot, getTask, listTasks, paths, readSettings, updateTask } from "@kca/fsdb";
 import { acquireSemaphoreLeases, releaseSemaphoreLeases } from "@kca/fsdb/runtime-store";
 import { logStep } from "@kca/core/log";
 
@@ -73,4 +75,37 @@ export async function schedulerTick(root, { whyNotRunning, runTask, maxStarts } 
   await appendJsonl(`${paths(root).runtime}/logs/events.jsonl`, event);
   logStep("scheduler", "tick.done", { started: started.map((item) => item.taskId), blocked: blocked.length, skipped: skipped.length });
   return { ok: true, event, started, skipped, blocked };
+}
+
+async function sessionHasPromptNotSent(root, task) {
+  const sessionRef = task.agent?.currentSessionRef;
+  if (!sessionRef) return false;
+  try {
+    const content = await readFile(join(paths(root).root, sessionRef), "utf8");
+    return content.split("\n").filter(Boolean).some((line) => {
+      try {
+        const event = JSON.parse(line);
+        return event.type === "agent.adapter" && event.adapter?.promptSent === false;
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
+}
+
+export async function recoverStaleRuns(root) {
+  logStep("scheduler", "recoverStaleRuns.start");
+  const recovered = [];
+  for (const task of (await listTasks(root)).filter((item) => item.status === "running")) {
+    if (!(await sessionHasPromptNotSent(root, task))) continue;
+    const reason = "prompt_not_sent";
+    const updated = await updateTask(task.id, { status: "failed" }, root, "agent.failed");
+    await appendJsonl(`${paths(root).tasks}/${task.id}/events.jsonl`, { ts: new Date().toISOString(), type: "agent.failed", actor: "scheduler", taskId: task.id, runId: task.agent?.currentRunId, reason });
+    await releaseSemaphoreLeases({ root, taskId: task.id });
+    recovered.push({ taskId: task.id, reason, task: updated });
+  }
+  logStep("scheduler", "recoverStaleRuns.done", { recovered: recovered.length });
+  return { ok: true, recovered };
 }

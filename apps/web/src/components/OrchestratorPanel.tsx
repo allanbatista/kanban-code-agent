@@ -12,7 +12,6 @@ export function OrchestratorPanel({ status, loading }: { status?: OrchestratorSt
       </header>
       <div className="ops-grid">
         <div className="metric"><strong>{status?.queue.length || 0}</strong><span>fila</span></div>
-        <div className="metric"><strong>{status?.blockers.length || 0}</strong><span>bloqueios</span></div>
         <div className="metric"><strong>{status?.merges.length || 0}</strong><span>merges</span></div>
         <div className="metric"><strong>{status?.worktrees.length || 0}</strong><span>worktrees ativos</span></div>
       </div>

@@ -11,6 +11,110 @@ function safeError(error) {
   return error?.code || error?.message || String(error);
 }
 
+function truncate(value, max = 6000) {
+  const text = typeof value === "string" ? value : JSON.stringify(value || "");
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+function contentText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => {
+    if (!part || typeof part !== "object") return "";
+    if (typeof part.text === "string") return part.text;
+    if (typeof part.content === "string") return part.content;
+    if (typeof part.input === "string") return part.input;
+    if (typeof part.reasoning === "string") return part.reasoning;
+    if (typeof part.summary === "string") return part.summary;
+    if (typeof part.output === "string") return part.output;
+    if (typeof part.result === "string") return part.result;
+    if (part.arguments || part.input || part.params) return truncate(part.arguments || part.input || part.params, 1200);
+    return "";
+  }).filter(Boolean).join("");
+}
+
+function contentKinds(content) {
+  if (!Array.isArray(content)) return [];
+  return [...new Set(content.map((part) => part?.type).filter(Boolean))];
+}
+
+function firstContentPart(content, pattern) {
+  if (!Array.isArray(content)) return null;
+  return content.find((part) => part?.type && pattern.test(part.type)) || null;
+}
+
+function toolPartText(part) {
+  if (!part) return "";
+  const name = part.name || part.tool || part.toolName || part.id || "tool";
+  const args = part.arguments || part.args || part.input || part.params;
+  return `${name}${args ? ` ${truncate(args, 500)}` : ""}`;
+}
+
+function plainEvent(event) {
+  try {
+    return JSON.parse(JSON.stringify(event));
+  } catch {
+    return { type: event?.type || "event", unserializable: true };
+  }
+}
+
+function normalizeSessionEvent(event) {
+  const base = { providerEventType: event?.type || "event" };
+  const providerEvent = plainEvent(event);
+  const message = event?.message;
+  if (message) {
+    const kinds = contentKinds(message.content);
+    const toolCallPart = firstContentPart(message.content, /tool.?call/i);
+    const toolResultPart = firstContentPart(message.content, /tool.?result|tool.?output/i);
+    const reasoningPart = firstContentPart(message.content, /reason|think/i);
+    if (toolCallPart) {
+      return {
+        ...base,
+        type: "agent.transcript",
+        category: "tool_call",
+        role: message.role || event.role || "assistant",
+        text: toolPartText(toolCallPart),
+        contentKinds: kinds,
+        toolCall: plainEvent(toolCallPart),
+        providerEvent
+      };
+    }
+    if (toolResultPart) {
+      return {
+        ...base,
+        type: "agent.transcript",
+        category: "tool_result",
+        role: message.role || event.role || "assistant",
+        text: truncate(contentText([toolResultPart]) || toolResultPart.output || toolResultPart.result || toolResultPart.content || toolResultPart.text || "tool_result"),
+        contentKinds: kinds,
+        toolResult: plainEvent(toolResultPart),
+        providerEvent
+      };
+    }
+    const category = reasoningPart ? "reasoning" : "message";
+    return {
+      ...base,
+      type: "agent.transcript",
+      category,
+      role: message.role || event.role || "assistant",
+      text: truncate(contentText(message.content) || message.text || message.content || ""),
+      contentKinds: kinds,
+      providerEvent
+    };
+  }
+  const toolCall = event?.toolCall || event?.tool_call || event?.tool || event?.call;
+  if (toolCall) {
+    return { ...base, type: "agent.transcript", category: "tool_call", text: truncate(toolCall.name || toolCall.tool || event.name || event.type), toolCall: plainEvent(toolCall), providerEvent };
+  }
+  const toolResult = event?.toolResult || event?.tool_result || event?.result;
+  if (toolResult) {
+    return { ...base, type: "agent.transcript", category: "tool_result", text: truncate(toolResult.text || toolResult.output || toolResult.content || event.type), toolResult: plainEvent(toolResult), providerEvent };
+  }
+  const text = event?.text || event?.content || event?.delta || "";
+  if (text) return { ...base, type: "agent.transcript", category: "event", text: truncate(text), providerEvent };
+  return { ...base, type: "agent.transcript", category: "event", text: truncate(event?.type || "event"), providerEvent };
+}
+
 function canUseSdk(sdk) {
   return typeof sdk?.createAgentSession === "function" && typeof sdk?.SessionManager?.create === "function";
 }
@@ -66,6 +170,7 @@ function TObject(properties, opts = {}) {
 function TString(opts = {}) { return { type: "string", ...opts }; }
 function TOptional(schema) { return { ...schema, optional: true }; }
 function TArray(items, opts = {}) { return { type: "array", items, ...opts }; }
+function TNumber(opts = {}) { return { type: "number", ...opts }; }
 
 export function buildKanbanTools(context) {
   // context = { root, createTask, moveTask, updateTask, getTask, listTasks, boardSnapshot,
@@ -78,16 +183,16 @@ export function buildKanbanTools(context) {
     label: "List tasks",
     description: "List all kanban tasks with their current column and status.",
     parameters: TObject({
-      column: TOptional(TString({ description: "Filter by column id (inbox, definition, build, validate, blocked, done)" })),
-      status: TOptional(TString({ description: "Filter by status (idle, queued, running, blocked, done, merge_pending)" }))
+      column: TOptional(TString({ description: "Filter by column id (inbox, manager, product, design, architecture, generalist, engineering, quality, review, deployment, human_wait, done)" })),
+      status: TOptional(TString({ description: "Filter by status (idle, queued, running, failed, done, merge_pending)" }))
     }),
     async execute(_callId, params) {
       const tasks = await context.listTasks();
       let filtered = tasks;
       if (params.column) filtered = filtered.filter(t => t.column === params.column);
       if (params.status) filtered = filtered.filter(t => t.status === params.status);
-      const lines = filtered.map(t => `${t.id} [${t.column}/${t.status}] ${t.title} (${t.priority})`);
-      return { content: [{ type: "text", text: lines.length ? lines.join("\n") : "Nenhuma task encontrada." }], details: { count: lines.length, tasks: filtered.map(t => ({ id: t.id, title: t.title, column: t.column, status: t.status, priority: t.priority })) } };
+      const lines = filtered.map(t => `${t.id} [${t.column}/${t.status}] ${t.title}`);
+      return { content: [{ type: "text", text: lines.length ? lines.join("\n") : "Nenhuma task encontrada." }], details: { count: lines.length, tasks: filtered.map(t => ({ id: t.id, title: t.title, column: t.column, status: t.status })) } };
     }
   });
 
@@ -112,18 +217,14 @@ export function buildKanbanTools(context) {
     parameters: TObject({
       title: TString({ description: "Task title" }),
       description: TOptional(TString({ description: "Task description (markdown)" })),
-      column: TOptional(TString({ description: "Initial column. Default: inbox", default: "inbox" })),
-      priority: TOptional(TString({ description: "Priority: low, medium, high", default: "medium" })),
-      kind: TOptional(TString({ description: "Task kind: task, master, subtask, spike, bug, chore", default: "task" })),
+      column: TOptional(TString({ description: "Initial column. Default: manager", default: "manager" })),
       projectTargets: TOptional(TArray(TString(), { description: "Project IDs this task targets" }))
     }),
     async execute(_callId, params) {
       const task = await context.createTask({
         title: params.title,
         description: params.description || "",
-        column: params.column || "inbox",
-        priority: params.priority || "medium",
-        kind: params.kind || "task",
+        column: params.column || "manager",
         projectTargets: params.projectTargets || []
       });
       return { content: [{ type: "text", text: `Task criada: ${task.id} - ${task.title}` }], details: { taskId: task.id, title: task.title } };
@@ -136,7 +237,7 @@ export function buildKanbanTools(context) {
     description: "Move a task to a different column.",
     parameters: TObject({
       taskId: TString({ description: "Task ID to move (e.g. KCA-123456)" }),
-      column: TString({ description: "Target column id: inbox, definition, build, validate, blocked, done" })
+      column: TString({ description: "Target column id: inbox, manager, product, design, architecture, generalist, engineering, quality, review, deployment, human_wait, done" })
     }),
     async execute(_callId, params) {
       const task = await context.moveTask(params.taskId, params.column);
@@ -157,7 +258,6 @@ export function buildKanbanTools(context) {
       const deps = task.dependencies || {};
       const lines = [
         `ID: ${task.id}`, `Título: ${task.title}`, `Coluna: ${task.column}`, `Status: ${task.status}`,
-        `Prioridade: ${task.priority}`, `Tipo: ${task.kind || "task"}`,
         `Projetos: ${(task.projectTargets || []).join(", ") || "nenhum"}`,
         `Agent: ${task.routing?.currentAgent || task.agent || "nenhum"}`,
         `Needs: ${(deps.needs || []).join(", ") || "nenhum"}`,
@@ -177,7 +277,7 @@ export function buildKanbanTools(context) {
     }),
     async execute(_callId, params) {
       const why = await context.whyNotRunning(params.taskId);
-      const text = why.runnable ? `Task ${params.taskId} está pronta para executar.` : `Task ${params.taskId}: ${why.reasons.join("; ") || "sem bloqueios observáveis."}`;
+      const text = why.runnable ? `Task ${params.taskId} está pronta para executar.` : `Task ${params.taskId}: ${why.reasons.join("; ") || "sem impedimentos observáveis."}`;
       return { content: [{ type: "text", text }], details: why };
     }
   });
@@ -190,7 +290,8 @@ export function buildKanbanTools(context) {
       taskId: TString({ description: "Master task ID to decompose" }),
       subtasks: TOptional(TArray(TObject({
         title: TString({ description: "Subtask title" }),
-        agent: TOptional(TString({ description: "Suggested agent: engineer, validator, architect", default: "engineer" })),
+        role: TOptional(TString({ description: "Canonical role: architecture, engineering, quality, review, etc.", default: "engineering" })),
+        agent: TOptional(TString({ description: "Legacy alias; use role for new subtasks." })),
         needs: TOptional(TArray(TString(), { description: "Contracts this subtask needs" })),
         provides: TOptional(TArray(TString(), { description: "Contracts this subtask provides" }))
       }), { description: "Subtask definitions. If omitted, generates default implementation + validation subtasks." }))
@@ -218,12 +319,10 @@ export function buildKanbanTools(context) {
   const kcaUpdateTask = defineTool({
     name: "kca_update_task",
     label: "Update task",
-    description: "Update task fields (title, priority, kind, projectTargets).",
+    description: "Update task fields (title, projectTargets).",
     parameters: TObject({
       taskId: TString({ description: "Task ID to update" }),
       title: TOptional(TString()),
-      priority: TOptional(TString()),
-      kind: TOptional(TString()),
       projectTargets: TOptional(TArray(TString()))
     }),
     async execute(_callId, params) {
@@ -287,6 +386,138 @@ export function buildKanbanTools(context) {
   ];
 }
 
+function commandIdFor(toolName, taskId) {
+  return `pi-tool-${toolName}-${taskId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function taskTool(context, { name, label, description, parameters, toCommand }) {
+  const { defineTool } = context.sdkExports;
+  return defineTool({
+    name,
+    label,
+    description,
+    parameters,
+    async execute(callId, params = {}) {
+      const command = toCommand(params);
+      await context.onEvent?.({ type: "agent.tool_call", tool: name, callId, command });
+      try {
+        const result = await context.executeCommand(command);
+        await context.onEvent?.({ type: "agent.tool_result", tool: name, callId, commandId: command.commandId, ok: result?.ok ?? true });
+        return { content: [{ type: "text", text: `${name} executed: ${command.commandId}` }], details: result };
+      } catch (error) {
+        await context.onEvent?.({ type: "agent.tool_result", tool: name, callId, commandId: command.commandId, ok: false, error: safeError(error) });
+        throw error;
+      }
+    }
+  });
+}
+
+export function buildTaskAgentTools(context, { allowedTools } = {}) {
+  const allowed = new Set(allowedTools || []);
+  const include = (tool) => !allowedTools || allowed.has(tool.name);
+  const base = (type, extra = {}) => ({
+    type,
+    commandId: commandIdFor(type.replace("agent.", "").replace("task.", ""), context.taskId),
+    taskId: context.taskId,
+    runId: context.runId,
+    ...extra
+  });
+
+  return [
+    taskTool(context, {
+      name: "complete_task",
+      label: "Complete task",
+      description: "Complete the current task or move it to the next workflow role.",
+      parameters: TObject({ nextColumn: TOptional(TString({ default: "validate" })), summary: TOptional(TString()) }),
+      toCommand: (params) => base("agent.complete_task", { nextColumn: params.nextColumn || "validate", summary: params.summary || "" })
+    }),
+    taskTool(context, {
+      name: "request_user_input",
+      label: "Request user input",
+      description: "Pause the task and ask the human user for required input.",
+      parameters: TObject({ question: TString() }),
+      toCommand: (params) => base("agent.request_user_input", { question: params.question })
+    }),
+    taskTool(context, {
+      name: "report_blocker",
+      label: "Report problem",
+      description: "Report a problem and send the task back to manager triage.",
+      parameters: TObject({ blocker: TString({ description: "Problem description" }) }),
+      toCommand: (params) => base("agent.report_blocker", { blocker: params.blocker })
+    }),
+    taskTool(context, {
+      name: "emit_artifact",
+      label: "Emit artifact",
+      description: "Persist an artifact under the current task.",
+      parameters: TObject({ path: TString(), content: TString() }),
+      toCommand: (params) => base("agent.emit_artifact", { path: params.path, content: params.content || "" })
+    }),
+    taskTool(context, {
+      name: "spawn_subtasks",
+      label: "Spawn subtasks",
+      description: "Create DAG subtasks for the current master task.",
+      parameters: TObject({
+        subtasks: TArray(TObject({
+          title: TString(),
+          needs: TOptional(TArray(TString())),
+          provides: TOptional(TArray(TString())),
+          fileLocks: TOptional(TArray(TString())),
+          role: TOptional(TString({ description: "Canonical role: architecture, engineering, quality, review, etc." })),
+          agentId: TOptional(TString({ description: "Legacy alias; use role for new subtasks." }))
+        }))
+      }),
+      toCommand: (params) => base("task.decompose", { subtasks: params.subtasks || [] })
+    }),
+    taskTool(context, {
+      name: "run_command",
+      label: "Run command",
+      description: "Run a validation command in the task worktree and return stdout/stderr without changing task status.",
+      parameters: TObject({
+        command: TString(),
+        args: TOptional(TArray(TString())),
+        cwd: TOptional(TString({ description: "Use 'worktree' for the task worktree or omit for worktree/default root.", default: "worktree" })),
+        timeoutMs: TOptional(TNumber({ description: "Timeout in milliseconds.", default: 120000 }))
+      }),
+      toCommand: (params) => base("agent.run_command", { command: params.command, args: params.args || [], cwd: params.cwd || "worktree", timeoutMs: params.timeoutMs || 120000 })
+    }),
+    taskTool(context, {
+      name: "wait_for_persona",
+      label: "Wait for persona",
+      description: "Route the task to another persona and wait for its artifact.",
+      parameters: TObject({ targetRole: TString(), question: TString(), expectedArtifact: TOptional(TString()) }),
+      toCommand: (params) => base("agent.wait_for_persona", { targetRole: params.targetRole, question: params.question, expectedArtifact: params.expectedArtifact })
+    }),
+    taskTool(context, {
+      name: "wait_for_human",
+      label: "Wait for human",
+      description: "Route the task to human wait with a question.",
+      parameters: TObject({ question: TString(), options: TOptional(TArray(TString())) }),
+      toCommand: (params) => base("agent.wait_for_human", { question: params.question, options: params.options || [] })
+    }),
+    taskTool(context, {
+      name: "delegate_task",
+      label: "Delegate task",
+      description: "Delegate the task to another persona.",
+      parameters: TObject({ toPersona: TString(), request: TString(), wait: TOptional({ type: "boolean" }), expectedOutput: TOptional(TString()) }),
+      toCommand: (params) => base("agent.delegate_task", { fromPersona: context.role || context.agentId, toPersona: params.toPersona, request: params.request, wait: Boolean(params.wait), expectedOutput: params.expectedOutput })
+    }),
+    taskTool(context, {
+      name: "review_task",
+      label: "Review task",
+      description: "Record review findings and pass or fail the review gate.",
+      parameters: TObject({ findings: TOptional(TArray(TObject({ severity: TOptional(TString()), message: TOptional(TString()) }))), evidence: TOptional(TArray(TString())) }),
+      toCommand: (params) => base("agent.review_task", { findings: params.findings || [], evidence: params.evidence || [] })
+    }),
+    taskTool(context, {
+      name: "deploy_task",
+      label: "Deploy task",
+      description: "Run and record deployment evidence.",
+      parameters: TObject({ command: TString(), args: TOptional(TArray(TString())), rollback: TOptional(TString()) }),
+      toCommand: (params) => base("agent.deploy_task", { command: params.command, args: params.args || [], rollback: params.rollback || "" })
+    })
+  ].filter(include);
+}
+
 // ---------------------------------------------------------------------------
 // Board assistant agent — runs a real Pi SDK session with kanban tools.
 // ---------------------------------------------------------------------------
@@ -337,14 +568,28 @@ export async function runBoardAssistant({ prompt, agentId = "assistant", instruc
 
   try {
     const systemContext = instructions
-      ? `${instructions}\n\nUse as ferramentas kca_* para gerenciar o board Kanban.`
-      : "Você é o assistente do Kanban Code Agent. Use as ferramentas kca_* para gerenciar tasks, colunas e configurações. Responda em português brasileiro.";
-    await session.prompt(`${systemContext}\n\n${prompt}`, { source: "sdk" });
+      ? `${instructions}\n\nUse as ferramentas kca_* para gerenciar o board Kanban. Ao criar task, o único requisito é entender o pedido do usuário: se a coluna não for informada, use entrada/inbox; não peça prioridade nem tipo; se o texto for descrição, infira um título; se o pedido depender de referência subjetiva sem contexto, peça clarificação objetiva.`
+      : "Você é o assistente do Kanban Code Agent. Use as ferramentas kca_* para gerenciar tasks, colunas e configurações. Ao criar task, o único requisito é entender o pedido do usuário: se a coluna não for informada, use entrada/inbox; não peça prioridade nem tipo; se o texto for descrição, infira um título; se o pedido depender de referência subjetiva sem contexto, peça clarificação objetiva. Responda em português brasileiro.";
+    const timeoutMs = Number(process.env.KCA_BOARD_ASSISTANT_TIMEOUT_MS || 15000);
+    let timeoutId;
+    try {
+      await Promise.race([
+        session.prompt(`${systemContext}\n\n${prompt}`, { source: "sdk" }),
+        new Promise((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error(`board_assistant_timeout:${timeoutMs}`)), timeoutMs);
+        })
+      ]);
+    } finally {
+      clearTimeout(timeoutId);
+    }
     const reply = lastAssistantText || "Processado sem resposta textual.";
     logStep("pi-adapter", "runBoardAssistant.done", { agentId });
     return { ok: true, reply, modelFallbackMessage, agentId };
   } catch (error) {
     logStep("pi-adapter", "runBoardAssistant.error", { agentId, reason: safeError(error) });
+    if (String(safeError(error)).startsWith("board_assistant_timeout:")) {
+      return { ok: false, reply: `Tempo esgotado ao consultar o agent (${process.env.KCA_BOARD_ASSISTANT_TIMEOUT_MS || 15000}ms). Tente uma pergunta mais específica ou ajuste KCA_BOARD_ASSISTANT_TIMEOUT_MS.`, timeout: true };
+    }
     return { ok: false, reply: `Erro no agente: ${safeError(error)}` };
   } finally {
     unsubscribe?.();
@@ -356,7 +601,7 @@ export async function runBoardAssistant({ prompt, agentId = "assistant", instruc
 // Legacy — kept for task-session tests and orchestrator dry-runs.
 // ---------------------------------------------------------------------------
 
-export async function startPiSession({ task, agentId, runId, cwd, prompt, sessionDir, agentDir, previousSessionFile, tools = [], customTools = [], runPrompt = false }) {
+export async function startPiSession({ task, agentId, runId, cwd, prompt, sessionDir, agentDir, previousSessionFile, tools = [], customTools = [], customToolFactory, runPrompt = false, onEvent }) {
   logStep("pi-adapter", "startPiSession.start", { taskId: task.id, agentId, runId, runPrompt });
   const loaded = await loadPiSdk();
   if (!loaded.ok) {
@@ -377,9 +622,10 @@ export async function startPiSession({ task, agentId, runId, cwd, prompt, sessio
     return { mode: "real", provider: loaded.packageName, version: loaded.version, sessionId: runId, warning: "Pi SDK loaded without createAgentSession/SessionManager" };
   }
 
-  const timeoutMs = Number(process.env.KCA_PI_SESSION_TIMEOUT_MS || 2500);
-  const timeout = new Promise((resolve) => {
-    setTimeout(() => resolve({
+  const sessionTimeoutMs = Number(process.env.KCA_PI_SESSION_TIMEOUT_MS || 2500);
+  let sessionTimeoutId;
+  const sessionTimeout = new Promise((resolve) => {
+    sessionTimeoutId = setTimeout(() => resolve({
       mode: "fake",
       provider: loaded.packageName,
       version: loaded.version,
@@ -388,16 +634,20 @@ export async function startPiSession({ task, agentId, runId, cwd, prompt, sessio
       previousSessionFile,
       cwd,
       promptPreview: String(prompt || task.title || "").slice(0, 160)
-    }), timeoutMs);
+    }), sessionTimeoutMs);
+    sessionTimeoutId.unref?.();
   });
-  const real = (async () => {
+  const realSession = (async () => {
     logStep("pi-adapter", "startPiSession.real", { taskId: task.id, agentId, runId });
     const sessionManager = sdk.SessionManager.create(cwd || process.cwd(), sessionDir);
+    const resolvedCustomTools = typeof customToolFactory === "function"
+      ? await customToolFactory({ sdkExports: sdk })
+      : customTools;
     const { session, modelFallbackMessage } = await sdk.createAgentSession({
       cwd,
       agentDir,
       sessionManager,
-      customTools,
+      customTools: resolvedCustomTools,
       tools: tools.length ? tools : undefined,
       noTools: tools.length ? undefined : "builtin",
       sessionStartEvent: {
@@ -406,37 +656,85 @@ export async function startPiSession({ task, agentId, runId, cwd, prompt, sessio
         previousSessionFile
       }
     });
-    session.setSessionName?.(`${task.id}:${agentId}`);
-    const events = [];
-    const unsubscribe = session.subscribe((event) => {
-      events.push({ type: event.type, ts: new Date().toISOString() });
-    });
-    try {
-      if (runPrompt) {
-        await session.prompt(String(prompt || task.title || ""), { source: "sdk" });
-      }
-      return {
-        mode: "real",
-        provider: loaded.packageName,
-        version: loaded.version,
-        sessionId: session.sessionId || sessionManager.getSessionId?.() || runId,
-        sessionFile: session.sessionFile || sessionManager.getSessionFile?.(),
-        previousSessionFile,
-        cwd,
-        promptPreview: String(prompt || task.title || "").slice(0, 160),
-        promptSent: Boolean(runPrompt),
-        activeTools: session.getActiveToolNames?.() || [],
-        modelFallbackMessage,
-        events
-      };
-    } finally {
-      unsubscribe?.();
-      session.dispose?.();
-    }
+    return { session, sessionManager, modelFallbackMessage, resolvedCustomTools };
   })();
-  const result = await Promise.race([real, timeout]);
-  logStep("pi-adapter", "startPiSession.done", { taskId: task.id, agentId, runId, mode: result.mode });
-  return result;
+  const created = await Promise.race([realSession, sessionTimeout]);
+  clearTimeout(sessionTimeoutId);
+  if (created.reason === "session_timeout") {
+    logStep("pi-adapter", "startPiSession.done", { taskId: task.id, agentId, runId, mode: created.mode, reason: created.reason });
+    return created;
+  }
+
+  const { session, sessionManager, modelFallbackMessage, resolvedCustomTools } = created;
+  const events = [];
+  const seenTranscript = new Set();
+  const unsubscribe = session.subscribe((event) => {
+    const normalized = normalizeSessionEvent(event);
+    const signature = [normalized.category, normalized.role || "", normalized.text || "", normalized.toolCall?.id || "", normalized.toolResult?.id || ""].join("\u0001");
+    if (seenTranscript.has(signature)) return;
+    seenTranscript.add(signature);
+    events.push({ type: event.type, category: normalized.category, role: normalized.role, text: normalized.text, ts: new Date().toISOString() });
+    if (normalized.text || normalized.category !== "event") void onEvent?.(normalized);
+  });
+  let promptSent = false;
+  let result;
+  try {
+    session.setSessionName?.(`${task.id}:${agentId}`);
+    if (runPrompt) {
+      const promptTimeoutMs = Number(process.env.KCA_TASK_AGENT_TIMEOUT_MS || 600000);
+      let promptTimeoutId;
+      const promptTimeout = new Promise((resolve) => {
+        promptTimeoutId = setTimeout(() => resolve({ reason: "prompt_timeout" }), promptTimeoutMs);
+        promptTimeoutId.unref?.();
+      });
+      const promptResult = await Promise.race([
+        session.prompt(String(prompt || task.title || ""), {
+          source: "sdk",
+          preflightResult: (success) => { promptSent = success; }
+        }).then(() => ({ ok: true })),
+        promptTimeout
+      ]);
+      clearTimeout(promptTimeoutId);
+      if (promptResult.reason === "prompt_timeout") {
+        result = {
+          mode: "real",
+          provider: loaded.packageName,
+          version: loaded.version,
+          reason: "prompt_timeout",
+          sessionId: session.sessionId || sessionManager.getSessionId?.() || runId,
+          sessionFile: session.sessionFile || sessionManager.getSessionFile?.(),
+          previousSessionFile,
+          cwd,
+          promptPreview: String(prompt || task.title || "").slice(0, 160),
+          promptSent,
+          activeTools: session.getActiveToolNames?.() || resolvedCustomTools.map((tool) => tool.name),
+          modelFallbackMessage,
+          events
+        };
+        return result;
+      }
+      promptSent = true;
+    }
+    result = {
+      mode: "real",
+      provider: loaded.packageName,
+      version: loaded.version,
+      sessionId: session.sessionId || sessionManager.getSessionId?.() || runId,
+      sessionFile: session.sessionFile || sessionManager.getSessionFile?.(),
+      previousSessionFile,
+      cwd,
+      promptPreview: String(prompt || task.title || "").slice(0, 160),
+      promptSent: Boolean(runPrompt) ? promptSent : false,
+      activeTools: session.getActiveToolNames?.() || resolvedCustomTools.map((tool) => tool.name),
+      modelFallbackMessage,
+      events
+    };
+    return result;
+  } finally {
+    unsubscribe?.();
+    session.dispose?.();
+    logStep("pi-adapter", "startPiSession.done", { taskId: task.id, agentId, runId, mode: result?.mode, reason: result?.reason });
+  }
 }
 
 export async function doctorPi({ cwd = process.cwd(), sessionDir, runPrompt = false } = {}) {

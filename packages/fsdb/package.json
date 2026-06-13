@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.js",
     "./chat-store": "./src/chat-store.js",
-    "./runtime-store": "./src/runtime-store.js"
+    "./runtime-store": "./src/runtime-store.js",
+    "./repositories": "./src/repositories/index.js"
   },
   "dependencies": {
     "@kca/core": "workspace:*",

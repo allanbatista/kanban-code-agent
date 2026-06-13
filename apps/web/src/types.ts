@@ -20,6 +20,7 @@ export type Task = {
   routing?: { currentAgent?: string | null; currentRole?: string | null; lastAgent?: string | null; lastRole?: string | null; nextSuggestedColumn?: string | null; manualOverride?: { active?: boolean } };
   worktree?: { branch?: string; path?: string; parentTaskId?: string | null; mergeTarget?: string };
   dependencies?: { needs?: string[]; provides?: string[]; blockedBy?: string[]; fileLocks?: string[]; semaphores?: unknown[] };
+  failure?: { type?: string; reason?: string; ts?: string; actor?: string; runId?: string };
   hooks?: { active?: string[] };
   skills?: { active?: string[] };
   agent?: { currentRunId?: string; currentSessionRef?: string; lastSummary?: string } | string;
@@ -101,4 +102,27 @@ export type ChatMessage = {
   disposition?: string;
   text: string;
   time: string;
+};
+
+export type TaskComment = ChatMessage;
+
+export type AgentLogEntry = {
+  id: string;
+  ts: string;
+  source: string;
+  type: string;
+  actor: string;
+  taskId: string;
+  agentId?: string;
+  runId?: string;
+  category?: string;
+  role?: string;
+  text: string;
+  raw?: unknown;
+};
+
+export type AgentLogPage = {
+  items: AgentLogEntry[];
+  nextCursor?: string;
+  hasMore: boolean;
 };

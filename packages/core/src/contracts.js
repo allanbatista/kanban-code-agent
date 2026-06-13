@@ -2,9 +2,11 @@ export const COMMAND_TYPES = [
   "task.create",
   "task.update",
   "task.file.write",
+  "task.attachment.write",
   "task.move",
   "task.run",
   "task.interrupt",
+  "task.comment",
   "task.decompose",
   "task.merge",
   "scheduler.tick",
@@ -14,6 +16,7 @@ export const COMMAND_TYPES = [
   "agent.message",
   "agent.delegate_task",
   "chat.compact",
+  "chat.reset_board",
   "agent.review_task",
   "agent.deploy_task",
   "task.answer_input",
@@ -33,6 +36,8 @@ export const QUERY_TYPES = [
   "orchestrator.status",
   "settings.scope",
   "chat.history",
+  "task.comments",
+  "agent.logs",
   "chat.build",
   "provider.discover",
   "why_not_running"
@@ -41,16 +46,22 @@ export const QUERY_TYPES = [
 export const EVENT_TYPES = [
   "task.created",
   "task.updated",
+  "task.file.updated",
+  "task.attachment.created",
   "planning.created",
   "planning.updated",
   "task.move_requested",
   "task.moved",
+  "task.comment",
   "task.blocked",
+  "task.problem",
+  "task.run.blocked",
   "task.unblocked",
   "task.recovered",
   "agent.queued",
   "agent.started",
   "agent.event",
+  "agent.transcript",
   "agent.message",
   "agent.waiting_for_persona",
   "agent.waiting_for_human",
@@ -88,7 +99,7 @@ export const EVENT_TYPES = [
   "settings.updated"
 ];
 
-export const ROLE_IDS = ["manager", "product", "design", "generalist", "engineering", "quality", "review", "deployment"];
+export const ROLE_IDS = ["manager", "product", "design", "architecture", "generalist", "engineering", "quality", "review", "deployment"];
 
 export function commandEnvelope(type, payload = {}) {
   return { type, commandId: payload.commandId || `cmd-${Date.now()}`, ...payload };

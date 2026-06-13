@@ -1,0 +1,19 @@
+{
+  "name": "@kca/application",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./command-bus": "./src/command-bus.js",
+    "./handlers/command-handlers": "./src/handlers/command-handlers.js",
+    "./query-bus": "./src/query-bus.js",
+    "./event-bus": "./src/event-bus.js",
+    "./settings-service": "./src/settings-service.js",
+    "./chat-service": "./src/chat-service.js"
+  },
+  "dependencies": {
+    "@kca/core": "workspace:*",
+    "@kca/schemas": "workspace:*"
+  }
+}
