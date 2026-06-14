@@ -49,3 +49,7 @@ The agent usage model implementation passed focused typecheck, syntax, adapter u
 # [medium] Fix broad orchestrator suite failures before claiming full regression coverage
 
 `rtk pnpm exec node --test --test-name-pattern "scheduler explains|settings scopes" tests/unit/orchestrator.test.js` was initially invoked with the filter after the file and ran the broad orchestrator suite. It finished with 44 passing, 12 failing, and 1 skipped. Focused checks for this implementation pass, but full-suite validation remains blocked by assistant chat, stale completion, file lock, decomposition, handoff, and chat compaction failures. Next step: triage those orchestrator failures separately and rerun the broad suite.
+
+# [high] Implement final spec-first workflow gates
+
+The final workflow audit in `final-workflow-definition.md` defines required production work that is not implemented yet: official `task-spec.md`, DoR/DoD gates, structured handoffs, decision log, validation report, approval controls, safer Done transitions, and workflow/UX settings. Next step: implement the phases listed in section 22 of that document, starting by blocking execution and Done when required spec/validation artifacts are missing.
