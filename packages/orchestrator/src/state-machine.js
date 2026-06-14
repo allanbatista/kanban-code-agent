@@ -15,6 +15,12 @@ export function transitionTask(task, transition, payload = {}) {
     ...task,
     status: payload.nextColumn === "done" ? "done" : payload.status || "validating",
     column: payload.nextColumn || task.column,
+    routing: payload.nextColumn === "done"
+      ? { ...task.routing, lastAgent: task.routing?.currentAgent || null, lastRole: task.routing?.currentRole || null, currentAgent: null, currentRole: null }
+      : task.routing,
+    workflow: payload.nextColumn === "done"
+      ? { ...(task.workflow || {}), phase: "done", currentRole: "none", boardColumn: "done" }
+      : task.workflow,
     updatedAt: now
   };
   if (transition === "wait_for_persona") return {

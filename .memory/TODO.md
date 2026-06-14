@@ -50,6 +50,6 @@ The agent usage model implementation passed focused typecheck, syntax, adapter u
 
 `rtk pnpm exec node --test --test-name-pattern "scheduler explains|settings scopes" tests/unit/orchestrator.test.js` was initially invoked with the filter after the file and ran the broad orchestrator suite. It finished with 44 passing, 12 failing, and 1 skipped. Focused checks for this implementation pass, but full-suite validation remains blocked by assistant chat, stale completion, file lock, decomposition, handoff, and chat compaction failures. Next step: triage those orchestrator failures separately and rerun the broad suite.
 
-# [high] Implement final spec-first workflow gates
+# [medium] Complete final workflow P2 production hardening
 
-The final workflow audit in `final-workflow-definition.md` defines required production work that is not implemented yet: official `task-spec.md`, DoR/DoD gates, structured handoffs, decision log, validation report, approval controls, safer Done transitions, and workflow/UX settings. Next step: implement the phases listed in section 22 of that document, starting by blocking execution and Done when required spec/validation artifacts are missing.
+P1 workflow settings, operational UI panels, formal planning/delivery artifacts, and stricter gates are implemented. Remaining P2 hardening from `final-workflow-definition.output.md`: real per-task sandbox enforcement, complete retry/timeout resume rehydration, current-state validation with browser/API/logs, formal Documentation Agent, adversarial review for high-risk tasks, operational docs, and throughput/failure/blocked/DoD metrics. Next step: split these into implementation plans and start with real sandbox enforcement.

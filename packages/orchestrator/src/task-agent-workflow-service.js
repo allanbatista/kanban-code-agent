@@ -11,6 +11,7 @@ import { TaskSchema } from "@kca/schemas";
 import { logStep } from "@kca/core/log";
 import { roleById } from "@kca/core/roles";
 import { discoverProviders } from "@kca/core/providers";
+import { phaseForRole, requestDoneReview } from "./spec-workflow-service.js";
 
 const exec = promisify(execFile);
 const ROOT_TASK_ARTIFACTS = new Set(["acceptance.md"]);
@@ -33,6 +34,18 @@ async function routeProblemToManager(task, root, message, eventType = "task.prob
     status: "queued",
     column: "manager",
     routing: { ...task.routing, lastAgent: task.routing?.currentAgent || null, lastRole: task.routing?.currentRole || null, currentAgent: "manager", currentRole: "manager" },
+    dependencies: { ...task.dependencies, blockedBy: [] }
+  }, root, eventType));
+}
+
+async function failTaskPreservingRouting(task, root, message, eventType = "agent.failed") {
+  const persona = task.routing?.currentRole || task.routing?.currentAgent || "assistant";
+  const agentId = task.routing?.currentAgent || persona;
+  await appendChatMessage(root, { scope: "task", taskId: task.id, role: "assistant", persona, agentId, disposition: eventType, text: message, visibility: "both" });
+  return TaskSchema.parse(await updateTask(task.id, {
+    status: "failed",
+    column: task.column,
+    routing: task.routing,
     dependencies: { ...task.dependencies, blockedBy: [] }
   }, root, eventType));
 }
@@ -184,7 +197,7 @@ export async function runTaskWorkflow(command, root, whyNotRunning, executeComma
       }
     } else if (project && !project.repoPath) {
       const reason = `Project ${project.id} has no repoPath configured.`;
-      const task = await routeProblemToManager(current, root, reason, "task.run.blocked");
+      const task = await failTaskPreservingRouting(current, root, reason, "agent.failed");
       await appendJsonl(`${paths(root).tasks}/${current.id}/events.jsonl`, { ts: new Date().toISOString(), type: "task.run.blocked", actor: "orchestrator", taskId: current.id, reason });
       return { ok: false, commandId: command.commandId, task, why: { runnable: false, reasons: [reason] } };
     }
@@ -211,7 +224,7 @@ export async function runTaskWorkflow(command, root, whyNotRunning, executeComma
   if (run.adapter?.promptSent && run.adapter?.terminal === false && ["non_terminal_response", "max_turns_without_terminal"].includes(run.adapter?.reason)) {
     const reason = `Agent exited without a terminal tool call: ${run.adapter.reason}.`;
     const latestBeforeRecovery = await getTask(command.taskId, root) || runnableTask;
-    const task = await routeProblemToManager(latestBeforeRecovery, root, reason, "agent.non_terminal_exit");
+    const task = await failTaskPreservingRouting(latestBeforeRecovery, root, reason, "agent.non_terminal_exit");
     await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "agent.non_terminal_exit", actor: "orchestrator", taskId: command.taskId, runId: run.runId, reason: run.adapter.reason });
     await releaseSemaphoreLeases({ root, taskId: command.taskId });
     return { ok: false, commandId: command.commandId, task, run, reason };
@@ -268,13 +281,22 @@ export async function completeTaskWorkflow(command, root) {
     await releaseSemaphoreLeases({ root, taskId: command.taskId });
     return { ok: true, commandId: command.commandId, task, summaryRef, deferredComments: deferredComments.length };
   }
-  const nextColumn = current.worktree?.parentTaskId ? "done" : normalizeColumnId(command.nextColumn);
+  const requestedColumn = normalizeColumnId(command.nextColumn);
+  const nextColumn = requestedColumn;
   const target = (await boardSnapshot(root)).columns.find((column) => column.id === nextColumn);
+  const done = nextColumn === "done";
   const task = TaskSchema.parse(await updateTask(command.taskId, {
-    status: nextColumn === "done" ? "done" : "queued",
+    status: done ? "done" : "queued",
     column: nextColumn,
-    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: target?.agent || current.routing?.currentAgent, currentRole: target?.role || target?.agent || current.routing?.currentRole },
-    agent: { ...current.agent, lastSummary: summaryRef }
+    routing: {
+      ...current.routing,
+      lastAgent: current.routing?.currentAgent || null,
+      lastRole: current.routing?.currentRole || null,
+      currentAgent: done ? null : target?.agent || current.routing?.currentAgent,
+      currentRole: done ? null : target?.role || target?.agent || current.routing?.currentRole
+    },
+    agent: { ...current.agent, lastSummary: summaryRef },
+    workflow: { ...current.workflow, phase: done ? "done" : phaseForRole(target?.role || target?.agent || current.routing?.currentRole || "manager"), currentRole: done ? "none" : target?.role || target?.agent || current.routing?.currentRole || "manager", boardColumn: nextColumn }
   }, root, "agent.completed"));
   await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: current.routing?.currentRole || current.routing?.currentAgent || "assistant", agentId: current.routing?.currentAgent || "assistant", runId: command.runId, disposition: "agent.completed", text: visibleText, visibility: "both" });
   const parentTask = await requeueWaitingParentForChild(task, root, command.summary || visibleText);
@@ -310,11 +332,7 @@ export async function requestUserInputWorkflow(command, root) {
       `Completando o parent sem solicitar input humano. Pergunta ignorada: ${command.question}`
     ].join("\n");
     await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: "orchestrator", agentId: "orchestrator", runId: command.runId, disposition: "subtasks.completed_parent_done", text: summary, visibility: "both" });
-    const task = TaskSchema.parse(await updateTask(command.taskId, {
-      status: "done",
-      column: "done",
-      dependencies: { ...current.dependencies, blockedBy: [] }
-    }, root, "subtasks.completed_parent_done"));
+    const task = await requestDoneReview(current, root, { runId: command.runId, summary, source: "subtasks.completed_parent_done" });
     await releaseSemaphoreLeases({ root, taskId: command.taskId });
     await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "subtasks.completed_parent_done", actor: "orchestrator", taskId: command.taskId, ignoredQuestion: command.question, subtasks: directChildren.map((task) => task.id) });
     return { ok: true, commandId: command.commandId, task, summary };
@@ -374,7 +392,7 @@ export async function stepWorkflow(command, root, handleCommand) {
   if (disposition.type === "complete_for_persona") return handleCommand({ type: "agent.complete_task", commandId: `${command.commandId}:complete`, taskId: command.taskId, runId: command.runId || "manual-step", nextColumn: roleColumn(disposition.nextRole), summary: disposition.summary }, root);
   if (disposition.type === "fail_run") {
     const current = await getTask(command.taskId, root);
-    const task = current ? await routeProblemToManager(current, root, disposition.reason, "agent.failed") : null;
+    const task = current ? await failTaskPreservingRouting(current, root, disposition.reason, "agent.failed") : null;
     return { ok: false, commandId: command.commandId, task, reason: disposition.reason, recoverable: disposition.recoverable };
   }
   const current = await getTask(command.taskId, root);

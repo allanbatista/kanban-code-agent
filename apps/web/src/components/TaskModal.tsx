@@ -249,7 +249,7 @@ export function TaskModal({ task, draftTask, open, onClose, onSave, onUploadAtta
             <form className={`flex min-h-0 flex-col ${activeTab === "resumo" ? "border-r border-zinc-800" : ""}`} onSubmit={form.handleSubmit(submit)}>
               <Tabs.Root value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 flex-1 flex-col">
                 <Tabs.List id="taskTabs" className="tabs-list">
-                  {["resumo", "execucao", "logs", "worktree", "dependencias", "subtasks", "hooks", "eventos", "arquivos"].map((tab) => (
+                  {["resumo", "workflow", "execucao", "logs", "worktree", "dependencias", "subtasks", "hooks", "eventos", "arquivos"].map((tab) => (
                     <Tabs.Trigger className="tabs-trigger" key={tab} value={tab}>{tab}</Tabs.Trigger>
                   ))}
                 </Tabs.List>
@@ -297,8 +297,24 @@ export function TaskModal({ task, draftTask, open, onClose, onSave, onUploadAtta
                       <button type="button" className="button-secondary" onClick={() => onAction(task, "run")}><Play size={15} />Rodar</button>
                       <button type="button" className="button-secondary" onClick={() => onAction(task, "interrupt")}><Pause size={15} />Pausar</button>
                       <button type="button" className="button-secondary" onClick={() => onAction(task, "decompose")}><Split size={15} />Decompor</button>
-                      <button type="button" className="button-primary" onClick={() => onAction(task, "complete")}><CheckCircle size={15} />Completar</button>
+                      <button type="button" className="button-primary" onClick={() => onAction(task, "complete")}><CheckCircle size={15} />Solicitar conclusão</button>
                     </div> : null}
+                  </Tabs.Content>
+                  <Tabs.Content value="workflow">
+                    <div className="space-y-4">
+                      <Panel title="Workflow" lines={[
+                        `phase: ${task?.workflow?.phase || "intake"}`,
+                        `role: ${task?.workflow?.currentRole || task?.routing?.currentRole || "manager"}`,
+                        `column: ${task?.workflow?.boardColumn || task?.column || "manager"}`
+                      ]} />
+                      <Panel title="Gate Inspector" lines={workflowGateLines(task)} />
+                      <Panel title="Artefatos oficiais" lines={workflowArtifactLines(task, files)} />
+                      <Panel title="Status dos artefatos" lines={workflowArtifactStatusLines(task, files)} />
+                      <Panel title="Blockers View" lines={task?.dependencies?.blockedBy?.length ? task.dependencies.blockedBy : task?.failure?.reason ? [task.failure.reason] : ["nenhum blocker ativo"]} />
+                      <Panel title="Decisões" lines={workflowEventLines(files, "workflow.decision_recorded")} />
+                      <Panel title="Handoff Timeline" lines={workflowEventLines(files, "role.handoff")} />
+                      <Panel title="Evidence Panel" lines={workflowEvidenceLines(task, files)} />
+                    </div>
                   </Tabs.Content>
                   <Tabs.Content value="logs" className="task-logs-tab">
                     <TerminalLogs logs={logs} loading={logsLoading} hasMore={logsHasMore} emptyText={task?.id ? undefined : "Salve a task para iniciar logs."} onLoadMore={() => task?.id ? onLoadMoreLogs(task.id) : Promise.resolve()} />
@@ -661,6 +677,51 @@ function formatLogTime(ts: string) {
   } catch {
     return ts;
   }
+}
+
+function workflowGateLines(task?: Task | null) {
+  const gates = task?.workflow?.gates || {};
+  const entries = Object.entries(gates);
+  return entries.length
+    ? entries.map(([key, gate]) => `${key}: ${gate?.status || "pending"}${gate?.reason ? ` · ${gate.reason}` : ""}`)
+    : ["sem gates registrados"];
+}
+
+function workflowArtifactLines(task?: Task | null, files?: TaskFiles) {
+  const artifactValues = Object.values(task?.workflow?.artifacts || {});
+  const official = new Set(["task-spec.md", "acceptance.md", "technical-plan.md", "implementation-tasks.md", "validation-report.md", "review-report.md", "deployment-report.md", "summary.md", "decision-log.md", "handoffs", ...artifactValues]);
+  const present = (files?.files || []).filter((file) => [...official].some((artifact) => file === artifact || file.startsWith(`${artifact}/`)));
+  return present.length ? present : [...official].filter(Boolean).sort();
+}
+
+function workflowArtifactStatusLines(task?: Task | null, files?: TaskFiles) {
+  const official = [
+    "task-spec.md",
+    "technical-plan.md",
+    "implementation-tasks.md",
+    "validation-report.md",
+    "review-report.md",
+    "deployment-report.md",
+    "summary.md",
+    "decision-log.md"
+  ];
+  const present = new Set(files?.files || []);
+  const artifactMap = task?.workflow?.artifacts || {};
+  const resolved = official.map((artifact) => Object.values(artifactMap).includes(artifact) ? artifact : artifact);
+  return resolved.map((artifact) => `${artifact}: ${present.has(artifact) ? "presente" : "pendente"}`);
+}
+
+function workflowEventLines(files: TaskFiles | undefined, type: string) {
+  const events = (files?.events || []).filter((event) => event.type === type);
+  return events.length
+    ? events.slice(-8).map((event) => `${event.ts || ""} · ${event.fromRole || event.actor || ""}${event.toRole ? ` -> ${event.toRole}` : ""} · ${event.decision || event.reason || event.artifactPath || ""}`)
+    : ["nenhum registro"];
+}
+
+function workflowEvidenceLines(task?: Task | null, files?: TaskFiles) {
+  const gateEvidence = Object.entries(task?.workflow?.gates || {}).flatMap(([key, gate]) => (gate?.evidence || []).map((item) => `${key}: ${typeof item === "string" ? item : JSON.stringify(item)}`));
+  const validation = (files?.events || []).filter((event) => event.type === "workflow.validation_recorded").flatMap((event) => Array.isArray(event.evidence) ? event.evidence.map((item) => `validation: ${String(item)}`) : []);
+  return [...gateEvidence, ...validation].length ? [...gateEvidence, ...validation].slice(-10) : ["nenhuma evidência registrada"];
 }
 
 function Panel({ title, lines }: { title: string; lines: string[] }) {

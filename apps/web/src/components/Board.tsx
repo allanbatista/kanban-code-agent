@@ -110,6 +110,9 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                   {task.failure?.reason ? <p className="task-failure">Falha: {task.failure.reason}</p> : null}
                   <div className="task-tags">
                     {!isInboxIdle ? <span className={clsx("pill", task.status)}>{statusLabels[task.status] || task.status}</span> : null}
+                    {task.workflow?.phase ? <span className="pill soft">phase {task.workflow.phase}</span> : null}
+                    {task.workflow?.currentRole ? <span className="pill soft">role {task.workflow.currentRole}</span> : null}
+                    {workflowGateSummary(task) ? <span className="pill soft">gate {workflowGateSummary(task)}</span> : null}
                     {task.routing?.nextSuggestedColumn ? <span className="pill soft">next {task.routing.nextSuggestedColumn}</span> : null}
                     {relationTaskIds(task).length ? (
                       <span className="task-relation-row">
@@ -187,6 +190,16 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
 
 function relationTaskIds(task: Task) {
   return [...new Set([task.worktree?.mainTaskId, task.worktree?.parentTaskId].filter((id): id is string => Boolean(id && id !== task.id)))];
+}
+
+function workflowGateSummary(task: Task) {
+  const gates = task.workflow?.gates || {};
+  const failed = Object.entries(gates).find(([, gate]) => gate?.status === "failed");
+  if (failed) return `${failed[0]} failed`;
+  const pending = Object.entries(gates).find(([, gate]) => gate?.status === "pending");
+  if (pending) return `${pending[0]} pending`;
+  const passed = Object.entries(gates).filter(([, gate]) => gate?.status === "passed").length;
+  return passed ? `${passed} passed` : "";
 }
 
 function visibleCardDescription(value?: string) {

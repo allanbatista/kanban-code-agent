@@ -328,8 +328,7 @@ function AppShell() {
       await runCommand.mutateAsync({ type: "task.interrupt", commandId: commandId("task-interrupt"), taskId: task.id, mode: "soft" });
     }
     if (action === "complete") {
-      const runId = typeof task.agent === "object" ? task.agent?.currentRunId : undefined;
-      await runCommand.mutateAsync({ type: "agent.complete_task", commandId: commandId("task-complete"), taskId: task.id, runId: runId || `manual-${Date.now()}`, nextColumn: "done", summary: "Concluido pela UI." });
+      await runCommand.mutateAsync({ type: "workflow.run_definition_of_done_gate", commandId: commandId("task-complete"), taskId: task.id });
     }
     if (action === "decompose") {
       await runCommand.mutateAsync({ type: "task.decompose", commandId: commandId("task-decompose"), taskId: task.id });

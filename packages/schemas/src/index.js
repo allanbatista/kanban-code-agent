@@ -2,6 +2,9 @@ import { z } from "zod";
 
 export const TaskStatus = z.enum(["draft", "idle", "queued", "running", "interrupting", "validating", "waiting", "waiting_human", "blocked", "merge_pending", "done", "failed", "canceled", "paused"]);
 export const TaskKind = z.enum(["task", "master", "subtask", "spike", "bug", "chore"]);
+export const WorkflowPhase = z.enum(["intake", "spec", "planning", "execution", "validation", "review", "delivery", "done", "blocked", "cancelled"]);
+export const WorkflowRole = z.enum(["manager", "product", "design", "architecture", "engineering", "qa", "quality", "review", "deployment", "documentation", "generalist", "none"]);
+export const WorkflowGateStatus = z.enum(["pending", "passed", "failed", "waiting_user", "skipped_with_reason"]);
 export const EventType = z.enum([
   "task.created",
   "task.updated",
@@ -35,6 +38,22 @@ export const EventType = z.enum([
   "human.input_received",
   "gate.passed",
   "gate.failed",
+  "workflow.spec.created",
+  "workflow.spec.updated",
+  "workflow.spec.approved",
+  "workflow.decision_recorded",
+  "workflow.handoff_recorded",
+  "workflow.validation_recorded",
+  "workflow.technical_plan_recorded",
+  "workflow.implementation_tasks_recorded",
+  "workflow.review_report_recorded",
+  "workflow.deployment_report_recorded",
+  "workflow.summary_recorded",
+  "workflow.done_requested",
+  "workflow.direct_done_blocked",
+  "workflow.dor_checked",
+  "workflow.dod_checked",
+  "deployment.recorded",
   "chat.created",
   "chat.compaction_requested",
   "chat.compacted",
@@ -190,6 +209,39 @@ export const DependenciesSchema = z.object({
   semaphores: z.array(SemaphoreSchema).default([])
 }).passthrough();
 
+export const WorkflowGateSchema = z.object({
+  status: WorkflowGateStatus.default("pending"),
+  reason: z.string().default(""),
+  evidence: z.array(z.any()).default([]),
+  updatedAt: z.string().optional(),
+  updatedBy: z.string().optional()
+}).passthrough();
+
+export const TaskWorkflowSchema = z.object({
+  phase: WorkflowPhase.default("intake"),
+  currentRole: WorkflowRole.default("manager"),
+  boardColumn: z.string().default("manager"),
+  gates: z.object({
+    spec: WorkflowGateSchema.default({}),
+    clarification: WorkflowGateSchema.default({}),
+    definitionOfReady: WorkflowGateSchema.default({}),
+    validation: WorkflowGateSchema.default({}),
+    definitionOfDone: WorkflowGateSchema.default({})
+  }).default({}),
+  artifacts: z.object({
+    taskSpec: z.string().default("task-spec.md"),
+    acceptance: z.string().default("acceptance.md"),
+    technicalPlan: z.string().default("technical-plan.md"),
+    implementationTasks: z.string().default("implementation-tasks.md"),
+    validationReport: z.string().default("validation-report.md"),
+    reviewReport: z.string().default("review-report.md"),
+    deploymentReport: z.string().default("deployment-report.md"),
+    summary: z.string().default("summary.md"),
+    decisionLog: z.string().default("decision-log.md"),
+    handoffsDir: z.string().default("handoffs")
+  }).default({})
+}).passthrough();
+
 export const WorktreeSchema = z.object({
   schema: z.literal("kanban-code-agent/worktree@1").optional(),
   taskId: z.string().optional(),
@@ -257,6 +309,20 @@ export const AppSettingsSchema = z.object({
   workspace: z.object({ name: z.string().min(1), language: z.string().min(1).default("pt-BR") }).passthrough(),
   persistence: z.object({ taskStateFormat: z.literal("yaml"), contextFormat: z.literal("markdown"), eventsFormat: z.literal("jsonl") }).passthrough(),
   runtime: z.object({ maxParallelTasks: z.number().int().positive(), agentTokens: z.record(z.string(), z.number().int().nonnegative()).default({}) }).passthrough(),
+  workflow: z.object({
+    requireSpec: z.boolean().default(true),
+    allowMiniSpec: z.boolean().default(true),
+    requireTechnicalPlanForCode: z.boolean().default(true),
+    requireQaBeforeReview: z.boolean().default(true),
+    requireReviewBeforeDone: z.boolean().default(true),
+    requireDeploymentEvidence: z.boolean().default(true),
+    requireDocumentationDecision: z.boolean().default(true),
+    requireSummaryBeforeDone: z.boolean().default(true),
+    requireUserSpecApproval: z.boolean().default(false),
+    preventAutomaticDeployDone: z.boolean().default(true),
+    sandboxPolicy: z.enum(["prompt_only", "worktree_only", "isolated"]).default("prompt_only"),
+    retryPolicy: z.object({ maxAttempts: z.number().int().nonnegative().default(2), timeoutMs: z.number().int().positive().default(120000) }).passthrough().default({})
+  }).passthrough().optional(),
   ai: z.object({
     defaultProvider: z.string().default("openai"),
     defaultModel: z.string().default(""),
@@ -369,12 +435,27 @@ export const TaskSchema = z.object({
     mergeTarget: z.string().optional()
   }).passthrough(),
   dependencies: DependenciesSchema.omit({ schema: true }),
+  workflow: TaskWorkflowSchema.default({}),
   hooks: z.object({ active: z.array(z.string()).default([]) }).passthrough(),
   skills: z.object({ active: z.array(z.string()).default([]) }).passthrough(),
   tags: z.array(z.string()).default([])
 }).passthrough();
 
 const commandBase = z.object({ commandId: z.string().min(1) });
+const DecomposeSubtaskCommandSchema = z.object({
+  id: z.string().optional(),
+  title: z.string().min(1),
+  needs: z.array(z.string()).default([]),
+  provides: z.array(z.string()).default([]),
+  fileLocks: z.array(z.string()).default([]),
+  semaphores: z.array(SemaphoreSchema).default([]),
+  role: z.string().optional(),
+  agentId: z.string().optional(),
+  agent: z.string().optional()
+}).passthrough().refine((subtask) => Boolean(subtask.role || subtask.agentId || subtask.agent), {
+  message: "task.decompose subtasks require role or agentId",
+  path: ["role"]
+});
 
 export const CommandSchema = z.discriminatedUnion("type", [
   commandBase.extend({
@@ -455,6 +536,110 @@ export const CommandSchema = z.discriminatedUnion("type", [
     rollback: z.string().default("")
   }),
   commandBase.extend({
+    type: z.literal("workflow.create_task_spec"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    kind: z.enum(["full", "mini"]).default("full"),
+    content: z.string().min(1)
+  }),
+  commandBase.extend({
+    type: z.literal("workflow.update_task_spec"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    content: z.string().min(1),
+    reason: z.string().optional()
+  }),
+  commandBase.extend({
+    type: z.literal("workflow.approve_task_spec"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    approvedByRole: z.string().min(1),
+    summary: z.string().min(1)
+  }),
+  commandBase.extend({
+    type: z.literal("workflow.record_handoff"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    fromRole: z.string().min(1),
+    toRole: z.string().min(1),
+    reason: z.string().default(""),
+    context: z.string().default(""),
+    artifacts: z.array(z.string()).default([]),
+    decisions: z.array(z.string()).default([]),
+    openQuestions: z.array(z.string()).default([]),
+    successCriteria: z.array(z.string()).default([]),
+    restrictions: z.array(z.string()).default([]),
+    nextAction: z.string().default("")
+  }),
+  commandBase.extend({
+    type: z.literal("workflow.record_decision"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    role: z.string().min(1),
+    decision: z.string().min(1),
+    rationale: z.string().default(""),
+    confirmedBy: z.string().optional()
+  }),
+  commandBase.extend({
+    type: z.literal("workflow.record_validation"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    criteria: z.array(z.any()).default([]),
+    summary: z.string().default(""),
+    evidence: z.array(z.any()).default([])
+  }),
+  commandBase.extend({
+    type: z.literal("workflow.record_technical_plan"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    summary: z.string().default(""),
+    content: z.string().min(1),
+    required: z.boolean().default(true)
+  }),
+  commandBase.extend({
+    type: z.literal("workflow.record_implementation_tasks"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    tasks: z.array(z.any()).default([]),
+    content: z.string().optional()
+  }),
+  commandBase.extend({
+    type: z.literal("workflow.record_review_report"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    status: z.enum(["passed", "failed", "not_applicable"]).default("passed"),
+    summary: z.string().default(""),
+    findings: z.array(z.any()).default([]),
+    evidence: z.array(z.any()).default([])
+  }),
+  commandBase.extend({
+    type: z.literal("workflow.record_deployment_report"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    status: z.enum(["passed", "failed", "not_applicable"]).default("passed"),
+    summary: z.string().default(""),
+    environment: z.string().optional(),
+    version: z.string().optional(),
+    evidence: z.array(z.any()).default([])
+  }),
+  commandBase.extend({
+    type: z.literal("workflow.record_summary"),
+    taskId: z.string().min(1),
+    runId: z.string().optional(),
+    summary: z.string().min(1),
+    evidence: z.array(z.any()).default([])
+  }),
+  commandBase.extend({
+    type: z.literal("workflow.run_definition_of_ready_gate"),
+    taskId: z.string().min(1),
+    runId: z.string().optional()
+  }),
+  commandBase.extend({
+    type: z.literal("workflow.run_definition_of_done_gate"),
+    taskId: z.string().min(1),
+    runId: z.string().optional()
+  }),
+  commandBase.extend({
     type: z.literal("task.answer_input"),
     taskId: z.string().min(1),
     answer: z.string().min(1),
@@ -510,15 +695,7 @@ export const CommandSchema = z.discriminatedUnion("type", [
     type: z.literal("task.decompose"),
     taskId: z.string().min(1),
     runId: z.string().optional(),
-    subtasks: z.array(z.object({
-      id: z.string().optional(),
-      title: z.string().min(1),
-      needs: z.array(z.string()).default([]),
-      provides: z.array(z.string()).default([]),
-      fileLocks: z.array(z.string()).default([]),
-      role: z.string().optional(),
-      agentId: z.string().optional()
-    }).passthrough()).optional()
+    subtasks: z.array(DecomposeSubtaskCommandSchema).min(1)
   }),
   commandBase.extend({
     type: z.literal("task.merge"),

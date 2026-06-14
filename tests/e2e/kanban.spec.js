@@ -19,6 +19,33 @@ async function createTask(request, title, extra = {}) {
   return (await response.json()).task;
 }
 
+function readySpec(title) {
+  return [
+    "# Task Spec",
+    "",
+    "## Decisions",
+    "",
+    `- Deliver ${title}.`,
+    "",
+    "## Scope",
+    "",
+    "- Validate the agentic workflow.",
+    "",
+    "## Acceptance Criteria",
+    "",
+    "- AC-1: E2E evidence is recorded.",
+    "",
+    "## Dependencies",
+    "",
+    "- None.",
+    "",
+    "## Blocking Questions",
+    "",
+    "Open questions: none resolved.",
+    ""
+  ].join("\n");
+}
+
 test("starts from a clean daemon storage without fixture tasks", async ({ page, request }) => {
   const state = await request.get(`${daemonUrl}/api/state`);
   await expect(state).toBeOK();
@@ -183,9 +210,12 @@ test("task modal exposes tabs and runs the assigned agent", async ({ page, reque
   });
   await page.goto("/");
   await page.getByText(task.title).click();
-  for (const tab of ["resumo", "execucao", "logs", "worktree", "dependencias", "subtasks", "hooks", "eventos", "arquivos"]) {
+  for (const tab of ["resumo", "workflow", "execucao", "logs", "worktree", "dependencias", "subtasks", "hooks", "eventos", "arquivos"]) {
     await page.getByRole("tab", { name: tab }).click();
   }
+  await page.getByRole("tab", { name: "workflow" }).click();
+  await expect(page.getByRole("dialog")).toContainText("Gate Inspector");
+  await expect(page.getByRole("dialog")).toContainText("Evidence Panel");
   await page.getByRole("tab", { name: "execucao" }).click();
   await page.getByRole("button", { name: "Rodar" }).click();
   await expect.poll(async () => {
@@ -196,6 +226,9 @@ test("task modal exposes tabs and runs the assigned agent", async ({ page, reque
     data: { type: "task.decompose", commandId: `e2e-decompose-${Date.now()}`, taskId: task.id }
   });
   await expect(decomposed).toBeOK();
+  await page.getByRole("button", { name: "Cancelar" }).click();
+  await page.reload();
+  await page.locator(`[data-task-id="${task.id}"] .task-open`).click();
   await page.getByRole("tab", { name: "subtasks" }).click();
   await expect(page.getByRole("dialog").getByText(new RegExp(`${task.id}-01 \\[`))).toBeVisible();
   await expect(page.getByRole("dialog")).toContainText(`parent ${task.id}`);
@@ -381,6 +414,7 @@ test("task comments answer agent questions and logs are paginated", async ({ pag
   });
   const task = await createTask(request, `Task comments ${Date.now()}`, {
     column: "inbox",
+    projectTargets: [],
     status: "idle",
     routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } }
   });
@@ -432,6 +466,9 @@ test("settings modal persists scoped settings through the daemon", async ({ page
   const toggle = page.getByLabel("Mostrar progresso no card");
   const nextValue = !(await toggle.isChecked());
   await toggle.click();
+  const planToggle = page.getByLabel("Plano técnico para código");
+  const nextPlanValue = !(await planToggle.isChecked());
+  await planToggle.click();
   await page.getByRole("button", { name: "Salvar alterações" }).click();
   await expect(page.getByRole("dialog")).toBeHidden();
   await page.getByRole("button", { name: "Configurações" }).click();
@@ -448,11 +485,12 @@ test("settings modal persists scoped settings through the daemon", async ({ page
     return {
       progress: body.ui.showProgressOnCard,
       provider: body.ai.defaultProvider,
+      workflowPlan: body.workflow.requireTechnicalPlanForCode,
       enabled: body.ai.enabledProviders.includes("openrouter"),
       providerModel: body.ai.providers.openrouter.defaultModel,
       providerEffort: body.ai.providers.openrouter.defaultEffort
     };
-  }).toEqual({ progress: nextValue, provider: "openrouter", enabled: true, providerModel, providerEffort: "high" });
+  }).toEqual({ progress: nextValue, provider: "openrouter", workflowPlan: nextPlanValue, enabled: true, providerModel, providerEffort: "high" });
 });
 
 test("settings modal edits an agent prompt and persists it", async ({ page, request }) => {
@@ -485,6 +523,12 @@ test("agentic task workflow persists handoffs, human wait, delegation, compactio
   });
   const command = (data) => request.post(`${daemonUrl}/api/command`, { data: { commandId: `e2e-agentic-${Date.now()}-${Math.random()}`, ...data } });
 
+  await expect(await command({ type: "workflow.create_task_spec", taskId: task.id, kind: "full", content: readySpec(task.title) })).toBeOK();
+  await expect(await command({ type: "workflow.approve_task_spec", taskId: task.id, approvedByRole: "product", summary: "Spec E2E aprovada." })).toBeOK();
+  await expect(await command({ type: "workflow.record_technical_plan", taskId: task.id, summary: "Plano E2E.", content: "# Technical Plan\n\n- Executar fluxo agentico com gates P1." })).toBeOK();
+  await expect(await command({ type: "workflow.record_implementation_tasks", taskId: task.id, tasks: ["handoff", "validacao", "review", "delivery"] })).toBeOK();
+  await expect(await command({ type: "workflow.record_handoff", taskId: task.id, fromRole: "manager", toRole: "engineering", reason: "Executar plano P1.", context: "Spec e plano aprovados.", artifacts: ["task-spec.md", "technical-plan.md"], successCriteria: ["AC-1"] })).toBeOK();
+  await expect(await command({ type: "workflow.run_definition_of_ready_gate", taskId: task.id })).toBeOK();
   await expect(await command({ type: "agent.message", message: { scope: "task", taskId: task.id, persona: "product", agentId: "product", text: "Aceite definido.", visibility: "both" } })).toBeOK();
   await expect(await command({ type: "agent.wait_for_persona", taskId: task.id, targetRole: "generalist", question: "Preparar evidência operacional." })).toBeOK();
   const delegated = await command({ type: "agent.delegate_task", taskId: task.id, fromPersona: "generalist", toPersona: "engineering", wait: true, request: "Implementar ajuste técnico." });
@@ -498,8 +542,14 @@ test("agentic task workflow persists handoffs, human wait, delegation, compactio
   await expect(await command({ type: "agent.wait_for_persona", taskId: task.id, targetRole: "quality", question: "Validar aceite." })).toBeOK();
   await expect(await command({ type: "agent.wait_for_persona", taskId: task.id, targetRole: "review", question: "Revisar evidências." })).toBeOK();
   await expect(await command({ type: "chat.compact", taskId: task.id, persona: "product", summary: "Product definiu aceite e delegou execução.", tokenStats: { before: 50, after: 10 } })).toBeOK();
+  await expect(await command({ type: "workflow.record_validation", taskId: task.id, criteria: ["AC-1"], summary: "E2E validado.", evidence: ["playwright agentic workflow"] })).toBeOK();
   await expect(await command({ type: "agent.review_task", taskId: task.id, findings: [], evidence: ["E2E pass"] })).toBeOK();
+  await expect(await command({ type: "workflow.record_review_report", taskId: task.id, status: "passed", summary: "Review E2E aprovado.", evidence: ["E2E pass"] })).toBeOK();
   await expect(await command({ type: "agent.deploy_task", taskId: task.id, command: process.execPath, args: ["-e", "process.stdout.write('released')"], rollback: "none" })).toBeOK();
+  await expect(await command({ type: "workflow.record_deployment_report", taskId: task.id, status: "passed", summary: "Delivery E2E registrado.", environment: "test", evidence: ["released"] })).toBeOK();
+  await expect(await command({ type: "workflow.record_decision", taskId: task.id, role: "manager", decision: "Documentation not applicable for this E2E task.", rationale: "No docs changed." })).toBeOK();
+  await expect(await command({ type: "workflow.record_summary", taskId: task.id, summary: "Fluxo E2E concluido com evidencias P1.", evidence: ["validation-report.md", "review-report.md", "deployment-report.md"] })).toBeOK();
+  await expect(await command({ type: "workflow.run_definition_of_done_gate", taskId: task.id })).toBeOK();
 
   const detail = await request.post(`${daemonUrl}/api/query`, { data: { type: "task.detail", taskId: task.id } });
   await expect(detail).toBeOK();

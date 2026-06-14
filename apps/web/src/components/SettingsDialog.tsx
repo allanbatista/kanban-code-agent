@@ -16,6 +16,23 @@ type AgentDraft = {
   prompt: string;
 };
 
+type WorkflowDraft = NonNullable<AppSettings["workflow"]>;
+
+const defaultWorkflowDraft: WorkflowDraft = {
+  requireSpec: true,
+  allowMiniSpec: true,
+  requireTechnicalPlanForCode: true,
+  requireQaBeforeReview: true,
+  requireReviewBeforeDone: true,
+  requireDeploymentEvidence: true,
+  requireDocumentationDecision: true,
+  requireSummaryBeforeDone: true,
+  requireUserSpecApproval: false,
+  preventAutomaticDeployDone: true,
+  sandboxPolicy: "prompt_only",
+  retryPolicy: { maxAttempts: 2, timeoutMs: 120000 }
+};
+
 export function SettingsDialog({
   open,
   settings,
@@ -45,6 +62,8 @@ export function SettingsDialog({
   const currentEnabledProviders = settings?.ai?.enabledProviders || [];
   const currentProviderDefaults = settings?.ai?.providers || {};
   const currentGlobalMaxParallelTasks = settings?.runtime?.maxParallelTasks ?? 1000;
+  const currentWorkflow = normalizeWorkflowDraft(settings?.workflow);
+  const currentWorkflowKey = JSON.stringify(currentWorkflow);
   const [showProgress, setShowProgress] = useState(currentShowProgress);
   const [taskTextScale, setTaskTextScale] = useState(currentTaskTextScale);
   const [taskFontFamily, setTaskFontFamily] = useState(currentTaskFontFamily);
@@ -55,6 +74,7 @@ export function SettingsDialog({
   const [enabledProviders, setEnabledProviders] = useState<string[]>(currentEnabledProviders);
   const [providerDefaults, setProviderDefaults] = useState<Record<string, { defaultModel?: string; defaultEffort?: AgentEffort }>>(providerDefaultsToDraft(currentProviderDefaults));
   const [globalMaxParallelTasks, setGlobalMaxParallelTasks] = useState(currentGlobalMaxParallelTasks);
+  const [workflowDraft, setWorkflowDraft] = useState<WorkflowDraft>(currentWorkflow);
   const [providerModels, setProviderModels] = useState<Record<string, ProviderModel[]>>({});
   const [providerModelLoading, setProviderModelLoading] = useState<Record<string, boolean>>({});
   const [selectedAgentId, setSelectedAgentId] = useState("assistant");
@@ -78,6 +98,7 @@ export function SettingsDialog({
     || defaultModel !== currentDefaultModel
     || defaultEffort !== currentDefaultEffort
     || globalMaxParallelTasks !== currentGlobalMaxParallelTasks
+    || JSON.stringify(workflowDraft) !== currentWorkflowKey
     || enabledProviders.join("\n") !== currentEnabledProviders.join("\n")
     || JSON.stringify(providerDefaults) !== JSON.stringify(providerDefaultsToDraft(currentProviderDefaults));
   const hasChanges = appChanged || changedAgents.length > 0;
@@ -92,11 +113,12 @@ export function SettingsDialog({
     setDefaultModel(currentDefaultModel);
     setDefaultEffort(currentDefaultEffort);
     setGlobalMaxParallelTasks(currentGlobalMaxParallelTasks);
+    setWorkflowDraft(currentWorkflow);
     setEnabledProviders(currentEnabledProviders);
     setProviderDefaults(providerDefaultsToDraft(currentProviderDefaults));
     setAgentDrafts(Object.fromEntries(agents.map((agent) => [agent.id, agentToDraft(agent)])));
     setSelectedAgentId((current) => agents.some((agent) => agent.id === current) ? current : agents[0]?.id || "assistant");
-  }, [open, hasChanges, currentShowProgress, currentTaskTextScale, currentTaskFontFamily, currentAllowNetwork, currentDefaultProvider, currentDefaultModel, currentDefaultEffort, currentGlobalMaxParallelTasks, currentEnabledProviders, currentProviderDefaults, agents]);
+  }, [open, hasChanges, currentShowProgress, currentTaskTextScale, currentTaskFontFamily, currentAllowNetwork, currentDefaultProvider, currentDefaultModel, currentDefaultEffort, currentGlobalMaxParallelTasks, currentWorkflowKey, currentEnabledProviders, currentProviderDefaults, agents]);
 
   function resetDrafts() {
     setShowProgress(currentShowProgress);
@@ -107,6 +129,7 @@ export function SettingsDialog({
     setDefaultModel(currentDefaultModel);
     setDefaultEffort(currentDefaultEffort);
     setGlobalMaxParallelTasks(currentGlobalMaxParallelTasks);
+    setWorkflowDraft(currentWorkflow);
     setEnabledProviders(currentEnabledProviders);
     setProviderDefaults(providerDefaultsToDraft(currentProviderDefaults));
     setAgentDrafts(Object.fromEntries(agents.map((agent) => [agent.id, agentToDraft(agent)])));
@@ -157,6 +180,10 @@ export function SettingsDialog({
     }));
   }
 
+  function updateWorkflowDraft(patch: Partial<WorkflowDraft>) {
+    setWorkflowDraft((current) => ({ ...current, ...patch, retryPolicy: { ...(current.retryPolicy || {}), ...(patch.retryPolicy || {}) } }));
+  }
+
   function handleOpenChange(nextOpen: boolean) {
     if (!nextOpen) resetDrafts();
     onOpenChange(nextOpen);
@@ -170,6 +197,7 @@ export function SettingsDialog({
           ui: { showProgressOnCard: showProgress, taskTextScale, taskFontFamily },
           safety: { allowNetwork },
           runtime: { maxParallelTasks: globalMaxParallelTasks },
+          workflow: workflowDraft,
           ai: { defaultProvider, defaultModel, defaultEffort, enabledProviders, providers: providerDefaults }
         });
       }
@@ -200,6 +228,7 @@ export function SettingsDialog({
               <a className="settings-nav" href="#settings-interface">Interface</a>
               <a className="settings-nav" href="#settings-security">Segurança</a>
               <a className="settings-nav" href="#settings-runtime">Runtime</a>
+              <a className="settings-nav" href="#settings-workflow">Workflow</a>
               <a className="settings-nav" href="#settings-providers">Providers</a>
               <a className="settings-nav" href="#settings-agents">Agents</a>
             </nav>
@@ -265,6 +294,68 @@ export function SettingsDialog({
                   <div className="metric"><strong>{globalMaxParallelTasks}</strong><span>max tasks</span></div>
                   <div className="metric"><strong>{agents.length}</strong><span>agents</span></div>
                   <div className="metric"><strong>{Object.keys(settings?.runtime?.projectTokens || {}).length}</strong><span>projetos</span></div>
+                </div>
+              </section>
+
+              <section className="settings-section" id="settings-workflow">
+                <SectionHead title="Workflow" description="Policies para gates, artefatos e hardening." />
+                <SettingRow label="Exigir spec" description="Toda task precisa de task-spec.md ou Mini Spec antes de execução técnica.">
+                  <Switch.Root aria-label="Exigir spec" className="switch-root" checked={workflowDraft.requireSpec ?? true} onCheckedChange={(value) => updateWorkflowDraft({ requireSpec: value })}>
+                    <Switch.Thumb className="switch-thumb" />
+                  </Switch.Root>
+                </SettingRow>
+                <SettingRow label="Permitir Mini Spec" description="Permite specs curtas para tarefas simples sem pular DoD.">
+                  <Switch.Root aria-label="Permitir Mini Spec" className="switch-root" checked={workflowDraft.allowMiniSpec ?? true} onCheckedChange={(value) => updateWorkflowDraft({ allowMiniSpec: value })}>
+                    <Switch.Thumb className="switch-thumb" />
+                  </Switch.Root>
+                </SettingRow>
+                <SettingRow label="Plano técnico para código" description="DoR exige technical-plan.md em trabalho técnico complexo.">
+                  <Switch.Root aria-label="Plano técnico para código" className="switch-root" checked={workflowDraft.requireTechnicalPlanForCode ?? true} onCheckedChange={(value) => updateWorkflowDraft({ requireTechnicalPlanForCode: value })}>
+                    <Switch.Thumb className="switch-thumb" />
+                  </Switch.Root>
+                </SettingRow>
+                <SettingRow label="QA antes de review" description="Review depende de validation-report.md.">
+                  <Switch.Root aria-label="QA antes de review" className="switch-root" checked={workflowDraft.requireQaBeforeReview ?? true} onCheckedChange={(value) => updateWorkflowDraft({ requireQaBeforeReview: value })}>
+                    <Switch.Thumb className="switch-thumb" />
+                  </Switch.Root>
+                </SettingRow>
+                <SettingRow label="Review antes de Done" description="DoD exige review-report.md ou evidência equivalente.">
+                  <Switch.Root aria-label="Review antes de Done" className="switch-root" checked={workflowDraft.requireReviewBeforeDone ?? true} onCheckedChange={(value) => updateWorkflowDraft({ requireReviewBeforeDone: value })}>
+                    <Switch.Thumb className="switch-thumb" />
+                  </Switch.Root>
+                </SettingRow>
+                <SettingRow label="Evidência de deploy" description="DoD exige deployment-report.md, deployment real ou N/A explícito.">
+                  <Switch.Root aria-label="Evidência de deploy" className="switch-root" checked={workflowDraft.requireDeploymentEvidence ?? true} onCheckedChange={(value) => updateWorkflowDraft({ requireDeploymentEvidence: value })}>
+                    <Switch.Thumb className="switch-thumb" />
+                  </Switch.Root>
+                </SettingRow>
+                <SettingRow label="Decisão de documentação" description="DoD exige decisão registrada sobre docs.">
+                  <Switch.Root aria-label="Decisão de documentação" className="switch-root" checked={workflowDraft.requireDocumentationDecision ?? true} onCheckedChange={(value) => updateWorkflowDraft({ requireDocumentationDecision: value })}>
+                    <Switch.Thumb className="switch-thumb" />
+                  </Switch.Root>
+                </SettingRow>
+                <SettingRow label="Resumo antes de Done" description="DoD exige summary.md.">
+                  <Switch.Root aria-label="Resumo antes de Done" className="switch-root" checked={workflowDraft.requireSummaryBeforeDone ?? true} onCheckedChange={(value) => updateWorkflowDraft({ requireSummaryBeforeDone: value })}>
+                    <Switch.Thumb className="switch-thumb" />
+                  </Switch.Root>
+                </SettingRow>
+                <div className="settings-form-grid three">
+                  <div className="field">
+                    <label htmlFor="settings-workflow-sandbox">Sandbox policy</label>
+                    <select id="settings-workflow-sandbox" className="input settings-select" value={workflowDraft.sandboxPolicy || "prompt_only"} onChange={(event) => updateWorkflowDraft({ sandboxPolicy: event.target.value as WorkflowDraft["sandboxPolicy"] })}>
+                      <option value="prompt_only">prompt_only</option>
+                      <option value="worktree_only">worktree_only</option>
+                      <option value="isolated">isolated</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="settings-workflow-retries">Retry attempts</label>
+                    <input id="settings-workflow-retries" className="input" type="number" min={0} value={workflowDraft.retryPolicy?.maxAttempts ?? 2} onChange={(event) => updateWorkflowDraft({ retryPolicy: { maxAttempts: Math.max(0, Number(event.target.value) || 0) } })} />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="settings-workflow-timeout">Timeout ms</label>
+                    <input id="settings-workflow-timeout" className="input" type="number" min={1000} step={1000} value={workflowDraft.retryPolicy?.timeoutMs ?? 120000} onChange={(event) => updateWorkflowDraft({ retryPolicy: { timeoutMs: Math.max(1000, Number(event.target.value) || 1000) } })} />
+                  </div>
                 </div>
               </section>
 
@@ -501,6 +592,14 @@ function formatTokens(value: number) {
 function providerDefaultsToDraft(value: AppSettings["ai"] extends infer Ai ? Ai extends { providers?: infer Providers } ? Providers : never : never) {
   const source = value && typeof value === "object" ? value as Record<string, { defaultModel?: string; defaultEffort?: AgentEffort }> : {};
   return Object.fromEntries(Object.entries(source).map(([id, config]) => [id, { defaultModel: config?.defaultModel || "", defaultEffort: config?.defaultEffort || "medium" as AgentEffort }]));
+}
+
+function normalizeWorkflowDraft(value?: AppSettings["workflow"]): WorkflowDraft {
+  return {
+    ...defaultWorkflowDraft,
+    ...(value || {}),
+    retryPolicy: { ...defaultWorkflowDraft.retryPolicy, ...(value?.retryPolicy || {}) }
+  };
 }
 
 function SettingRow({ label, description, children }: { label: string; description?: string; children: React.ReactNode }) {

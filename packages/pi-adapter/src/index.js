@@ -611,6 +611,119 @@ export function buildTaskAgentTools(context, { allowedTools } = {}) {
       toCommand: (params) => base("agent.emit_artifact", { path: params.path, content: params.content || "" })
     }),
     taskTool(context, {
+      name: "create_task_spec",
+      label: "Create task spec",
+      description: "Create the official Product task-spec.md artifact.",
+      parameters: TObject({ kind: TOptional(TString({ default: "full" })), content: TString() }),
+      toCommand: (params) => base("workflow.create_task_spec", { kind: params.kind === "mini" ? "mini" : "full", content: params.content || "" })
+    }),
+    taskTool(context, {
+      name: "update_task_spec",
+      label: "Update task spec",
+      description: "Update task-spec.md when Product changes the contract.",
+      parameters: TObject({ content: TString(), reason: TOptional(TString()) }),
+      toCommand: (params) => base("workflow.update_task_spec", { content: params.content || "", reason: params.reason || "" })
+    }),
+    taskTool(context, {
+      name: "approve_task_spec",
+      label: "Approve task spec",
+      description: "Approve task-spec.md and return the task to Manager for Definition of Ready.",
+      parameters: TObject({ approvedByRole: TOptional(TString({ default: "product" })), summary: TString() }),
+      toCommand: (params) => base("workflow.approve_task_spec", { approvedByRole: params.approvedByRole || context.role || "product", summary: params.summary || "" })
+    }),
+    taskTool(context, {
+      name: "record_handoff",
+      label: "Record handoff",
+      description: "Persist a structured handoff between workflow roles.",
+      parameters: TObject({
+        fromRole: TOptional(TString()),
+        toRole: TString(),
+        reason: TOptional(TString()),
+        context: TOptional(TString()),
+        artifacts: TOptional(TArray(TString())),
+        decisions: TOptional(TArray(TString())),
+        openQuestions: TOptional(TArray(TString())),
+        successCriteria: TOptional(TArray(TString())),
+        restrictions: TOptional(TArray(TString())),
+        nextAction: TOptional(TString())
+      }),
+      toCommand: (params) => base("workflow.record_handoff", {
+        fromRole: params.fromRole || context.role || context.agentId,
+        toRole: params.toRole,
+        reason: params.reason || "",
+        context: params.context || "",
+        artifacts: params.artifacts || [],
+        decisions: params.decisions || [],
+        openQuestions: params.openQuestions || [],
+        successCriteria: params.successCriteria || [],
+        restrictions: params.restrictions || [],
+        nextAction: params.nextAction || ""
+      })
+    }),
+    taskTool(context, {
+      name: "record_decision",
+      label: "Record decision",
+      description: "Append a workflow decision to decision-log.md.",
+      parameters: TObject({ role: TOptional(TString()), decision: TString(), rationale: TOptional(TString()), confirmedBy: TOptional(TString()) }),
+      toCommand: (params) => base("workflow.record_decision", { role: params.role || context.role || context.agentId, decision: params.decision || "", rationale: params.rationale || "", confirmedBy: params.confirmedBy })
+    }),
+    taskTool(context, {
+      name: "record_validation",
+      label: "Record validation",
+      description: "Write validation-report.md with acceptance-criterion-to-evidence mapping.",
+      parameters: TObject({ criteria: TOptional(TArray(TString())), summary: TOptional(TString()), evidence: TOptional(TArray(TString())) }),
+      toCommand: (params) => base("workflow.record_validation", { criteria: params.criteria || [], summary: params.summary || "", evidence: params.evidence || [] })
+    }),
+    taskTool(context, {
+      name: "record_technical_plan",
+      label: "Record technical plan",
+      description: "Write the formal technical-plan.md artifact required before complex technical execution.",
+      parameters: TObject({ summary: TOptional(TString()), content: TString(), required: TOptional({ type: "boolean" }) }),
+      toCommand: (params) => base("workflow.record_technical_plan", { summary: params.summary || "", content: params.content || "", required: params.required !== false })
+    }),
+    taskTool(context, {
+      name: "record_implementation_tasks",
+      label: "Record implementation tasks",
+      description: "Write implementation-tasks.md with execution steps or subtask mapping.",
+      parameters: TObject({ tasks: TOptional(TArray(TString())), content: TOptional(TString()) }),
+      toCommand: (params) => base("workflow.record_implementation_tasks", { tasks: params.tasks || [], content: params.content || "" })
+    }),
+    taskTool(context, {
+      name: "record_review_report",
+      label: "Record review report",
+      description: "Write review-report.md with review status, findings, and evidence.",
+      parameters: TObject({ status: TOptional(TString({ default: "passed" })), summary: TOptional(TString()), findings: TOptional(TArray(TString())), evidence: TOptional(TArray(TString())) }),
+      toCommand: (params) => base("workflow.record_review_report", { status: ["failed", "not_applicable"].includes(params.status) ? params.status : "passed", summary: params.summary || "", findings: params.findings || [], evidence: params.evidence || [] })
+    }),
+    taskTool(context, {
+      name: "record_deployment_report",
+      label: "Record deployment report",
+      description: "Write deployment-report.md with delivery status or an explicit not-applicable decision.",
+      parameters: TObject({ status: TOptional(TString({ default: "passed" })), summary: TOptional(TString()), environment: TOptional(TString()), version: TOptional(TString()), evidence: TOptional(TArray(TString())) }),
+      toCommand: (params) => base("workflow.record_deployment_report", { status: ["failed", "not_applicable"].includes(params.status) ? params.status : "passed", summary: params.summary || "", environment: params.environment || "", version: params.version || "", evidence: params.evidence || [] })
+    }),
+    taskTool(context, {
+      name: "record_summary",
+      label: "Record summary",
+      description: "Write summary.md before Manager runs Definition of Done.",
+      parameters: TObject({ summary: TString(), evidence: TOptional(TArray(TString())) }),
+      toCommand: (params) => base("workflow.record_summary", { summary: params.summary || "", evidence: params.evidence || [] })
+    }),
+    taskTool(context, {
+      name: "run_definition_of_ready_gate",
+      label: "Run Definition of Ready",
+      description: "Run the Manager Definition of Ready gate before Engineering.",
+      parameters: TObject({}),
+      toCommand: () => base("workflow.run_definition_of_ready_gate")
+    }),
+    taskTool(context, {
+      name: "run_definition_of_done_gate",
+      label: "Run Definition of Done",
+      description: "Run the Manager Definition of Done gate before Done.",
+      parameters: TObject({}),
+      toCommand: () => base("workflow.run_definition_of_done_gate")
+    }),
+    taskTool(context, {
       name: "spawn_subtasks",
       label: "Spawn subtasks",
       description: "Create DAG subtasks for the current master task.",
@@ -623,11 +736,11 @@ export function buildTaskAgentTools(context, { allowedTools } = {}) {
           needs: TOptional(TArray(TString())),
           provides: TOptional(TArray(TString())),
           fileLocks: TOptional(TArray(TString())),
-          role: TOptional(TString({ description: "Canonical role: architecture, engineering, quality, review, etc." })),
+          role: TString({ description: "Canonical role that must execute this subtask: product, design, architecture, engineering, quality, review, deployment, documentation, generalist, manager, etc." }),
           agentId: TOptional(TString({ description: "Legacy alias; use role for new subtasks." }))
-        }))
+        }), { minItems: 1 })
       }),
-      toCommand: (params) => base("task.decompose", { subtasks: params.subtasks || [] })
+      toCommand: (params) => base("task.decompose", { subtasks: params.subtasks })
     }),
     taskTool(context, {
       name: "run_command",
@@ -788,7 +901,7 @@ export async function startOpenAICompatibleSession({ providerConfig, model, task
   const toolMap = new Map(customTools.map((tool) => [tool.name, tool]));
   const messages = [{ role: "user", content: String(prompt || task?.title || "") }];
   const events = [];
-  const terminalTools = new Set(["complete_task", "request_user_input", "report_blocker", "spawn_subtasks", "wait_for_persona", "wait_for_human", "delegate_task", "review_task", "deploy_task"]);
+  const terminalTools = new Set(["complete_task", "request_user_input", "report_blocker", "spawn_subtasks", "wait_for_persona", "wait_for_human", "delegate_task", "review_task", "deploy_task", "create_task_spec", "approve_task_spec", "record_handoff", "record_decision", "record_validation", "record_technical_plan", "record_implementation_tasks", "record_review_report", "record_deployment_report", "record_summary", "run_definition_of_ready_gate", "run_definition_of_done_gate"]);
   let promptSent = false;
   let terminal = false;
   const contextWindow = modelContextWindow(providerConfig, model);

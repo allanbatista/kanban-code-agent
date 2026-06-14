@@ -1,8 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { CommandBus } from "@kca/application/command-bus";
 import { QueryBus } from "@kca/application/query-bus";
-import { managerRoutingContext } from "@kca/agent-runtime";
 import { createBoardService } from "@kca/board-service";
 import { roleById } from "@kca/core/roles";
 import { appendJsonl, getTask, listTasks, paths, readCommandResult, recordCommandResult, updateSettings } from "@kca/fsdb";
@@ -17,6 +14,22 @@ import { mergeTaskWorkflow } from "./merge-workflow-service.js";
 import { delegateTaskWorkflow, waitForHumanWorkflow, waitForPersonaWorkflow } from "./persona-workflow-service.js";
 import { createRunnabilityService } from "./runnability-service.js";
 import { schedulerTick } from "./scheduler.js";
+import {
+  approveTaskSpecWorkflow,
+  createTaskSpecWorkflow,
+  latestTask,
+  recordDecisionWorkflow,
+  recordHandoffWorkflow,
+  recordDeploymentReportWorkflow,
+  recordImplementationTasksWorkflow,
+  recordReviewReportWorkflow,
+  recordSummaryWorkflow,
+  recordTechnicalPlanWorkflow,
+  recordValidationWorkflow,
+  runDefinitionOfDoneGateWorkflow,
+  runDefinitionOfReadyGateWorkflow,
+  updateTaskSpecWorkflow
+} from "./spec-workflow-service.js";
 import { agentChatWorkflow } from "./agent-chat-workflow-service.js";
 import { completeTaskWorkflow, emitArtifactWorkflow, interruptTaskWorkflow, reportBlockerWorkflow, requestUserInputWorkflow, runCommandWorkflow, runTaskWorkflow, stepWorkflow } from "./task-agent-workflow-service.js";
 import { decomposeTaskWorkflow } from "./task-decomposition-service.js";
@@ -60,6 +73,19 @@ export function shouldDrainSchedulerAfterCommand(command) {
     "agent.delegate_task",
     "agent.review_task",
     "agent.deploy_task",
+    "workflow.create_task_spec",
+    "workflow.update_task_spec",
+    "workflow.approve_task_spec",
+    "workflow.record_handoff",
+    "workflow.record_decision",
+    "workflow.record_validation",
+    "workflow.record_technical_plan",
+    "workflow.record_implementation_tasks",
+    "workflow.record_review_report",
+    "workflow.record_deployment_report",
+    "workflow.record_summary",
+    "workflow.run_definition_of_ready_gate",
+    "workflow.run_definition_of_done_gate",
     "role.route_task",
     "settings.update"
   ].includes(command.type);
@@ -91,51 +117,6 @@ async function requiredTask(taskId, root) {
   const current = await getTask(taskId, root);
   if (!current) throw new Error(`Task not found: ${taskId}`);
   return current;
-}
-
-async function taskTextFiles(taskId, root) {
-  const p = paths(root);
-  const read = async (file) => {
-    try {
-      return await readFile(join(p.tasks, taskId, file), "utf8");
-    } catch {
-      return "";
-    }
-  };
-  return { description: await read("description.md"), acceptance: await read("acceptance.md") };
-}
-
-async function redirectManagerDecomposeToProduct(command, current, root) {
-  if (!command.runId || (current.routing?.currentRole || current.routing?.currentAgent) !== "manager") return null;
-  const { description, acceptance } = await taskTextFiles(current.id, root);
-  const routing = managerRoutingContext(current, description, acceptance);
-  if (routing.managerMode !== "intake" || routing.targetRole !== "product") return null;
-  const question = [
-    `Define the product contract for ${current.id} before decomposition.`,
-    routing.reason,
-    "Persist verifiable acceptance criteria in `acceptance.md`, then choose the next execution path."
-  ].join("\n\n");
-  const result = await waitForPersonaWorkflow({
-    type: "agent.wait_for_persona",
-    commandId: command.commandId,
-    taskId: command.taskId,
-    runId: command.runId,
-    targetRole: "product",
-    question,
-    expectedArtifact: "acceptance.md"
-  }, current, root);
-  await appendJsonl(`${paths(root).tasks}/${current.id}/events.jsonl`, {
-    ts: new Date().toISOString(),
-    type: "task.decompose.redirected",
-    actor: "orchestrator",
-    taskId: current.id,
-    runId: command.runId,
-    fromRole: "manager",
-    toRole: "product",
-    reason: routing.reason,
-    attemptedSubtasks: command.subtasks?.length || 0
-  });
-  return { ...result, redirected: true, guard: { type: "manager_intake_requires_product", reason: routing.reason } };
 }
 
 function createWorkflowCommandHandlers(root) {
@@ -273,6 +254,32 @@ function createWorkflowCommandHandlers(root) {
     return deployTaskGate(command, await requiredTask(command.taskId, root), root);
     },
 
+    "workflow.create_task_spec": async (command) => createTaskSpecWorkflow(command, await latestTask(command.taskId, root), root),
+
+    "workflow.update_task_spec": async (command) => updateTaskSpecWorkflow(command, await latestTask(command.taskId, root), root),
+
+    "workflow.approve_task_spec": async (command) => approveTaskSpecWorkflow(command, await latestTask(command.taskId, root), root),
+
+    "workflow.record_handoff": async (command) => recordHandoffWorkflow(command, await latestTask(command.taskId, root), root),
+
+    "workflow.record_decision": async (command) => recordDecisionWorkflow(command, await latestTask(command.taskId, root), root),
+
+    "workflow.record_validation": async (command) => recordValidationWorkflow(command, await latestTask(command.taskId, root), root),
+
+    "workflow.record_technical_plan": async (command) => recordTechnicalPlanWorkflow(command, await latestTask(command.taskId, root), root),
+
+    "workflow.record_implementation_tasks": async (command) => recordImplementationTasksWorkflow(command, await latestTask(command.taskId, root), root),
+
+    "workflow.record_review_report": async (command) => recordReviewReportWorkflow(command, await latestTask(command.taskId, root), root),
+
+    "workflow.record_deployment_report": async (command) => recordDeploymentReportWorkflow(command, await latestTask(command.taskId, root), root),
+
+    "workflow.record_summary": async (command) => recordSummaryWorkflow(command, await latestTask(command.taskId, root), root),
+
+    "workflow.run_definition_of_ready_gate": async (command) => runDefinitionOfReadyGateWorkflow(command, await latestTask(command.taskId, root), root),
+
+    "workflow.run_definition_of_done_gate": async (command) => runDefinitionOfDoneGateWorkflow(command, await latestTask(command.taskId, root), root),
+
     "agent.step": (command) => stepWorkflow(command, root, handleCommand),
 
     "agent.emit_artifact": (command) => emitArtifactWorkflow(command, root),
@@ -283,8 +290,7 @@ function createWorkflowCommandHandlers(root) {
 
     "task.decompose": async (command) => {
     const current = await requiredTask(command.taskId, root);
-    const redirected = await redirectManagerDecomposeToProduct(command, current, root);
-    return redirected || decomposeTaskWorkflow(command, current, root);
+    return decomposeTaskWorkflow(command, current, root);
     },
 
     "task.merge": async (command) => {

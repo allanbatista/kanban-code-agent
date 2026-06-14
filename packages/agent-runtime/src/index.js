@@ -16,123 +16,8 @@ export function createRunId(taskId, agentId) {
 function toolsForAgent(agentConfig) {
   const tools = agentConfig?.tools;
   const resolved = Array.isArray(tools) ? tools : [...(tools?.builtin || []), ...(tools?.custom || [])];
-  const required = agentConfig?.id === "manager" ? ["wait_for_persona", "delegate_task", "spawn_subtasks"] : [];
+  const required = ["wait_for_persona", "delegate_task", "spawn_subtasks"];
   return [...new Set([...resolved, ...required])];
-}
-
-function includesAny(text, patterns) {
-  return patterns.some((pattern) => pattern.test(text));
-}
-
-function normalizeText(value) {
-  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-}
-
-function acceptanceIsPlaceholder(acceptance = "") {
-  const normalized = normalizeText(acceptance).replace(/[#\-[\]\s.]/g, " ").replace(/\s+/g, " ").trim();
-  return !normalized
-    || normalized === "criterios de aceite criterio verificavel de pronto"
-    || normalized === "criterio verificavel de pronto"
-    || /criterio verificavel de pronto/.test(normalized)
-    || /funciona de ponta a ponta com evidencia/.test(normalized);
-}
-
-export function managerRoutingContext(task, description = "", acceptance = "") {
-  const text = `${task.title || ""}\n${description}\n${acceptance}`.toLowerCase();
-  const requestText = `${task.title || ""}\n${description}`.toLowerCase();
-  const code = includesAny(text, [/\b(api|bug|fix|corrigir|implementar|codigo|c[oó]digo|teste|refactor|frontend|backend|endpoint|schema|migra)/i]);
-  const architecture = includesAny(text, [/\b(api|endpoint|schema|migra|arquitet|contrato|integrac[aã]o|database|banco|refactor|cross-cutting)/i]);
-  const design = includesAny(text, [/\b(ui|ux|visual|layout|tela|design|figma|acessibilidade|interface)/i]);
-  const deploy = includesAny(text, [/\b(deploy|release|publicar|rollback|produ[cç][aã]o)/i]);
-  const review = includesAny(text, [/\b(review|revisar|merge|pull request|diff)\b/i, /\bpr\b/i]);
-  const quality = includesAny(text, [/\b(validar|qa|quality|e2e|regress[aã]o|testar)/i]);
-  const product = includesAny(requestText, [/\b(prd|roadmap|escopo|persona de usu[aá]rio|crit[eé]rios de aceite|requisito|valor de produto)/i]);
-  const operational = includesAny(text, [/\b(pesquis|research|listar|resum|format|emit|colet|analis|relat[oó]rio|documentar)/i]);
-  const missingAcceptance = acceptanceIsPlaceholder(acceptance);
-  const directOperational = operational && !code && !design && !product;
-  let targetRole = "generalist";
-  let classification = "direct_operational";
-  let order = "generalist -> done";
-  if (missingAcceptance && !directOperational) {
-    targetRole = "product";
-    classification = "contract_missing";
-    order = "product -> next persona";
-  } else if (deploy) {
-    targetRole = "deployment";
-    classification = "deployment";
-    order = "deployment -> done";
-  } else if (review) {
-    targetRole = "review";
-    classification = "review";
-    order = "review -> deployment";
-  } else if (quality) {
-    targetRole = "quality";
-    classification = "validation";
-    order = "quality -> review";
-  } else if (code && architecture) {
-    targetRole = "architecture";
-    classification = "technical_architecture";
-    order = design ? "design -> architecture -> engineering -> quality -> review" : "architecture -> engineering -> quality -> review";
-  } else if (code) {
-    targetRole = "engineering";
-    classification = "technical_implementation";
-    order = design ? "design -> engineering -> quality -> review" : "engineering -> quality -> review";
-  } else if (design) {
-    targetRole = "design";
-    classification = "design";
-    order = "design -> engineering";
-  } else if (product && !operational) {
-    targetRole = "product";
-    classification = "product_discovery";
-    order = "product -> design/engineering";
-  }
-  const managerMode = (missingAcceptance && !directOperational) || classification === "product_discovery"
-    ? "intake"
-    : ["deployment", "review", "validation"].includes(classification)
-      ? "progress_control"
-      : "execution_planning";
-  return {
-    classification,
-    managerMode,
-    targetRole,
-    recommendedTool: "wait_for_persona",
-    order,
-    direct: directOperational,
-    reason: missingAcceptance
-      ? directOperational
-        ? "Direct research/listing/formatting work is concrete enough for generalist; complete to done with concise source/date evidence."
-        : "Acceptance is missing or placeholder; product must define the contract before execution, QA, or review."
-      : directOperational
-        ? "Direct research/listing/formatting work with concrete acceptance should go to generalist."
-        : "Route by dominant work type; use product only when product decisions are missing."
-  };
-}
-
-function managerRoutingSection(context) {
-  if (!context) return "";
-  return [
-    "# Manager Routing Context",
-    `classification: ${context.classification}`,
-    `manager_mode: ${context.managerMode}`,
-    `recommended_tool: ${context.recommendedTool}`,
-    `target_persona: ${context.targetRole}`,
-    `suggested_order: ${context.order}`,
-    `direct_task: ${context.direct ? "yes" : "no"}`,
-    `reason: ${context.reason}`,
-    "Rules:",
-    "- manager_mode=intake: route unclear work to product or human until the product contract is explicit.",
-    "- manager_mode=contract_review: compare the product contract with the original user request before execution.",
-    "- manager_mode=execution_planning: define phases, persona owners, dependencies, checkpoints, and optionally emit artifacts/execution-plan.md.",
-    "- manager_mode=progress_control: process blockers/results and choose the next incremental action.",
-    "- Use wait_for_persona for single-persona handoff.",
-    "- If acceptance is missing or placeholder, route to product before execution, quality, or review.",
-    "- Use product only when product intent, scope, value, or acceptance is missing.",
-    "- Use architecture for complex code/API/schema/migration planning before engineering.",
-    "- Use quality for functional validation; use review only for code/diff merge readiness.",
-    "- Use spawn_subtasks only when independent work can run in parallel with explicit needs/provides.",
-    "- For direct_task=yes, route to generalist and ask it to complete to done with concise source/date evidence; no more than two live-data command attempts before done/block; do not send to product, engineering, quality, or review unless there is a real blocker.",
-    "- Text alone does not finish a run; call complete_task, report_blocker, wait_for_persona, delegate_task, or request_user_input."
-  ].join("\n");
 }
 
 function formatChatMessages(messages = []) {
@@ -164,6 +49,8 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
   let description = "";
   let acceptance = "";
   let planning = "";
+  let taskSpec = "";
+  let validationReport = "";
   try {
     description = await readFile(join(p.tasks, task.id, "description.md"), "utf8");
   } catch {}
@@ -173,7 +60,12 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
   try {
     planning = await readFile(join(p.tasks, task.id, "planning.yaml"), "utf8");
   } catch {}
-  const managerRouting = persona === "manager" ? managerRoutingContext(task, description, acceptance) : null;
+  try {
+    taskSpec = await readFile(join(p.tasks, task.id, "task-spec.md"), "utf8");
+  } catch {}
+  try {
+    validationReport = await readFile(join(p.tasks, task.id, "validation-report.md"), "utf8");
+  } catch {}
   const messages = await readChatHistory(root, { scope: "task", taskId: task.id, persona, limit: 200 });
   const tools = toolsForAgent(agentConfig).map((name) => ({ name }));
   const settings = await readSettings(root);
@@ -193,8 +85,7 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
       AGENT_RESPONSE_POLICY,
       `Persona: ${persona}.`,
       role?.gate ? `Gate: ${role.gate}` : "",
-      instructions,
-      managerRoutingSection(managerRouting)
+      instructions
     ].filter(Boolean).join("\n")
   };
   const taskContext = {
@@ -214,13 +105,19 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
       acceptance,
       "planning:",
       planning,
+      "workflow:",
+      JSON.stringify(task.workflow || {}),
+      "task-spec:",
+      taskSpec,
+      "validation-report:",
+      validationReport,
       `dependencies: ${JSON.stringify(task.dependencies || {})}`,
       `worktree: ${JSON.stringify(task.worktree || {})}`,
       "scope_note: The current implementation communicates this scope in the prompt; host-level filesystem sandboxing remains pending."
     ].join("\n")
   };
   const toolcalls = messages.flatMap((message) => [...(message.toolCalls || []), ...(message.toolResults || [])]);
-  const sourceRefs = [`tasks/${task.id}/task.yaml`, `tasks/${task.id}/description.md`, `tasks/${task.id}/acceptance.md`, `tasks/${task.id}/planning.yaml`, `tasks/${task.id}/chats/${persona}/active.jsonl`];
+  const sourceRefs = [`tasks/${task.id}/task.yaml`, `tasks/${task.id}/description.md`, `tasks/${task.id}/task-spec.md`, `tasks/${task.id}/acceptance.md`, `tasks/${task.id}/validation-report.md`, `tasks/${task.id}/planning.yaml`, `tasks/${task.id}/chats/${persona}/active.jsonl`];
   const hashInput = JSON.stringify({ system, taskContext, messages, toolcalls, tools, providerId, modelName, modelEffort });
   const result = {
     schema: "kanban-code-agent/agent-chat-build@1",
@@ -237,7 +134,6 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
     messages,
     toolcalls,
     tools,
-    managerRouting,
     sourceRefs,
     promptHash: createHash("sha256").update(hashInput).digest("hex")
   };
@@ -323,11 +219,6 @@ export async function startRun(task, root, agentId = task.routing?.currentAgent 
   await appendJsonl(join(sessionDir, "session.jsonl"), runRecord);
   await appendJsonl(join(p.tasks, task.id, "events.jsonl"), runRecord);
   await appendJsonl(join(sessionDir, "session.jsonl"), { ts: new Date().toISOString(), type: "agent.config", actor: "orchestrator", taskId: task.id, runId, agent: agentConfig, skills: configuredSkills.filter(Boolean), resume: { previousSessionRef, previousSummaryRef } });
-  if (chatBuild.managerRouting) {
-    const routingEvent = { ts: new Date().toISOString(), type: "manager.routing_context", actor: "orchestrator", taskId: task.id, runId, ...chatBuild.managerRouting };
-    await appendJsonl(join(sessionDir, "session.jsonl"), routingEvent);
-    await appendJsonl(join(p.tasks, task.id, "events.jsonl"), routingEvent);
-  }
   await options.beforePrompt?.({ runId, agentId, role, scope, allowedTools, promptHash, sessionRef, summaryRef, previousSessionRef, previousSummaryRef, event: started, chatBuild });
   let transcriptStreamLogged = false;
   const onToolEvent = async (event) => {

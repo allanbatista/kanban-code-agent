@@ -83,7 +83,11 @@ test("kca task run interrupt decompose and why use orchestrator commands", async
   const interruptResult = JSON.parse((await run(["task", "interrupt", task.id, "--mode", "hard"], root)).stdout);
   assert.equal(interruptResult.task.status, "idle");
 
-  const decomposeResult = JSON.parse((await run(["task", "decompose", task.id], root)).stdout);
+  const subtasks = JSON.stringify([
+    { title: "CLI runtime implementation", role: "engineering", needs: [], provides: ["cli:implementation"] },
+    { title: "CLI runtime validation", role: "quality", needs: ["cli:implementation"], provides: ["cli:validation"] }
+  ]);
+  const decomposeResult = JSON.parse((await run(["task", "decompose", task.id, "--subtasks", subtasks], root)).stdout);
   assert.equal(decomposeResult.subtasks.length, 2);
 
   const whyResult = JSON.parse((await run(["task", "why", decomposeResult.subtasks[1].id], root)).stdout);

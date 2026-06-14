@@ -18,6 +18,13 @@ export type Task = {
   priority: string;
   projectTargets: string[];
   routing?: { currentAgent?: string | null; currentRole?: string | null; lastAgent?: string | null; lastRole?: string | null; nextSuggestedColumn?: string | null; manualOverride?: { active?: boolean } };
+  workflow?: {
+    phase?: string;
+    currentRole?: string;
+    boardColumn?: string;
+    gates?: Record<string, { status?: string; reason?: string; evidence?: unknown[]; updatedAt?: string; updatedBy?: string }>;
+    artifacts?: Record<string, string>;
+  };
   worktree?: { branch?: string; path?: string; parentTaskId?: string | null; mainTaskId?: string | null; mergeTarget?: string };
   subtasksSummary?: { total: number; running: number; done: number };
   dependencies?: { needs?: string[]; provides?: string[]; blockedBy?: string[]; fileLocks?: string[]; semaphores?: unknown[] };
@@ -76,6 +83,20 @@ export type AppSettings = {
   workspace?: { name?: string; language?: string };
   ai?: { defaultProvider?: string; defaultModel?: string; defaultEffort?: "minimal" | "low" | "medium" | "high"; enabledProviders?: string[]; providers?: Record<string, { defaultModel?: string; defaultEffort?: "minimal" | "low" | "medium" | "high" } | unknown> };
   runtime?: { maxParallelTasks?: number; agentTokens?: Record<string, number>; projectTokens?: Record<string, number> };
+  workflow?: {
+    requireSpec?: boolean;
+    allowMiniSpec?: boolean;
+    requireTechnicalPlanForCode?: boolean;
+    requireQaBeforeReview?: boolean;
+    requireReviewBeforeDone?: boolean;
+    requireDeploymentEvidence?: boolean;
+    requireDocumentationDecision?: boolean;
+    requireSummaryBeforeDone?: boolean;
+    requireUserSpecApproval?: boolean;
+    preventAutomaticDeployDone?: boolean;
+    sandboxPolicy?: "prompt_only" | "worktree_only" | "isolated";
+    retryPolicy?: { maxAttempts?: number; timeoutMs?: number };
+  };
   ui?: { theme?: string; density?: string; showProgressOnCard?: boolean; showAgentOnCard?: boolean; showProjectTargetsOnCard?: boolean; taskTextScale?: number; taskFontFamily?: "serif" | "sans-serif" };
   safety?: { requireApprovalForMerge?: boolean; requireApprovalForDelete?: boolean; allowShell?: boolean; allowNetwork?: boolean };
 };

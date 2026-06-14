@@ -106,7 +106,8 @@ async function main() {
 
   if (scope === "task" && action === "decompose") {
     const taskId = requireValue("taskId", positional);
-    console.log(JSON.stringify(await handleCommand({ type: "task.decompose", commandId: value("--command-id", `cli-decompose-${Date.now()}`), taskId }, root()), null, 2));
+    const subtasks = JSON.parse(requireValue("--subtasks", value("--subtasks")));
+    console.log(JSON.stringify(await handleCommand({ type: "task.decompose", commandId: value("--command-id", `cli-decompose-${Date.now()}`), taskId, subtasks }, root()), null, 2));
     return;
   }
 

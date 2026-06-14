@@ -12,8 +12,8 @@ const LEGACY_ROLE_ALIASES = {
   reviewer: "review"
 };
 
-function canonicalRole(value, fallback = "engineering") {
-  return LEGACY_ROLE_ALIASES[value] || value || fallback;
+function canonicalRole(value) {
+  return LEGACY_ROLE_ALIASES[value] || value;
 }
 
 function roleColumn(roleId) {
@@ -46,6 +46,14 @@ function subtaskAcceptance(parent, subtask, role, mainTaskId) {
 
 export async function decomposeTaskWorkflow(command, parent, root) {
   logStep("orchestrator", "task.decompose", { commandId: command.commandId, taskId: command.taskId });
+  const failDecomposition = async (reason, errors = []) => {
+    const persona = parent.routing?.currentRole || parent.routing?.currentAgent || "orchestrator";
+    const agentId = parent.routing?.currentAgent || persona;
+    await appendChatMessage(root, { scope: "task", taskId: parent.id, role: "assistant", persona, agentId, disposition: "task.decompose.failed", text: reason, visibility: "both" });
+    const task = TaskSchema.parse(await updateTask(parent.id, { status: "failed", column: parent.column, routing: parent.routing }, root, "task.decompose.failed"));
+    await appendJsonl(`${paths(root).tasks}/${parent.id}/events.jsonl`, { ts: new Date().toISOString(), type: "task.decompose.failed", actor: "orchestrator", taskId: parent.id, reason, errors });
+    return { ok: false, commandId: command.commandId, task, subtasks: [], errors };
+  };
   const existingDirectSubtasks = (await listTasks(root)).filter((task) => task.worktree?.parentTaskId === parent.id);
   if (existingDirectSubtasks.length) {
     const pending = existingDirectSubtasks.filter((task) => task.status !== "done");
@@ -67,14 +75,20 @@ export async function decomposeTaskWorkflow(command, parent, root) {
     const task = TaskSchema.parse(await updateTask(parent.id, { status, column }, root, "subtasks.existing"));
     return { ok: true, commandId: command.commandId, task, subtasks: existingDirectSubtasks };
   }
-  const subtasks = command.subtasks?.length ? command.subtasks : [
-    { title: `${parent.title}: implementação`, needs: parent.dependencies?.needs || [], provides: [`subtask:${parent.id}:implementation`], fileLocks: parent.dependencies?.fileLocks || [], role: "engineering" },
-    { title: `${parent.title}: validação`, needs: [`subtask:${parent.id}:implementation`], provides: [`subtask:${parent.id}:validation`], fileLocks: [], role: "quality" }
-  ];
+  const subtasks = command.subtasks || [];
+  if (!subtasks.length) {
+    return failDecomposition("task.decompose requires at least one agent-provided subtask.", [{ type: "empty_subtasks" }]);
+  }
+  const missingRole = subtasks
+    .map((subtask, index) => ({ index, subtask }))
+    .filter(({ subtask }) => !canonicalRole(subtask.role || subtask.agentId || subtask.agent));
+  if (missingRole.length) {
+    return failDecomposition("Every subtask must include an explicit role or agentId.", missingRole.map(({ index, subtask }) => ({ type: "missing_role", index, title: subtask.title || "" })));
+  }
   const plannedNodes = subtasks.map((subtask, index) => ({
     id: subtask.id || `${parent.id}-${String(index + 1).padStart(2, "0")}`,
     title: subtask.title,
-    role: canonicalRole(subtask.role || subtask.agentId || subtask.agent, parent.routing?.currentRole || parent.routing?.currentAgent || "engineering"),
+    role: canonicalRole(subtask.role || subtask.agentId || subtask.agent),
     needs: subtask.needs || [],
     provides: subtask.provides || [],
     fileLocks: subtask.fileLocks || [],
@@ -83,20 +97,12 @@ export async function decomposeTaskWorkflow(command, parent, root) {
   const plannedDag = validateDag(plannedNodes);
   if (!plannedDag.ok) {
     const reason = `Invalid subtask DAG: ${JSON.stringify(plannedDag.errors)}`;
-    await appendChatMessage(root, { scope: "task", taskId: parent.id, role: "assistant", persona: "manager", agentId: "manager", disposition: "task.decompose.failed", text: reason, visibility: "both" });
-    const task = TaskSchema.parse(await updateTask(parent.id, {
-      status: "queued",
-      column: "manager",
-      routing: { ...parent.routing, lastAgent: parent.routing?.currentAgent || null, lastRole: parent.routing?.currentRole || null, currentAgent: "manager", currentRole: "manager" },
-      dependencies: { ...parent.dependencies, blockedBy: [] }
-    }, root, "task.problem"));
-    await appendJsonl(`${paths(root).tasks}/${parent.id}/events.jsonl`, { ts: new Date().toISOString(), type: "task.decompose.failed", actor: "orchestrator", taskId: parent.id, errors: plannedDag.errors });
-    return { ok: false, commandId: command.commandId, task, subtasks: [], errors: plannedDag.errors };
+    return failDecomposition(reason, plannedDag.errors);
   }
   const created = [];
   const mainTaskId = parent.worktree?.mainTaskId || parent.worktree?.parentTaskId || parent.id;
   for (const [index, subtask] of subtasks.entries()) {
-    const role = canonicalRole(subtask.role || subtask.agentId || subtask.agent, parent.routing?.currentRole || parent.routing?.currentAgent || "engineering");
+    const role = canonicalRole(subtask.role || subtask.agentId || subtask.agent);
     const createdTask = TaskSchema.parse(await createTask({
       id: subtask.id || `${parent.id}-${String(index + 1).padStart(2, "0")}`,
       title: subtask.title,
@@ -108,7 +114,7 @@ export async function decomposeTaskWorkflow(command, parent, root) {
       role,
       description: subtaskDescription(parent, subtask, role, mainTaskId),
       worktree: { enabled: true, kind: "subtask", branch: `kca/${parent.id}-${index + 1}`, pathRef: "worktree.yaml", parentTaskId: parent.id, mainTaskId, mergeTarget: parent.worktree?.branch || "main" },
-      dependencies: { needs: subtask.needs || [], provides: subtask.provides || [], blockedBy: [], fileLocks: subtask.fileLocks || [], semaphores: [] }
+      dependencies: { needs: subtask.needs || [], provides: subtask.provides || [], blockedBy: [], fileLocks: subtask.fileLocks || [], semaphores: subtask.semaphores || [] }
     }, root));
     await writeTaskFile(createdTask.id, "acceptance.md", subtaskAcceptance(parent, subtask, role, mainTaskId), root);
     created.push(createdTask);

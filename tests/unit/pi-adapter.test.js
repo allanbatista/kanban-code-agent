@@ -71,6 +71,11 @@ test("task agent tools execute typed workflow commands and emit tool events", as
   });
   const complete = tools.find((tool) => tool.name === "complete_task");
   const artifact = tools.find((tool) => tool.name === "emit_artifact");
+  const spawn = tools.find((tool) => tool.name === "spawn_subtasks");
+  assert.equal(tools.some((tool) => tool.name === "record_technical_plan"), true);
+  assert.equal(tools.some((tool) => tool.name === "record_summary"), true);
+  assert.equal(spawn.parameters.properties.subtasks.minItems, 1);
+  assert.equal(spawn.parameters.properties.subtasks.items.required.includes("role"), true);
   assert.match(artifact.description, /medium or longer/);
   assert.match(artifact.description, /respond directly in chat/);
   await complete.execute("call-complete", { nextColumn: "validate", summary: "done" });

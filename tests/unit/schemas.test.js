@@ -16,11 +16,13 @@ import {
   HookSettingsSchema,
   PlanningSchema,
   ProjectSettingsSchema,
+  parseCommand,
   RoleSettingsSchema,
   SemaphoreStateSchema,
   SkillSettingsSchema,
   SubtasksSchema,
   TaskSchema,
+  TaskWorkflowSchema,
   WorktreeSchema
 } from "../../packages/schemas/src/index.js";
 
@@ -38,7 +40,10 @@ test("schemas parse generated FSDB settings, task files and events", async () =>
   const { stdout } = await exec(process.execPath, [cli, "task", "create", "--title", "Validar schemas", "--project", "kanban-code-agent"], { env: { ...process.env, KCA_STORAGE_ROOT: root } });
   const task = JSON.parse(stdout);
 
-  assert.equal(AppSettingsSchema.parse(await readYamlFile(join(root, "settings", "app.yaml"))).schema, "kanban-code-agent/app@1");
+  const appSettings = AppSettingsSchema.parse(await readYamlFile(join(root, "settings", "app.yaml")));
+  assert.equal(appSettings.schema, "kanban-code-agent/app@1");
+  assert.equal(appSettings.workflow.requireTechnicalPlanForCode, true);
+  assert.equal(appSettings.workflow.sandboxPolicy, "prompt_only");
   assert.equal(BoardSettingsSchema.parse(await readYamlFile(join(root, "settings", "boards", "default.yaml"))).columns.length, 12);
   assert.equal(ProjectSettingsSchema.parse(await readYamlFile(join(root, "settings", "projects", "kanban-code-agent.yaml"))).id, "kanban-code-agent");
   const engineeringAgent = AgentSettingsSchema.parse(await readYamlFile(join(root, "settings", "agents", "engineering.yaml")));
@@ -55,7 +60,11 @@ test("schemas parse generated FSDB settings, task files and events", async () =>
   assert.equal(SemaphoreStateSchema.parse(await readYamlFile(join(root, "settings", "runtime", "semaphores.yaml"))).tokens["global:tasks"], 1000);
   assert.match(await readFile(join(root, "settings", "skills", "implementation", "SKILL.md"), "utf8"), /Implementation Skill/);
 
-  assert.equal(TaskSchema.parse(await readYamlFile(join(root, "tasks", task.id, "task.yaml"))).id, task.id);
+  const parsedTask = TaskSchema.parse(await readYamlFile(join(root, "tasks", task.id, "task.yaml")));
+  assert.equal(parsedTask.id, task.id);
+  assert.equal(TaskWorkflowSchema.parse(parsedTask.workflow).gates.definitionOfReady.status, "pending");
+  assert.equal(TaskWorkflowSchema.parse(parsedTask.workflow).artifacts.technicalPlan, "technical-plan.md");
+  assert.match(await readFile(join(root, "tasks", task.id, "task-spec.md"), "utf8"), /# Task Spec/);
   const planning = PlanningSchema.parse(await readYamlFile(join(root, "tasks", task.id, "planning.yaml")));
   assert.equal(planning.roles.required.includes("architecture"), true);
   assert.equal(planning.roles.required.includes("deployment"), true);
@@ -66,4 +75,26 @@ test("schemas parse generated FSDB settings, task files and events", async () =>
 
   const events = (await readFile(join(root, "tasks", task.id, "events.jsonl"), "utf8")).trim().split("\n").map((line) => EventSchema.parse(JSON.parse(line)));
   assert.equal(events[0].type, "task.created");
+});
+
+test("task.decompose command requires explicit agent-owned subtasks", () => {
+  assert.throws(() => parseCommand({
+    type: "task.decompose",
+    commandId: "cmd-empty-decompose",
+    taskId: "KCA-SCHEMA",
+    subtasks: []
+  }));
+  assert.throws(() => parseCommand({
+    type: "task.decompose",
+    commandId: "cmd-roleless-decompose",
+    taskId: "KCA-SCHEMA",
+    subtasks: [{ title: "Roleless" }]
+  }));
+  const parsed = parseCommand({
+    type: "task.decompose",
+    commandId: "cmd-valid-decompose",
+    taskId: "KCA-SCHEMA",
+    subtasks: [{ title: "Implement", role: "engineering" }]
+  });
+  assert.equal(parsed.subtasks[0].role, "engineering");
 });

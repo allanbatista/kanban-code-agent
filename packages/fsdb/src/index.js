@@ -26,9 +26,142 @@ const DEFAULT_COLUMN_META = {
 };
 
 const COLUMN_ALIASES = { definition: "product", build: "engineering", validate: "quality", blocked: "human_wait", deploy: "deployment" };
+const WORKFLOW_GATE_KEYS = ["spec", "clarification", "definitionOfReady", "validation", "definitionOfDone"];
+const DEFAULT_WORKFLOW_SETTINGS = {
+  requireSpec: true,
+  allowMiniSpec: true,
+  requireTechnicalPlanForCode: true,
+  requireQaBeforeReview: true,
+  requireReviewBeforeDone: true,
+  requireDeploymentEvidence: true,
+  requireDocumentationDecision: true,
+  requireSummaryBeforeDone: true,
+  requireUserSpecApproval: false,
+  preventAutomaticDeployDone: true,
+  sandboxPolicy: "prompt_only",
+  retryPolicy: { maxAttempts: 2, timeoutMs: 120000 }
+};
 
 export function normalizeColumnId(columnId) {
   return COLUMN_ALIASES[columnId] || columnId;
+}
+
+function emptyWorkflowGate(status = "pending", reason = "", evidence = []) {
+  return { status, reason, evidence };
+}
+
+function workflowRoleForColumn(column, routing = {}) {
+  if (routing.currentRole) return routing.currentRole;
+  if (routing.currentAgent && routing.currentAgent !== "assistant") return routing.currentAgent;
+  const map = {
+    inbox: "manager",
+    manager: "manager",
+    product: "product",
+    design: "design",
+    architecture: "architecture",
+    generalist: "generalist",
+    engineering: "engineering",
+    quality: "qa",
+    review: "review",
+    deployment: "deployment",
+    human_wait: "manager",
+    done: "none"
+  };
+  return map[column] || "manager";
+}
+
+function workflowPhaseForTask(task) {
+  if (task.status === "done" || task.column === "done") return "done";
+  if (task.status === "blocked" || task.column === "human_wait") return "blocked";
+  if (task.status === "canceled") return "cancelled";
+  const map = {
+    inbox: "intake",
+    manager: "intake",
+    product: "spec",
+    design: "planning",
+    architecture: "planning",
+    generalist: "execution",
+    engineering: "execution",
+    quality: "validation",
+    review: "review",
+    deployment: "delivery"
+  };
+  return map[task.column] || "intake";
+}
+
+function normalizeWorkflow(task) {
+  const workflow = task.workflow || {};
+  const gates = { ...(workflow.gates || {}) };
+  for (const key of WORKFLOW_GATE_KEYS) gates[key] = { ...emptyWorkflowGate(), ...(gates[key] || {}) };
+  return {
+    phase: workflow.phase || workflowPhaseForTask(task),
+    currentRole: workflow.currentRole || workflowRoleForColumn(task.column, task.routing),
+    boardColumn: workflow.boardColumn || task.column || "manager",
+    gates,
+    artifacts: {
+      taskSpec: "task-spec.md",
+      acceptance: "acceptance.md",
+      technicalPlan: "technical-plan.md",
+      implementationTasks: "implementation-tasks.md",
+      validationReport: "validation-report.md",
+      reviewReport: "review-report.md",
+      deploymentReport: "deployment-report.md",
+      summary: "summary.md",
+      decisionLog: "decision-log.md",
+      handoffsDir: "handoffs",
+      ...(workflow.artifacts || {})
+    },
+    ...Object.fromEntries(Object.entries(workflow).filter(([key]) => !["phase", "currentRole", "boardColumn", "gates", "artifacts"].includes(key)))
+  };
+}
+
+function draftTaskSpec(task, description = "") {
+  return [
+    "# Task Spec",
+    "",
+    "Status: draft",
+    "",
+    "## Request",
+    "",
+    description.trim() || task.title || "Pending request details.",
+    "",
+    "## Scope",
+    "",
+    "- TBD",
+    "",
+    "## Acceptance Criteria",
+    "",
+    "- [ ] TBD",
+    "",
+    "## Dependencies",
+    "",
+    "- None recorded.",
+    "",
+    "## Blocking Questions",
+    "",
+    "- None recorded.",
+    ""
+  ].join("\n");
+}
+
+async function ensureWorkflowArtifacts(taskDir, task, description = "") {
+  if (task.status === "draft") return;
+  await ensureFile(join(taskDir, "task-spec.md"), draftTaskSpec(task, description));
+}
+
+function patchWithWorkflow(current, patch = {}) {
+  const projected = { ...current, ...patch };
+  const workflow = normalizeWorkflow(projected);
+  workflow.boardColumn = patch.column || workflow.boardColumn || projected.column;
+  if (patch.status === "done" || patch.column === "done") {
+    workflow.phase = "done";
+    workflow.currentRole = "none";
+    workflow.boardColumn = "done";
+  } else if (patch.column && !patch.workflow) {
+    workflow.phase = workflowPhaseForTask(projected);
+    workflow.currentRole = workflowRoleForColumn(patch.column, projected.routing);
+  }
+  return { ...patch, workflow: { ...workflow, ...(patch.workflow || {}) } };
 }
 
 async function resolveStoredColumnId(columnId, p) {
@@ -134,10 +267,16 @@ async function ensurePromptContains(promptPath, expectedText, amendment) {
   await writeAtomic(promptPath, `${current.trimEnd()}\n\n${amendment.trim()}\n`);
 }
 
-async function ensureAppAiSettings(appPath) {
+async function ensureAppDefaults(appPath) {
   const app = await readYaml(appPath, null);
-  if (!app || app.ai) return;
-  await writeYaml(appPath, { ...app, ai: DEFAULT_AI_SETTINGS });
+  if (!app) return;
+  const next = {
+    ...app,
+    ai: app.ai || DEFAULT_AI_SETTINGS,
+    workflow: { ...DEFAULT_WORKFLOW_SETTINGS, ...(app.workflow || {}), retryPolicy: { ...DEFAULT_WORKFLOW_SETTINGS.retryPolicy, ...(app.workflow?.retryPolicy || {}) } }
+  };
+  if (JSON.stringify(app) === JSON.stringify(next)) return;
+  await writeYaml(appPath, next);
 }
 
 async function readSkillMarkdown(skillDir, id) {
@@ -660,13 +799,14 @@ export async function initStorage(rootInput) {
           chatCompaction: { maxActiveMessages: 50 },
           projectTokens: { "kanban-code-agent": 2 }
         },
+        workflow: DEFAULT_WORKFLOW_SETTINGS,
         ai: DEFAULT_AI_SETTINGS,
         manualMove: { confirmWhenRunning: true, defaultInterruptPolicy: "ask" },
         ui: { theme: "system", density: "comfortable", showProgressOnCard: true, showAgentOnCard: true, showProjectTargetsOnCard: true, showDependencyBadgesOnCard: true },
         safety: { requireApprovalForMerge: true, requireApprovalForDelete: true, allowShell: true, allowNetwork: false },
         tools: { builtin: ["read", "write", "edit", "bash", "grep", "find", "ls"], custom: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"] }
       });
-      await ensureAppAiSettings(join(p.settings, "app.yaml"));
+      await ensureAppDefaults(join(p.settings, "app.yaml"));
       await ensureYaml(join(p.settings, "boards", "default.yaml"), {
         schema: "kanban-code-agent/board@1",
         id: "default",
@@ -696,15 +836,15 @@ export async function initStorage(rootInput) {
           id: "manager",
           label: "Manager",
           skills: ["kanban-management"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "wait_for_persona", "delegate_task", "spawn_subtasks"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "wait_for_persona", "delegate_task", "spawn_subtasks", "record_handoff", "record_decision", "record_summary", "run_definition_of_ready_gate", "run_definition_of_done_gate"],
           maxParallelTasks: 50,
-          prompt: "# Manager\n\nMission: choose exactly one simplest next operational action for the task.\n\nInputs: task metadata, acceptance, planning, recent task chat, artifacts, blockers, tool results, and Manager Routing Context.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, wait_for_persona, delegate_task, spawn_subtasks.\n\nOwns: triage, routing, unblocking, contract review, execution planning after product approval, and deciding the next responsible persona.\n\nDoes not own: product contract, UX spec, system architecture, implementation, QA, code review, or deployment.\n\nModes: intake routes unclear work to product or human; contract_review checks the product contract against the original user request; execution_planning defines phases, inputs, persona owners, dependencies, checkpoints, and may emit artifacts/execution-plan.md before subtasks; progress_control consumes outputs/blockers and picks the next incremental action.\n\nDecision ladder: direct research/listing/docs with concrete user intent routes to generalist -> done even when acceptance.md is still the generated placeholder; if acceptance is missing or placeholder for unclear/non-direct work, use intake and route to product; if a product contract exists, use contract_review before execution; UI/UX goes to design; complex API/schema/migration/system planning goes to architecture before engineering; accepted code/config/API/tests go to engineering; functional validation, review, and deployment results use progress_control to pick the next action.\n\nEvidence: cite the task fact or blocker that justifies the action.\n\nHandoff: include target persona, concrete request, expected output, and stop after the handoff.\n\nRequired output: exactly one visible decision, one tool call, or an execution-plan artifact when planning is needed.\n\nStop conditions: after one visible decision or one tool call, stop. Never repeat the same blocker, delegation, or comment. If required live/current external data is genuinely unavailable after concrete command evidence, use report_blocker or request_user_input instead of continuing with estimates. Text alone does not finish the run; use a terminal tool.\n\nForbidden actions: do not implement code, define acceptance, validate behavior, review code, deploy, or create files unless the task explicitly needs a manager artifact.\n"
+          prompt: "# Manager\n\nMission: choose exactly one simplest next operational action for the task.\n\nInputs: task metadata, workflow state, task-spec, acceptance, planning, recent task chat, artifacts, blockers, and tool results.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, wait_for_persona, delegate_task, spawn_subtasks, record_handoff, record_decision, record_summary, run_definition_of_ready_gate, run_definition_of_done_gate.\n\nOwns: triage, routing, unblocking, contract review, DoR/DoD gates, execution planning after product approval, final summary, and deciding the next responsible persona.\n\nDoes not own: product contract, UX spec, system architecture, implementation, QA, code review, or deployment.\n\nSuggestions: use product when product intent is missing; use architecture for complex technical planning; use design for UI/UX; use engineering for implementation; use quality/review/deployment for validation, review, and release evidence; use generalist for non-code operational work; create parallel subtasks when work is independent.\n\nEvidence: cite the task fact or blocker that justifies the action.\n\nHandoff: include target persona, concrete request, expected output, and stop after the handoff.\n\nRequired output: exactly one visible decision, one tool call, or an execution-plan artifact when planning is needed.\n\nStop conditions: after one visible decision or one tool call, stop. Never repeat the same blocker, delegation, or comment. If required live/current external data is genuinely unavailable after concrete command evidence, use report_blocker or request_user_input instead of continuing with estimates. Text alone does not finish the run; use a terminal tool.\n\nForbidden actions: do not implement code, define acceptance, validate behavior, review code, deploy, or move directly to Done.\n"
         },
         {
           id: "product",
           label: "Product",
           skills: ["planning"],
-          tools: ["complete_task", "request_user_input", "emit_artifact", "spawn_subtasks"],
+          tools: ["complete_task", "request_user_input", "emit_artifact", "spawn_subtasks", "create_task_spec", "update_task_spec", "approve_task_spec", "record_decision", "record_handoff"],
           maxParallelTasks: 50,
           prompt: "# Product\n\nMission: turn the request into clear product intent and acceptance criteria.\n\nInputs: user request, task description, recent chat, existing acceptance, planning, and artifacts.\n\nAllowed tools: complete_task, request_user_input, emit_artifact, spawn_subtasks.\n\nOwns: problem, value, scope, acceptance criteria, data freshness/source requirements, and product risks.\n\nDoes not own: implementation, QA execution, code review, deployment, or technical architecture beyond product constraints.\n\nDecision ladder: clarify only blocking ambiguity; replace placeholder acceptance with verifiable criteria by calling emit_artifact with path \"acceptance.md\" before handoff; define expected artifact/output; route UI to design, complex technical planning to architecture, direct operational work to generalist, or accepted build work to engineering.\n\nEvidence: acceptance criteria must be verifiable by a human or automated check and persisted in acceptance.md.\n\nHandoff: name the next persona and the exact product contract they should satisfy.\n\nRequired output: explicit acceptance criteria persisted to acceptance.md and next responsible persona.\n\nStop conditions: complete after the product contract is explicit enough for the next role and acceptance.md is no longer placeholder.\n\nForbidden actions: do not implement, validate, review, deploy, or invent external constraints without marking them as assumptions.\n"
         },
@@ -720,7 +860,7 @@ export async function initStorage(rootInput) {
           id: "architecture",
           label: "Architecture",
           skills: ["planning"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks", "record_technical_plan", "record_implementation_tasks"],
           maxParallelTasks: 50,
           prompt: "# Architecture\n\nMission: define technical approach, internal contracts, risks, and implementation sequencing for complex development work.\n\nInputs: product contract, design handoff, task description, acceptance, planning, artifacts, dependencies, and worktree path.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, spawn_subtasks.\n\nOwns: architecture decisions, API/schema contracts, migration strategy, risk boundaries, file ownership, and subtask decomposition.\n\nDoes not own: product scope, UX choices, implementation, QA execution, code review, or deployment.\n\nDecision ladder: inspect product/design context; ask only for blocking technical decisions; emit a concise technical plan; spawn subtasks only when independent work can run in parallel; hand off accepted build work to engineering.\n\nEvidence: cite contracts, affected modules, risks, and validation expectations.\n\nHandoff: provide exact engineering request, expected files or surfaces, and validation gates.\n\nRequired output: implementation-ready technical plan or a blocker with the missing decision.\n\nStop conditions: complete after engineering can implement without architectural guessing.\n\nForbidden actions: do not implement code, validate behavior, review code, deploy, or redefine product acceptance.\n"
         },
@@ -728,15 +868,15 @@ export async function initStorage(rootInput) {
           id: "generalist",
           label: "Generalist",
           skills: ["kanban-management"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command", "record_handoff"],
           maxParallelTasks: 50,
-          prompt: "# Generalist\n\nMission: execute non-code operational work with evidence or delegate technical work.\n\nInputs: task description, concrete acceptance, recent chat, artifacts, and prior persona handoffs.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command.\n\nOwns: research, listing, summarization, formatting, documentation, and non-code artifacts.\n\nDoes not own: product acceptance definition, implementation, QA, code review, or deployment.\n\nDecision ladder: if acceptance is missing but the request is concrete direct research/listing, gather concise evidence with run_command when current/live data is needed, answer with source/date assumptions, and complete_task with nextColumn \"done\"; if a command needs pipes, redirects, globbing, or multiple commands, use command \"sh\" with args [\"-lc\", \"...\"]; do not pass shell operators as curl/grep args; do not retry the same live source more than twice; if live data fails, cite the exact stdout/stderr and do not invent a sandbox/network blocker; if acceptance is truly blocking, report blocker to manager/product; complete non-code research/docs/coordination with source evidence; ask human for missing required input; report blocker if blocked; delegate technical work to architecture or engineering.\n\nEvidence: cite the source, artifact, or result that proves completion.\n\nHandoff: include exact architecture or engineering request when technical work is needed.\n\nRequired output: completed answer or artifact plus source/evidence, or one blocker.\n\nStop conditions: complete to done, block, or hand off once.\n\nForbidden actions: do not edit code, deploy, validate implementation, or review merge readiness.\n"
+          prompt: "# Generalist\n\nMission: execute non-code operational work with evidence or delegate technical work.\n\nInputs: task description, concrete acceptance/task-spec, recent chat, artifacts, and prior persona handoffs.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command, record_handoff.\n\nOwns: research, listing, summarization, formatting, documentation, and non-code artifacts.\n\nDoes not own: product acceptance definition, implementation, QA, code review, deployment, or DoD.\n\nDecision ladder: if acceptance is missing but the request is concrete direct research/listing, gather concise evidence with run_command when current/live data is needed, answer with source/date assumptions, and complete_task to request Manager DoD; if a command needs pipes, redirects, globbing, or multiple commands, use command \"sh\" with args [\"-lc\", \"...\"]; do not pass shell operators as curl/grep args; do not retry the same live source more than twice; if live data fails, cite the exact stdout/stderr and do not invent a sandbox/network blocker; if acceptance/spec is truly blocking, report blocker to manager/product; complete non-code research/docs/coordination with source evidence; ask human for missing required input; report blocker if blocked; delegate technical work to architecture or engineering.\n\nEvidence: cite the source, artifact, or result that proves completion.\n\nHandoff: include exact architecture or engineering request when technical work is needed.\n\nRequired output: completed answer or artifact plus source/evidence, or one blocker.\n\nStop conditions: request Manager DoD, block, or hand off once.\n\nForbidden actions: do not edit code, deploy, validate implementation, review merge readiness, or move directly to Done.\n"
         },
         {
           id: "engineering",
           label: "Engineering",
           skills: ["implementation"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command", "record_validation", "record_implementation_tasks", "record_handoff"],
           maxParallelTasks: 50,
           prompt: "# Engineering\n\nMission: implement the accepted technical change in the task worktree and prove it works locally.\n\nInputs: product contract, architecture/design handoff when present, acceptance, planning, recent engineering chat, prior summaries, artifacts, dependencies, and worktree path.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command.\n\nOwns: code/config/test implementation and local developer validation.\n\nDoes not own: product acceptance, UX decisions, architecture for complex unresolved changes, QA signoff, code review, or deployment.\n\nDecision ladder: inspect task context; block if acceptance is placeholder; request architecture if technical design is missing for complex work; edit only needed files in the worktree; run targeted validation with run_command; complete to quality only after local validation passes.\n\nEvidence: include changed files and exact validation command/output summary.\n\nHandoff: report blockers with the missing prerequisite and next step; ask human only for required input unavailable from context.\n\nRequired output: implemented change, changed files, and local validation evidence.\n\nStop conditions: after completion or blocker, stop. Do not retry the same failing tool more than twice.\n\nForbidden actions: do not deploy, review code, spawn subtasks, use unrelated filesystem paths, or claim shell is unavailable before trying run_command.\n"
         },
@@ -744,15 +884,15 @@ export async function initStorage(rootInput) {
           id: "quality",
           label: "Quality",
           skills: ["validation"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command", "review_task", "record_handoff"],
           maxParallelTasks: 50,
-          prompt: "# Quality\n\nMission: validate that the delivered behavior satisfies acceptance criteria with concrete evidence.\n\nInputs: concrete acceptance, implementation artifacts, recent chat, changed files, and validation outputs.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command.\n\nOwns: functional QA, acceptance mapping, regression checks, browser/API/consumer validation, and pass/fail evidence.\n\nDoes not own: product scope, implementation fixes, code review, merge readiness, or deployment.\n\nDecision ladder: block to manager/product if acceptance is missing or placeholder; map acceptance to checks; run or inspect validation evidence; emit audit artifact if useful; pass code changes to review only when behavior satisfies acceptance; complete non-code tasks to done when acceptance is satisfied.\n\nEvidence: every pass/fail must cite a command, artifact, screenshot, source, or observed output.\n\nHandoff: failures go to the responsible persona with exact reproduction and expected fix.\n\nRequired output: QA decision with acceptance-to-evidence mapping.\n\nStop conditions: complete or report one blocker; do not loop validation after a definitive failure.\n\nForbidden actions: do not implement fixes, deploy, or decide code merge readiness.\n"
+          prompt: "# Quality\n\nMission: validate that the delivered behavior satisfies acceptance criteria with concrete evidence.\n\nInputs: concrete acceptance/task-spec, implementation artifacts, recent chat, changed files, and validation outputs.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command, record_validation, record_handoff.\n\nOwns: functional QA, acceptance mapping, regression checks, browser/API/consumer validation, and pass/fail evidence.\n\nDoes not own: product scope, implementation fixes, code review, merge readiness, deployment, or DoD.\n\nDecision ladder: block to manager/product if acceptance/spec is missing or placeholder; map acceptance to checks; run or inspect validation evidence; call record_validation with acceptance-to-evidence mapping; pass code changes to review only when behavior satisfies acceptance.\n\nEvidence: every pass/fail must cite a command, artifact, screenshot, source, or observed output.\n\nHandoff: failures go to the responsible persona with exact reproduction and expected fix.\n\nRequired output: QA decision with acceptance-to-evidence mapping in validation-report.md.\n\nStop conditions: record validation or report one blocker; do not loop validation after a definitive failure.\n\nForbidden actions: do not implement fixes, deploy, decide code merge readiness, or move directly to Done.\n"
         },
         {
           id: "review",
           label: "Review",
           skills: ["review"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command", "record_review_report"],
           maxParallelTasks: 50,
           prompt: "# Review\n\nMission: perform code review and decide diff/merge readiness after QA evidence exists.\n\nInputs: diff/artifacts, changed files, validation evidence, recent chat, and task history.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command.\n\nOwns: code review, maintainability, security risks, regressions visible in the diff, and merge readiness.\n\nDoes not own: product acceptance definition, functional QA signoff, implementation fixes, deployment, or research/data verification.\n\nDecision ladder: block to quality if QA evidence is missing; inspect diff and evidence; run lightweight verification if needed; list blocking findings first; pass to deployment only when code is merge-ready.\n\nEvidence: findings need severity, reason, and file/artifact reference when available.\n\nHandoff: blockers go back to engineering with exact corrective action.\n\nRequired output: merge-ready decision or blocking code-review findings.\n\nStop conditions: finish after one review decision.\n\nForbidden actions: do not implement broad fixes, validate product acceptance, or deploy.\n"
         },
@@ -760,7 +900,7 @@ export async function initStorage(rootInput) {
           id: "deployment",
           label: "Deployment",
           skills: ["automation"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "deploy_task", "record_deployment_report", "record_handoff"],
           maxParallelTasks: 50,
           prompt: "# Deployment\n\nMission: run release/deployment gates and record rollback evidence.\n\nInputs: review decision, validation evidence, deployment instructions, recent chat, and task artifacts.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact.\n\nOwns: release gate, deployment record, approval/secret checks, and rollback note.\n\nDoes not own: product scope, implementation, QA, code review, or bypassing prior gates.\n\nDecision ladder: verify approval/evidence; request credentials or approval if missing; record deployment/rollback notes; complete only when release criteria are satisfied.\n\nEvidence: deployment summary must include command/gate, result, and rollback note.\n\nHandoff: report deployment blockers with required human action or missing secret.\n\nRequired output: deployment summary or one deployment blocker.\n\nStop conditions: complete or block once; do not retry unsafe deploy commands blindly.\n\nForbidden actions: do not change implementation scope or bypass review.\n"
         },
@@ -797,31 +937,11 @@ export async function initStorage(rootInput) {
         await ensureFile(join(p.settings, "prompts", `${agent.id}.md`), agent.prompt);
       }
       await ensureAgentTool(join(p.settings, "agents", "generalist.yaml"), "run_command");
-      await ensurePromptContains(
-        join(p.settings, "prompts", "manager.md"),
-        "direct research/listing/docs with concrete user intent routes to generalist -> done",
-        "## Runtime Amendment\n\nDirect research/listing/docs with concrete user intent routes to generalist -> done even when acceptance.md is still the generated placeholder. If required live/current external data is genuinely unavailable after concrete command evidence, use report_blocker or request_user_input instead of continuing with estimates or telling another persona to use \"what you can find\". Do not claim network is unavailable when stdout/stderr shows DNS, ping, HTTP, or API success."
-      );
-      await ensurePromptContains(
-        join(p.settings, "prompts", "product.md"),
-        "emit_artifact with path \"acceptance.md\"",
-        "## Runtime Amendment\n\nBefore handoff, replace placeholder acceptance by calling emit_artifact with path \"acceptance.md\". Complete only after acceptance.md is no longer placeholder."
-      );
-      await ensurePromptContains(
-        join(p.settings, "prompts", "product.md"),
-        "direct operational research/listing goes to generalist",
-        "## Runtime Amendment\n\nAfter acceptance is persisted, direct operational research/listing goes to generalist, not engineering or quality, unless the user explicitly asks for code or validation. If a required source is unavailable and no acceptable fallback is in scope, request human input or block; do not loosen acceptance or ask another persona to finish with estimates."
-      );
-      await ensurePromptContains(
-        join(p.settings, "prompts", "generalist.md"),
-        "command \"sh\" with args [\"-lc\", \"...\"]",
-        "## Runtime Amendment\n\nFor concrete direct research/listing, gather concise evidence with run_command when current/live data is needed, then complete_task with nextColumn \"done\". If a command needs pipes, redirects, globbing, or multiple commands, use command \"sh\" with args [\"-lc\", \"...\"]. Do not pass shell operators as curl/grep args. If live data fails, cite exact stdout/stderr and do not invent a sandbox/network blocker."
-      );
-      await ensurePromptContains(
-        join(p.settings, "prompts", "generalist.md"),
-        "do not retry the same live source more than twice",
-        "## Runtime Amendment\n\nFor live/current data tasks, do not retry the same live source more than twice. After two failed or empty attempts, complete with explicit source/date assumptions only when that still satisfies the request; otherwise call report_blocker or request_user_input with the exact command evidence."
-      );
+      for (const agent of defaultAgents) {
+        for (const tool of ["wait_for_persona", "delegate_task", "spawn_subtasks"]) {
+          await ensureAgentTool(join(p.settings, "agents", `${agent.id}.yaml`), tool);
+        }
+      }
       for (const role of DEFAULT_ROLES) {
         await ensureYaml(join(p.settings, "roles", `${role.id}.yaml`), {
           schema: "kanban-code-agent/role@1",
@@ -934,6 +1054,13 @@ export async function createTask(input, rootInput) {
       : input.routing || { currentAgent: input.agent || "manager", currentRole: input.role || input.agent || "manager", manualOverride: { active: false } },
     worktree: input.worktree || { enabled: true, kind: input.kind || "task", branch: input.branch || `kca/${id}`, pathRef: "worktree.yaml", parentTaskId: null, mergeTarget: "main" },
     dependencies: input.dependencies || { needs: [], provides: [], blockedBy: [], fileLocks: [], semaphores: [] },
+    workflow: normalizeWorkflow({
+      column: await resolveStoredColumnId(requestedColumn, p),
+      status: needsHumanIntake ? "idle" : input.status || (input.draft ? "draft" : "idle"),
+      routing: needsHumanIntake
+        ? { currentAgent: null, currentRole: null }
+        : input.routing || { currentAgent: input.agent || "manager", currentRole: input.role || input.agent || "manager" }
+    }),
     hooks: input.hooks || { active: [] },
     skills: input.skills || { active: [] },
     tags: input.tags || []
@@ -942,6 +1069,7 @@ export async function createTask(input, rootInput) {
   await writeYaml(join(taskDir, "task.yaml"), task);
   await writeAtomic(join(taskDir, "description.md"), `# ${task.title}\n\n${input.description || ""}\n`);
   await writeAtomic(join(taskDir, "acceptance.md"), "# Critérios de aceite\n\n- [ ] Critério verificável de pronto.\n");
+  await ensureWorkflowArtifacts(taskDir, task, input.description || "");
   await writeYaml(join(taskDir, "planning.yaml"), {
     schema: "kanban-code-agent/planning@1",
     taskId: id,
@@ -995,6 +1123,13 @@ export async function getTask(taskId, rootInput) {
 async function readTaskWithRuntime(taskId, p) {
   const task = await readYaml(join(p.tasks, taskId, "task.yaml"));
   if (!task) return null;
+  const workflow = normalizeWorkflow(task);
+  if (!task.workflow || WORKFLOW_GATE_KEYS.some((key) => !task.workflow?.gates?.[key]) || !task.workflow?.artifacts) {
+    const taskPath = join(p.tasks, taskId, "task.yaml");
+    await writeYaml(taskPath, { ...task, workflow });
+    await ensureWorkflowArtifacts(join(p.tasks, taskId), { ...task, workflow });
+  }
+  task.workflow = workflow;
   const events = await readJsonl(join(p.tasks, taskId, "events.jsonl"));
   const failure = latestFailure(events);
   return failure ? { ...task, failure } : task;
@@ -1032,9 +1167,11 @@ export async function updateTask(taskId, patch, rootInput, eventType = "task.upd
   const current = await readYaml(taskPath);
   if (!current) throw new Error(`Task not found: ${taskId}`);
   const updatedAt = new Date().toISOString();
-  const task = { ...current, ...patch, updatedAt };
+  const normalizedPatch = patchWithWorkflow(current, patch);
+  const task = { ...current, ...normalizedPatch, updatedAt };
   await writeYaml(taskPath, task);
-  await appendJsonl(join(p.tasks, taskId, "events.jsonl"), { ts: updatedAt, type: eventType, actor: "user", taskId, patch });
+  await ensureWorkflowArtifacts(dirname(taskPath), task);
+  await appendJsonl(join(p.tasks, taskId, "events.jsonl"), { ts: updatedAt, type: eventType, actor: "user", taskId, patch: normalizedPatch });
   logStep("fsdb", "updateTask.done", { taskId, column: task.column, status: task.status });
   return task;
 }
@@ -1171,7 +1308,22 @@ export async function moveTask(taskId, toColumn, rootInput) {
   if (!task) throw new Error(`Task not found: ${taskId}`);
   const from = task.column;
   task.column = await resolveStoredColumnId(toColumn, p);
-  task.status = task.column === "done" ? "done" : task.status;
+  if (task.column === "done") {
+    task.column = "manager";
+    task.status = "queued";
+    task.workflow = {
+      ...normalizeWorkflow(task),
+      phase: "review",
+      currentRole: "manager",
+      boardColumn: "manager",
+      gates: {
+        ...normalizeWorkflow(task).gates,
+        definitionOfDone: { status: "pending", reason: "Direct Done move requested; waiting for DoD gate.", evidence: [`move:${from}->done`] }
+      }
+    };
+  } else {
+    task.workflow = normalizeWorkflow(task);
+  }
   task.updatedAt = new Date().toISOString();
   await writeYaml(taskPath, task);
   await appendJsonl(join(p.tasks, taskId, "events.jsonl"), { ts: task.updatedAt, type: "task.moved", actor: "user", taskId, from, to: task.column, patch: { column: task.column, status: task.status } });
@@ -1187,7 +1339,8 @@ function appScopeKey(scope) {
     concurrency: "runtime",
     sessions: "runtime",
     permissions: "safety",
-    tools: "tools"
+    tools: "tools",
+    workflow: "workflow"
   };
   return map[scope] || null;
 }

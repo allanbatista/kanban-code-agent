@@ -19,6 +19,7 @@ test("state machine applies core task transitions", () => {
   };
   assert.equal(transitionTask(task, "start", { runId: "run-2", agentId: "engineering" }).status, "running");
   assert.equal(transitionTask(task, "complete", { nextColumn: "done" }).status, "done");
+  assert.equal(transitionTask(task, "complete", { nextColumn: "done" }).column, "done");
   assert.equal(transitionTask(task, "block", { blockers: ["missing-input"] }).column, "manager");
   assert.equal(transitionTask(task, "block", { blockers: ["missing-input"] }).status, "queued");
   assert.equal(transitionTask(task, "manual_move", { toColumn: "validate" }).routing.manualOverride.active, true);
