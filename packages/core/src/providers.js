@@ -15,6 +15,8 @@ const DEFAULT_MODELS = {
   openai_compatible: ""
 };
 
+export const OPENROUTER_MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models";
+
 export const DEFAULT_AI_SETTINGS = {
   defaultProvider: "openai",
   defaultModel: DEFAULT_MODELS.openai,
@@ -177,6 +179,31 @@ export async function listProviderModels(providerId, settings = {}, env = proces
   const rawModels = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : Array.isArray(data) ? data : [];
   const models = rawModels.map(normalizeModel).filter(Boolean);
   return { schema: "kanban-code-agent/provider-models@1", providerId, models };
+}
+
+export async function fetchOpenRouterModels(env = process.env, { fetchImpl = globalThis.fetch, timeoutMs = 10000 } = {}) {
+  if (!fetchImpl) throw new Error("fetch unavailable");
+  const headers = { "Content-Type": "application/json" };
+  if (env.OPENROUTER_API_KEY) headers.Authorization = `Bearer ${env.OPENROUTER_API_KEY}`;
+  if (env.OPENROUTER_HTTP_REFERER) headers["HTTP-Referer"] = env.OPENROUTER_HTTP_REFERER;
+  if (env.OPENROUTER_APP_TITLE) headers["X-Title"] = env.OPENROUTER_APP_TITLE;
+  const controller = typeof AbortController === "function" && timeoutMs > 0 ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await fetchImpl(OPENROUTER_MODELS_ENDPOINT, { headers, signal: controller?.signal });
+    if (!response.ok) throw new Error(`openrouter models request failed: ${response.status}`);
+    const data = await response.json();
+    const rawModels = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : Array.isArray(data) ? data : [];
+    return {
+      schema: "kanban-code-agent/provider-models-cache@1",
+      providerId: "openrouter",
+      source: OPENROUTER_MODELS_ENDPOINT,
+      fetchedAt: new Date().toISOString(),
+      models: rawModels.map(normalizeModel).filter(Boolean)
+    };
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 export function resolveProviderModel({ settings = {}, agentConfig = {}, role = {}, provider, model, effort } = {}) {

@@ -5,6 +5,7 @@ import { appendJsonl, paths, readAgent, readSettings, readSkill, writeAtomic } f
 import { compactTaskPersonaChat, readChatHistory } from "@kca/fsdb/chat-store";
 import { buildTaskAgentTools, startOpenAICompatibleSession, startPiSession } from "@kca/pi-adapter";
 import { logStep } from "@kca/core/log";
+import { AGENT_RESPONSE_POLICY } from "@kca/core/agent-response-policy";
 import { discoverProviders, resolveProviderModel } from "@kca/core/providers";
 import { roleById } from "../../core/src/roles.js";
 
@@ -189,6 +190,7 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
       "Every chat message from an agent must include persona.",
       "A run is terminal only after a state-changing tool call such as complete_task, report_blocker, wait_for_persona, delegate_task, or request_user_input.",
       "Prompt-only safety contract: treat the task worktree as the only allowed filesystem scope; do not read or write outside it.",
+      AGENT_RESPONSE_POLICY,
       `Persona: ${persona}.`,
       role?.gate ? `Gate: ${role.gate}` : "",
       instructions,
@@ -318,6 +320,7 @@ export async function startRun(task, root, agentId = task.routing?.currentAgent 
   const runRecord = { ts: new Date().toISOString(), type: "agent.run", actor: "orchestrator", taskId: task.id, runId, agentId, role, scope, allowedTools, promptHash, provider: chatBuild.provider, model: chatBuild.model, effort: chatBuild.effort, chatBuild };
   await appendJsonl(join(sessionDir, "session.jsonl"), started);
   await appendJsonl(join(sessionDir, "session.jsonl"), runRecord);
+  await appendJsonl(join(p.tasks, task.id, "events.jsonl"), runRecord);
   await appendJsonl(join(sessionDir, "session.jsonl"), { ts: new Date().toISOString(), type: "agent.config", actor: "orchestrator", taskId: task.id, runId, agent: agentConfig, skills: configuredSkills.filter(Boolean), resume: { previousSessionRef, previousSummaryRef } });
   if (chatBuild.managerRouting) {
     const routingEvent = { ts: new Date().toISOString(), type: "manager.routing_context", actor: "orchestrator", taskId: task.id, runId, ...chatBuild.managerRouting };
@@ -347,17 +350,19 @@ export async function startRun(task, root, agentId = task.routing?.currentAgent 
     const commonAdapterOptions = {
       task,
       agentId,
+      role,
       runId,
       cwd: task.worktree?.path || p.root,
       prompt,
-      customToolFactory: ({ sdkExports }) => buildTaskAgentTools({
+      customToolFactory: ({ sdkExports, getLastAssistantText }) => buildTaskAgentTools({
         sdkExports,
         taskId: task.id,
         runId,
         agentId,
         role,
         executeCommand: options.executeCommand,
-        onEvent: onToolEvent
+        onEvent: onToolEvent,
+        getLastAssistantText
       }, { allowedTools }),
       onEvent: onToolEvent
     };

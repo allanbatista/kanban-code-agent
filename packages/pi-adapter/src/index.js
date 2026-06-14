@@ -2,6 +2,7 @@ import { access } from "node:fs/promises";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { AGENT_RESPONSE_POLICY } from "@kca/core/agent-response-policy";
 import { logStep } from "@kca/core/log";
 
 const defaultPackage = "@earendil-works/pi-coding-agent";
@@ -31,6 +32,87 @@ function contentText(content) {
     if (part.arguments || part.input || part.params) return truncate(part.arguments || part.input || part.params, 1200);
     return "";
   }).filter(Boolean).join("");
+}
+
+function numericToken(...values) {
+  for (const value of values) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  return undefined;
+}
+
+function numericPositive(...values) {
+  for (const value of values) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return undefined;
+}
+
+function modelContextWindow(providerConfig = {}, model) {
+  const direct = numericPositive(
+    providerConfig.contextWindow,
+    providerConfig.context_window,
+    providerConfig.contextLength,
+    providerConfig.context_length
+  );
+  if (direct) return direct;
+  const models = providerConfig.models;
+  const modelId = String(model || "");
+  const found = Array.isArray(models)
+    ? models.find((item) => [item?.id, item?.name, item?.model].map(String).includes(modelId))
+    : models && typeof models === "object"
+      ? models[modelId]
+      : null;
+  return numericPositive(
+    found?.contextWindow,
+    found?.context_window,
+    found?.contextLength,
+    found?.context_length,
+    found?.top_provider?.context_length,
+    found?.limits?.context_window,
+    found?.limits?.max_context_length
+  );
+}
+
+export function normalizeProviderUsage(rawUsage, { contextWindow } = {}) {
+  if (!rawUsage || typeof rawUsage !== "object") return null;
+  const inputTokens = numericToken(rawUsage.prompt_tokens, rawUsage.input_tokens, rawUsage.inputTokens, rawUsage.input);
+  const outputTokens = numericToken(rawUsage.completion_tokens, rawUsage.output_tokens, rawUsage.outputTokens, rawUsage.output);
+  const totalTokens = numericToken(rawUsage.total_tokens, rawUsage.totalTokens) ?? (
+    inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined
+  );
+  const cacheReadTokens = numericToken(
+    rawUsage.cacheRead,
+    rawUsage.cache_read,
+    rawUsage.cache_read_input_tokens,
+    rawUsage.prompt_cache_hit_tokens,
+    rawUsage.prompt_tokens_details?.cached_tokens,
+    rawUsage.input_tokens_details?.cached_tokens
+  );
+  const cacheWriteTokens = numericToken(rawUsage.cacheWrite, rawUsage.cache_write, rawUsage.cache_creation_input_tokens);
+  const cacheTokens = numericToken(
+    rawUsage.cached_tokens,
+    rawUsage.cache_tokens,
+    rawUsage.cachedTokens
+  ) ?? (
+    cacheReadTokens !== undefined || cacheWriteTokens !== undefined ? (cacheReadTokens || 0) + (cacheWriteTokens || 0) : undefined
+  );
+  const resolvedContextWindow = numericPositive(contextWindow, rawUsage.contextWindow, rawUsage.context_window);
+  const contextTokens = inputTokens !== undefined || outputTokens !== undefined ? (inputTokens || 0) + (outputTokens || 0) : undefined;
+  const contextPercent = contextTokens !== undefined && resolvedContextWindow
+    ? Math.round((contextTokens / resolvedContextWindow) * 1000) / 10
+    : undefined;
+  const usage = {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(cacheTokens !== undefined ? { cacheTokens } : {}),
+    ...(resolvedContextWindow ? { contextWindow: resolvedContextWindow } : {}),
+    ...(contextPercent !== undefined ? { contextPercent } : {})
+  };
+  return Object.keys(usage).length ? usage : null;
 }
 
 function contentKinds(content) {
@@ -470,6 +552,9 @@ function taskTool(context, { name, label, description, parameters, toCommand }) 
     parameters,
     async execute(callId, params = {}) {
       const command = toCommand(params);
+      if (command.type === "agent.complete_task" && !command.finalText) {
+        command.finalText = context.getLastAssistantText?.() || "";
+      }
       await context.onEvent?.({ type: "agent.tool_call", tool: name, callId, command });
       try {
         const result = await context.executeCommand(command);
@@ -521,7 +606,7 @@ export function buildTaskAgentTools(context, { allowedTools } = {}) {
     taskTool(context, {
       name: "emit_artifact",
       label: "Emit artifact",
-      description: "Persist an artifact under the current task.",
+      description: "Persist an artifact under the current task only when the final content is medium or longer, or when the user explicitly asks for an artifact. For short final content, respond directly in chat.",
       parameters: TObject({ path: TString(), content: TString() }),
       toCommand: (params) => base("agent.emit_artifact", { path: params.path, content: params.content || "" })
     }),
@@ -640,9 +725,11 @@ export async function runBoardAssistant({ prompt, agentId = "assistant", instruc
   });
 
   try {
-    const systemContext = instructions
-      ? `${instructions}\n\nUse as ferramentas kca_* para gerenciar o board Kanban. Ao criar task, o único requisito é entender o pedido do usuário: se a coluna não for informada, use entrada/inbox; não peça prioridade nem tipo; se o texto for descrição, infira um título; se o pedido depender de referência subjetiva sem contexto, peça clarificação objetiva.`
-      : "Você é o assistente do Kanban Code Agent. Use as ferramentas kca_* para gerenciar tasks, colunas e configurações. Ao criar task, o único requisito é entender o pedido do usuário: se a coluna não for informada, use entrada/inbox; não peça prioridade nem tipo; se o texto for descrição, infira um título; se o pedido depender de referência subjetiva sem contexto, peça clarificação objetiva. Responda em português brasileiro.";
+    const systemContext = [
+      instructions || "Você é o assistente do Kanban Code Agent. Responda em português brasileiro.",
+      AGENT_RESPONSE_POLICY,
+      "Use as ferramentas kca_* para gerenciar tasks, colunas e configurações. Ao criar task, o único requisito é entender o pedido do usuário: se a coluna não for informada, use entrada/inbox; não peça prioridade nem tipo; se o texto for descrição, infira um título; se o pedido depender de referência subjetiva sem contexto, peça clarificação objetiva."
+    ].join("\n\n");
     const timeoutMs = Number(process.env.KCA_BOARD_ASSISTANT_TIMEOUT_MS || 15000);
     let timeoutId;
     try {
@@ -686,20 +773,22 @@ function firstAssistantText(message) {
   return "";
 }
 
-export async function startOpenAICompatibleSession({ providerConfig, model, task, agentId, runId, cwd, prompt, customToolFactory, onEvent, maxTurns = 12, fetchImpl = globalThis.fetch }) {
+export async function startOpenAICompatibleSession({ providerConfig, model, task, agentId, role, runId, cwd, prompt, customToolFactory, onEvent, maxTurns = 12, fetchImpl = globalThis.fetch }) {
   const baseUrl = providerConfig?.baseUrl?.replace(/\/$/, "");
   const apiKey = providerConfig?.apiKeyEnv ? process.env[providerConfig.apiKeyEnv] : null;
   if (!fetchImpl) return { mode: "failed", provider: providerConfig?.id, reason: "fetch_unavailable", sessionId: runId, cwd };
   if (!baseUrl || !apiKey || !model) return { mode: "failed", provider: providerConfig?.id, reason: "provider_not_configured", sessionId: runId, cwd };
 
   const sdkExports = { defineTool: (tool) => tool };
-  const customTools = await customToolFactory?.({ sdkExports }) || [];
+  let lastAssistantText = "";
+  const customTools = await customToolFactory?.({ sdkExports, getLastAssistantText: () => lastAssistantText }) || [];
   const toolMap = new Map(customTools.map((tool) => [tool.name, tool]));
   const messages = [{ role: "user", content: String(prompt || task?.title || "") }];
   const events = [];
   const terminalTools = new Set(["complete_task", "request_user_input", "report_blocker", "spawn_subtasks", "wait_for_persona", "wait_for_human", "delegate_task", "review_task", "deploy_task"]);
   let promptSent = false;
   let terminal = false;
+  const contextWindow = modelContextWindow(providerConfig, model);
 
   for (let turn = 0; turn < maxTurns && !terminal; turn += 1) {
     const headers = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` };
@@ -720,9 +809,16 @@ export async function startOpenAICompatibleSession({ providerConfig, model, task
       return { mode: "failed", provider: providerConfig.id, reason: `http_${response.status}`, sessionId: runId, cwd, promptSent };
     }
     const data = await response.json();
+    const usage = normalizeProviderUsage(data?.usage, { contextWindow });
+    if (usage) {
+      const event = { type: "agent.usage", category: "usage", agentId, role, provider: providerConfig.id, model: data?.model || model, responseId: data?.id, usage };
+      events.push(event);
+      await onEvent?.(event);
+    }
     const message = data?.choices?.[0]?.message || {};
     const text = firstAssistantText(message);
     if (text) {
+      lastAssistantText = text;
       const event = { type: "agent.transcript", category: "message", role: "assistant", text, providerEvent: { id: data.id, model: data.model } };
       events.push(event);
       await onEvent?.(event);
@@ -779,6 +875,7 @@ export async function startPiSession({ task, agentId, runId, cwd, prompt, sessio
 
   const sessionTimeoutMs = Number(process.env.KCA_PI_SESSION_TIMEOUT_MS || 2500);
   let sessionTimeoutId;
+  let lastAssistantText = "";
   const sessionTimeout = new Promise((resolve) => {
     sessionTimeoutId = setTimeout(() => resolve({
       mode: "fake",
@@ -796,7 +893,7 @@ export async function startPiSession({ task, agentId, runId, cwd, prompt, sessio
     logStep("pi-adapter", "startPiSession.real", { taskId: task.id, agentId, runId });
     const sessionManager = sdk.SessionManager.create(cwd || process.cwd(), sessionDir);
     const resolvedCustomTools = typeof customToolFactory === "function"
-      ? await customToolFactory({ sdkExports: sdk })
+      ? await customToolFactory({ sdkExports: sdk, getLastAssistantText: () => lastAssistantText })
       : customTools;
     const { session, modelFallbackMessage } = await sdk.createAgentSession({
       cwd,
@@ -825,6 +922,9 @@ export async function startPiSession({ task, agentId, runId, cwd, prompt, sessio
   const seenTranscript = new Set();
   const unsubscribe = session.subscribe((event) => {
     const normalized = normalizeSessionEvent(event);
+    if (normalized.category === "message" && normalized.role === "assistant" && normalized.text) {
+      lastAssistantText = normalized.text;
+    }
     const signature = [normalized.category, normalized.role || "", normalized.text || "", normalized.toolCall?.id || "", normalized.toolResult?.id || ""].join("\u0001");
     if (seenTranscript.has(signature)) return;
     seenTranscript.add(signature);

@@ -6,9 +6,11 @@ import {
   getTask,
   listTaskFiles,
   listTasks,
+  listTaskFileEntries,
   moveTask,
   paths,
   readCommandResult,
+  readTaskUsage,
   readJsonl,
   readSettings,
   readSettingsScope,
@@ -84,8 +86,10 @@ export class FsdbTaskArtifactRepository {
       description: await fs.readFile(join(taskDir, "description.md"), "utf8").catch(() => ""),
       planning: await readYaml(join(taskDir, "planning.yaml"), null),
       subtasks: await readYaml(join(taskDir, "subtasks.yaml"), null),
+      usage: await readTaskUsage(taskId, this.root),
       events: await readJsonl(join(taskDir, "events.jsonl")),
-      files: await this.listFiles(taskId)
+      files: await this.listFiles(taskId),
+      fileEntries: await listTaskFileEntries(taskId, this.root)
     };
   }
 }

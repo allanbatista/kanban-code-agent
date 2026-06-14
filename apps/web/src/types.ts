@@ -24,7 +24,37 @@ export type Task = {
   hooks?: { active?: string[] };
   skills?: { active?: string[] };
   agent?: { currentRunId?: string; currentSessionRef?: string; lastSummary?: string } | string;
+  usage?: TokenUsageAggregate | null;
+  createdAt?: string;
   updatedAt?: string;
+};
+
+export type TokenUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  cacheTokens?: number;
+  contextWindow?: number;
+  contextPercent?: number;
+  durationMs?: number;
+};
+
+export type AgentTokenUsage = TokenUsage & {
+  agentId: string;
+  role?: string;
+  runs?: number;
+  models?: AgentModelTokenUsage[];
+};
+
+export type AgentModelTokenUsage = TokenUsage & {
+  provider?: string;
+  model: string;
+  runs?: number;
+};
+
+export type TokenUsageAggregate = {
+  total: TokenUsage;
+  byAgent: AgentTokenUsage[];
 };
 
 export type TaskFiles = {
@@ -33,8 +63,10 @@ export type TaskFiles = {
   description: string;
   planning?: { status?: string; roles?: { required?: string[]; optional?: string[] } } | null;
   subtasks?: { nodes?: Array<{ id: string; title?: string; status?: string }> } | null;
+  usage?: TokenUsageAggregate | null;
   events: Array<Record<string, unknown>>;
   files: string[];
+  fileEntries?: Array<{ path: string; size?: number; kind?: "text" | "image" | "binary"; contentType?: string }>;
 };
 
 export type AppSettings = {

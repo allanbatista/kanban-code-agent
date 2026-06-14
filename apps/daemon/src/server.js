@@ -1,10 +1,11 @@
 import { createServer } from "node:http";
+import { createReadStream } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { WebSocketServer } from "ws";
 import { createEventBus } from "@kca/application/event-bus";
 import { createBoardService } from "@kca/board-service";
-import { createTask, initStorage, listTasks } from "@kca/fsdb";
+import { createTask, initStorage, listTasks, refreshOpenRouterModelCache, resolveTaskFilePath, taskFileContentType, taskFileKind } from "@kca/fsdb";
 import { handleCommand, handleQuery } from "@kca/orchestrator";
 import { recoverStaleRuns } from "@kca/orchestrator/scheduler";
 import { initialState } from "@kca/core";
@@ -32,6 +33,38 @@ function json(res, status, body) {
     "access-control-allow-headers": "content-type"
   });
   res.end(JSON.stringify(body));
+}
+
+function contentDisposition(type, fileName) {
+  const safeName = basename(fileName).replace(/["\r\n]+/g, "-") || "download";
+  return `${type}; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
+}
+
+async function sendTaskFile(req, res) {
+  const url = new URL(req.url, "http://127.0.0.1");
+  const taskId = url.searchParams.get("taskId") || "";
+  const requestedPath = url.searchParams.get("path") || "";
+  if (!taskId || !requestedPath) return json(res, 400, { error: "missing_task_file_params" });
+  let resolved;
+  try {
+    resolved = resolveTaskFilePath(taskId, requestedPath, root);
+  } catch (error) {
+    return json(res, 400, { error: error.message || "invalid_task_file_path" });
+  }
+  const { filePath, relativePath } = resolved;
+  const info = await stat(filePath).catch(() => null);
+  if (!info) return json(res, 404, { error: "not_found" });
+  if (!info.isFile()) return json(res, 404, { error: "not_found" });
+  const kind = taskFileKind(relativePath);
+  const forceDownload = url.searchParams.get("download") === "1" || kind === "binary";
+  res.writeHead(200, {
+    "content-type": taskFileContentType(relativePath, kind),
+    "content-length": String(info.size),
+    "content-disposition": contentDisposition(forceDownload ? "attachment" : "inline", relativePath),
+    "access-control-allow-origin": "*",
+    "x-kca-file-kind": kind
+  });
+  createReadStream(filePath).pipe(res);
 }
 
 function broadcast(event) {
@@ -120,6 +153,7 @@ async function ensureReady() {
   readyPromise ??= (async () => {
     logStep("daemon", "ensureReady.start");
     const storage = await initStorage(root);
+    await refreshOpenRouterModelCache(root);
     boardService = createBoardService(root);
     configureEventBus();
     await seedIfEmpty();
@@ -211,6 +245,7 @@ const server = createServer(async (req, res) => {
     if (req.method === "OPTIONS") return json(res, 204, {});
     if (req.url === "/health") return json(res, 200, { ok: true, storageRoot: storage.root, seededFixtures: seedFixtures, schedulerMode: "event-driven", schedulerPollMs: 0 });
     if (req.url === "/api/state" && req.method === "GET") return json(res, 200, await boardService.snapshot());
+    if (req.url?.startsWith("/api/task-file") && req.method === "GET") return sendTaskFile(req, res);
     if (req.url === "/api/query" && req.method === "POST") return json(res, 200, await handleQuery(await body(req), root));
     if (req.url === "/api/events" && req.method === "GET") {
       logStep("daemon", "sse.connect");

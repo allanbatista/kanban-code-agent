@@ -1,8 +1,8 @@
 import { constants } from "node:fs";
-import { access, appendFile, mkdir, open, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, open, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
-import { DEFAULT_AI_SETTINGS } from "@kca/core/providers";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
+import { DEFAULT_AI_SETTINGS, fetchOpenRouterModels } from "@kca/core/providers";
 import { DEFAULT_ROLES } from "@kca/core/roles";
 import { logStep } from "@kca/core/log";
 import YAML from "yaml";
@@ -155,6 +155,14 @@ export async function readJsonl(path) {
       .map((line) => JSON.parse(line));
   } catch {
     return [];
+  }
+}
+
+async function readJson(path, fallback = null) {
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return fallback;
   }
 }
 
@@ -334,6 +342,253 @@ export async function readAgentLogs(rootInput, { taskId, limit = 50, cursor, age
   return { items, nextCursor, hasMore: items.length === limit };
 }
 
+function usageNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function contextUsageTokens(usage) {
+  const inputTokens = usageNumber(usage?.inputTokens);
+  const outputTokens = usageNumber(usage?.outputTokens);
+  if (inputTokens === undefined && outputTokens === undefined) return undefined;
+  return (inputTokens || 0) + (outputTokens || 0);
+}
+
+function contextPercentForUsage(usage, contextWindow) {
+  const tokens = contextUsageTokens(usage);
+  return tokens !== undefined && contextWindow ? Math.round((tokens / contextWindow) * 1000) / 10 : undefined;
+}
+
+function eventTime(value) {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function addUsageMetric(target, key, value) {
+  const parsed = usageNumber(value);
+  if (parsed === undefined) return;
+  target[key] = (target[key] || 0) + parsed;
+}
+
+function normalizeUsage(rawUsage) {
+  if (!rawUsage || typeof rawUsage !== "object") return null;
+  const inputTokens = usageNumber(rawUsage.inputTokens ?? rawUsage.input_tokens ?? rawUsage.prompt_tokens ?? rawUsage.input);
+  const outputTokens = usageNumber(rawUsage.outputTokens ?? rawUsage.output_tokens ?? rawUsage.completion_tokens ?? rawUsage.output);
+  const totalTokens = usageNumber(rawUsage.totalTokens ?? rawUsage.total_tokens) ?? (
+    inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined
+  );
+  const cacheReadTokens = usageNumber(
+    rawUsage.cacheRead
+    ?? rawUsage.cache_read
+    ?? rawUsage.cache_read_input_tokens
+    ?? rawUsage.prompt_cache_hit_tokens
+    ?? rawUsage.prompt_tokens_details?.cached_tokens
+    ?? rawUsage.input_tokens_details?.cached_tokens
+  );
+  const cacheWriteTokens = usageNumber(rawUsage.cacheWrite ?? rawUsage.cache_write ?? rawUsage.cache_creation_input_tokens);
+  const cacheTokens = usageNumber(rawUsage.cacheTokens ?? rawUsage.cache_tokens ?? rawUsage.cached_tokens ?? rawUsage.cachedTokens) ?? (
+    cacheReadTokens !== undefined || cacheWriteTokens !== undefined ? (cacheReadTokens || 0) + (cacheWriteTokens || 0) : undefined
+  );
+  const contextWindow = usageNumber(rawUsage.contextWindow ?? rawUsage.context_window);
+  const contextPercent = contextWindow
+    ? contextPercentForUsage({ inputTokens, outputTokens }, contextWindow)
+    : usageNumber(rawUsage.contextPercent ?? rawUsage.context_percent);
+  const usage = {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(cacheTokens !== undefined ? { cacheTokens } : {}),
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+    ...(contextPercent !== undefined ? { contextPercent } : {})
+  };
+  return Object.keys(usage).length ? usage : null;
+}
+
+function runDurations(events = []) {
+  const runs = new Map();
+  for (const event of events) {
+    if (!event?.runId) continue;
+    const ts = eventTime(event.ts);
+    if (ts === undefined) continue;
+    const agentId = event.agentId || event.agent || (event.actor && !["user", "orchestrator", "daemon"].includes(event.actor) ? event.actor : undefined);
+    if (!agentId) continue;
+    const current = runs.get(event.runId) || { runId: event.runId, agentId, role: event.role || agentId, start: ts, end: ts };
+    current.agentId ||= agentId;
+    current.role ||= event.role || agentId;
+    current.start = Math.min(current.start, ts);
+    current.end = Math.max(current.end, ts);
+    runs.set(event.runId, current);
+  }
+  return [...runs.values()].filter((run) => run.end >= run.start);
+}
+
+function applyUsageEvent(target, event) {
+  const usage = normalizeUsage(event?.usage) || {};
+  addUsageMetric(target, "inputTokens", usage.inputTokens);
+  addUsageMetric(target, "outputTokens", usage.outputTokens);
+  addUsageMetric(target, "totalTokens", usage.totalTokens);
+  addUsageMetric(target, "cacheTokens", usage.cacheTokens);
+  const contextWindow = usageNumber(usage.contextWindow);
+  const contextPercent = usageNumber(usage.contextPercent);
+  if (contextWindow !== undefined) target.contextWindow = contextWindow;
+  if (contextPercent !== undefined) target.contextPercent = contextPercent;
+}
+
+function usageText(value) {
+  const text = String(value || "").trim();
+  return text || undefined;
+}
+
+function runModelEvents(events = []) {
+  const runs = new Map();
+  for (const event of events) {
+    if (event?.type !== "agent.run" || !event.runId) continue;
+    runs.set(event.runId, {
+      provider: usageText(event.provider),
+      model: usageText(event.model),
+      effort: usageText(event.effort)
+    });
+  }
+  return runs;
+}
+
+function usageModelKey(provider, model) {
+  return `${provider || ""}\u0001${model || "n/d"}`;
+}
+
+function usageModelTarget(agentUsage, provider, model) {
+  if (!agentUsage._models) agentUsage._models = new Map();
+  const key = usageModelKey(provider, model);
+  const current = agentUsage._models.get(key) || {
+    ...(provider ? { provider } : {}),
+    model: model || "n/d",
+    runs: 0
+  };
+  agentUsage._models.set(key, current);
+  return current;
+}
+
+function providerModelsCachePath(rootInput, providerId = "openrouter") {
+  return join(paths(rootInput).settings, "provider-models", `${providerId}.json`);
+}
+
+export async function readProviderModelsCache(rootInput, providerId = "openrouter") {
+  const cache = await readJson(providerModelsCachePath(rootInput, providerId), null);
+  return cache && Array.isArray(cache.models) ? cache : null;
+}
+
+export async function refreshOpenRouterModelCache(rootInput, { env = process.env, fetchImpl = globalThis.fetch } = {}) {
+  try {
+    const cache = await fetchOpenRouterModels(env, { fetchImpl });
+    await writeAtomic(providerModelsCachePath(rootInput, "openrouter"), JSON.stringify(cache, null, 2));
+    logStep("fsdb", "providerModels.cache_refreshed", { providerId: "openrouter", models: cache.models.length });
+    return { ok: true, cache };
+  } catch (error) {
+    const cache = await readProviderModelsCache(rootInput, "openrouter");
+    logStep("fsdb", "providerModels.cache_refresh_failed", { providerId: "openrouter", error: error.message, stale: Boolean(cache) });
+    return { ok: false, error: error.message, cache, stale: Boolean(cache) };
+  }
+}
+
+function modelTerms(model = {}) {
+  const id = usageText(model.id);
+  const name = usageText(model.name);
+  const shortId = id?.includes("/") ? id.split("/").pop() : undefined;
+  return [id, name, shortId].filter(Boolean);
+}
+
+function resolveCachedContextWindow(modelCaches = [], provider, model) {
+  const needle = usageText(model);
+  if (!needle) return undefined;
+  const models = modelCaches.flatMap((cache) => Array.isArray(cache?.models) ? cache.models.map((item) => ({ ...item, providerId: cache.providerId })) : []);
+  const exact = models.find((item) => modelTerms(item).some((term) => term === needle));
+  const suffix = exact || models.find((item) => usageText(item.id)?.endsWith(`/${needle}`));
+  return usageNumber(suffix?.contextWindow);
+}
+
+function usageEventWithContext(usageEvent, modelCaches, provider, model) {
+  const usage = normalizeUsage(usageEvent.usage);
+  if (!usage) return usageEvent;
+  const contextWindow = usageNumber(usage.contextWindow) ?? resolveCachedContextWindow(modelCaches, provider, model);
+  if (contextWindow === undefined) return { ...usageEvent, usage };
+  const contextPercent = contextPercentForUsage(usage, contextWindow);
+  return {
+    ...usageEvent,
+    usage: {
+      ...usage,
+      contextWindow,
+      ...(contextPercent !== undefined ? { contextPercent } : {})
+    }
+  };
+}
+
+function usageEventsFromEvent(event) {
+  if (event?.type === "agent.usage" && normalizeUsage(event.usage)) return [event];
+  if (event?.type !== "agent.transcript" || event.providerEventType !== "agent_end") return [];
+  const messages = Array.isArray(event.providerEvent?.messages) ? event.providerEvent.messages : [];
+  return messages.flatMap((message) => {
+    const usage = normalizeUsage(message?.usage);
+    if (!usage) return [];
+    return [{
+      ts: event.ts,
+      taskId: event.taskId,
+      runId: event.runId,
+      actor: event.actor,
+      agentId: event.agentId || event.actor,
+      role: event.role || event.actor,
+      responseId: message.responseId,
+      provider: usageText(message?.provider ?? event.provider ?? event.providerEvent?.provider),
+      model: usageText(message?.model ?? event.model ?? event.providerEvent?.model),
+      usage
+    }];
+  });
+}
+
+export function aggregateTaskUsage(events = [], { modelCaches = [] } = {}) {
+  const byAgent = new Map();
+  const total = {};
+  const seen = new Set();
+  const runModels = runModelEvents(events);
+  for (const run of runDurations(events)) {
+    const current = byAgent.get(run.agentId) || { agentId: run.agentId, role: run.role, runs: 0 };
+    addUsageMetric(current, "durationMs", run.end - run.start);
+    addUsageMetric(total, "durationMs", run.end - run.start);
+    byAgent.set(run.agentId, current);
+  }
+  for (const event of events) {
+    for (const usageEvent of usageEventsFromEvent(event)) {
+      const agentId = usageEvent.agentId || usageEvent.agent || usageEvent.actor || "agent";
+      const key = [usageEvent.responseId || "", usageEvent.runId || "", usageEvent.ts || "", agentId].join("\u0001");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const current = byAgent.get(agentId) || { agentId, role: usageEvent.role || usageEvent.actor, runs: 0 };
+      const runModel = runModels.get(usageEvent.runId) || {};
+      const provider = usageText(usageEvent.provider) || runModel.provider;
+      const model = usageText(usageEvent.model) || runModel.model || "n/d";
+      const usageWithContext = usageEventWithContext(usageEvent, modelCaches, provider, model);
+      const modelUsage = usageModelTarget(current, provider, model);
+      current.runs += 1;
+      modelUsage.runs += 1;
+      applyUsageEvent(current, usageWithContext);
+      applyUsageEvent(modelUsage, usageWithContext);
+      applyUsageEvent(total, usageWithContext);
+      byAgent.set(agentId, current);
+    }
+  }
+  const agents = [...byAgent.values()].map((agent) => {
+    const models = [...(agent._models?.values() || [])].sort((a, b) => `${a.provider || ""}/${a.model}`.localeCompare(`${b.provider || ""}/${b.model}`));
+    const { _models, ...rest } = agent;
+    return models.length ? { ...rest, models } : rest;
+  }).sort((a, b) => a.agentId.localeCompare(b.agentId));
+  return agents.length ? { total, byAgent: agents } : null;
+}
+
+export async function readTaskUsage(taskId, rootInput) {
+  const p = paths(rootInput);
+  const openRouterCache = await readProviderModelsCache(rootInput, "openrouter");
+  return aggregateTaskUsage(await readJsonl(join(p.tasks, taskId, "events.jsonl")), { modelCaches: [openRouterCache].filter(Boolean) });
+}
+
 function deepMerge(base, patch) {
   if (!patch || typeof patch !== "object" || Array.isArray(patch)) return patch;
   const out = { ...(base || {}) };
@@ -369,6 +624,7 @@ export async function initStorage(rootInput) {
         join(p.settings, "agents"),
         join(p.settings, "roles"),
         join(p.settings, "prompts"),
+        join(p.settings, "provider-models"),
         join(p.settings, "hooks"),
         join(p.settings, "skills"),
         join(p.runtime, "sessions"),
@@ -789,6 +1045,97 @@ export async function writeTaskAttachment(taskId, fileName, data, rootInput) {
   return relativePath;
 }
 
+const IMAGE_CONTENT_TYPES = {
+  ".apng": "image/apng",
+  ".avif": "image/avif",
+  ".gif": "image/gif",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp"
+};
+
+const TEXT_CONTENT_TYPES = {
+  ".css": "text/css; charset=utf-8",
+  ".csv": "text/csv; charset=utf-8",
+  ".diff": "text/plain; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".jsonl": "application/x-ndjson; charset=utf-8",
+  ".log": "text/plain; charset=utf-8",
+  ".md": "text/markdown; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".patch": "text/plain; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+  ".ts": "text/typescript; charset=utf-8",
+  ".tsx": "text/typescript; charset=utf-8",
+  ".xml": "application/xml; charset=utf-8",
+  ".yaml": "application/yaml; charset=utf-8",
+  ".yml": "application/yaml; charset=utf-8"
+};
+
+function looksText(buffer) {
+  if (!buffer.length) return true;
+  let suspicious = 0;
+  for (const byte of buffer) {
+    if (byte === 0) return false;
+    if (byte < 7 || (byte > 13 && byte < 32)) suspicious += 1;
+  }
+  return suspicious / buffer.length < 0.02;
+}
+
+async function readFileSample(path, bytes = 512) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+    const buffer = Buffer.alloc(bytes);
+    const result = await handle.read(buffer, 0, bytes, 0);
+    return buffer.subarray(0, result.bytesRead);
+  } catch {
+    return Buffer.alloc(0);
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+export function taskFileContentType(relativePath, kind = taskFileKind(relativePath)) {
+  const ext = extname(relativePath).toLowerCase();
+  if (IMAGE_CONTENT_TYPES[ext]) return IMAGE_CONTENT_TYPES[ext];
+  if (TEXT_CONTENT_TYPES[ext]) return TEXT_CONTENT_TYPES[ext];
+  return kind === "text" ? "text/plain; charset=utf-8" : "application/octet-stream";
+}
+
+export function taskFileKind(relativePath, sample) {
+  const ext = extname(relativePath).toLowerCase();
+  if (IMAGE_CONTENT_TYPES[ext]) return "image";
+  if (TEXT_CONTENT_TYPES[ext]) return "text";
+  if (sample) return looksText(sample) ? "text" : "binary";
+  return "binary";
+}
+
+export function resolveTaskFilePath(taskId, relativePath, rootInput) {
+  const p = paths(rootInput);
+  const taskDir = resolve(p.tasks, taskId);
+  const cleanPath = String(relativePath || "").replaceAll("\\", "/");
+  if (!cleanPath || cleanPath.includes("\0") || cleanPath.startsWith("/")) throw new Error("invalid_task_file_path");
+  const filePath = resolve(taskDir, cleanPath);
+  if (filePath !== taskDir && !filePath.startsWith(`${taskDir}${sep}`)) throw new Error("task_file_path_outside_task");
+  return { taskDir, filePath, relativePath: cleanPath };
+}
+
+export async function listTaskFileEntries(taskId, rootInput) {
+  const filePaths = await listTaskFiles(taskId, rootInput);
+  return Promise.all(filePaths.map(async (path) => {
+    const { filePath } = resolveTaskFilePath(taskId, path, rootInput);
+    const info = await stat(filePath);
+    const sample = await readFileSample(filePath);
+    const kind = taskFileKind(path, sample);
+    return { path, size: info.size, kind, contentType: taskFileContentType(path, kind) };
+  }));
+}
+
 export async function listTaskFiles(taskId, rootInput) {
   const p = paths(rootInput);
   const taskDir = join(p.tasks, taskId);
@@ -1000,7 +1347,10 @@ export async function boardSnapshot(rootInput) {
   const p = await initStorage(rootInput);
   logStep("fsdb", "boardSnapshot.start", { root: p.root });
   const board = await readYaml(join(p.settings, "boards", "default.yaml"), { columns: [] });
-  const tasks = (await listTasks(rootInput)).filter((task) => task.status !== "draft");
+  const tasks = await Promise.all((await listTasks(rootInput)).filter((task) => task.status !== "draft").map(async (task) => {
+    const usage = await readTaskUsage(task.id, rootInput);
+    return usage ? { ...task, usage } : task;
+  }));
   const settings = await readSettings(rootInput);
   const result = {
     schema: "kanban-code-agent/state@1",

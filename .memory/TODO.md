@@ -37,3 +37,11 @@ Task KCA-441612 was left stuck after the OpenAI-compatible adapter returned `ter
 # [high] Complete tool result persistence and resume rehydration
 
 The validation fix made `run_command` output visible to OpenAI-compatible model turns and added non-terminal recovery, but the full `.features/20260613-2100-tool-result-persistence/plan.md` scope is not complete. Remaining work: persist durable model-facing previews/result refs into command indexes/events, restore recent tool results on resumed prompts, and add orchestrator tests for non-terminal lease recovery and resumed prompt rehydration.
+
+# [medium] Full orchestrator unit suite has existing failures
+
+`rtk node --test tests/unit/orchestrator.test.js tests/unit/pi-adapter.test.js` failed in existing scheduler/assistant tests where tasks stayed `idle` instead of `running` and assistant command assertions returned undefined. New file metadata/prompt tests passed before the suite was stopped. Next step: investigate scheduler/assistant regressions separately from agent response/file actions.
+
+# [medium] Re-run broad unit suite after scheduler assistant regressions
+
+The agent usage model implementation passed focused typecheck, syntax, adapter usage, aggregate usage, and E2E usage validation. The broad `rtk node --test tests/unit/pi-adapter.test.js tests/unit/orchestrator.test.js` run showed scheduler/assistant failures outside the focused usage tests and did not finish cleanly. Next step: fix or isolate those existing regressions, then rerun the broad suite.

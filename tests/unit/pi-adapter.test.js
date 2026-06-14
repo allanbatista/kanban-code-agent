@@ -71,6 +71,8 @@ test("task agent tools execute typed workflow commands and emit tool events", as
   });
   const complete = tools.find((tool) => tool.name === "complete_task");
   const artifact = tools.find((tool) => tool.name === "emit_artifact");
+  assert.match(artifact.description, /medium or longer/);
+  assert.match(artifact.description, /respond directly in chat/);
   await complete.execute("call-complete", { nextColumn: "validate", summary: "done" });
   await artifact.execute("call-artifact", { path: "evidence.md", content: "ok" });
   assert.deepEqual(commands.map((command) => command.type), ["agent.complete_task", "agent.emit_artifact"]);
@@ -130,7 +132,7 @@ test("openai compatible adapter executes task tool calls", async () => {
         choices: [{
           message: {
             role: "assistant",
-            content: "",
+            content: "Resposta final visível.",
             tool_calls: [{
               id: "call-complete",
               type: "function",
@@ -151,8 +153,9 @@ test("openai compatible adapter executes task tool calls", async () => {
       cwd: "/tmp/kca",
       prompt: "Complete",
       fetchImpl,
-      customToolFactory: ({ sdkExports }) => buildTaskAgentTools({
+      customToolFactory: ({ sdkExports, getLastAssistantText }) => buildTaskAgentTools({
         sdkExports,
+        getLastAssistantText,
         taskId: "KCA-OAI",
         runId: "run_oai",
         role: "engineering",
@@ -169,6 +172,7 @@ test("openai compatible adapter executes task tool calls", async () => {
     assert.equal(result.terminal, true);
     assert.equal(calls[0].tools.some((tool) => tool.function.name === "complete_task"), true);
     assert.deepEqual(commands.map((command) => command.type), ["agent.complete_task"]);
+    assert.equal(commands[0].finalText, "Resposta final visível.");
     assert.deepEqual(events.map((event) => event.type), ["agent.tool_call", "agent.tool_result"]);
   } finally {
     if (previousKey === undefined) delete process.env.TEST_OPENAI_KEY;
@@ -240,6 +244,53 @@ test("openai compatible adapter reports non-terminal text responses", async () =
     });
     assert.equal(result.terminal, false);
     assert.equal(result.reason, "non_terminal_response");
+  } finally {
+    if (previousKey === undefined) delete process.env.TEST_OPENAI_KEY;
+    else process.env.TEST_OPENAI_KEY = previousKey;
+  }
+});
+
+test("openai compatible adapter emits only real provider usage", async () => {
+  const previousKey = process.env.TEST_OPENAI_KEY;
+  process.env.TEST_OPENAI_KEY = "test-key";
+  const events = [];
+  const fetchImpl = async () => ({
+    ok: true,
+    json: async () => ({
+      id: "chatcmpl-usage",
+      model: "model-test",
+      usage: {
+        prompt_tokens: 250,
+        completion_tokens: 75,
+        total_tokens: 325,
+        prompt_tokens_details: { cached_tokens: 40 }
+      },
+      choices: [{ message: { role: "assistant", content: "ok" } }]
+    })
+  });
+  try {
+    const result = await startOpenAICompatibleSession({
+      providerConfig: { id: "test", baseUrl: "https://example.test/v1", apiKeyEnv: "TEST_OPENAI_KEY", contextWindow: 1000 },
+      model: "model-test",
+      task: { id: "KCA-USAGE", title: "Usage" },
+      agentId: "engineering",
+      role: "engineering",
+      runId: "run_usage",
+      cwd: "/tmp/kca",
+      prompt: "Report usage",
+      fetchImpl,
+      customToolFactory: () => [],
+      onEvent: async (event) => events.push(event)
+    });
+    assert.equal(result.mode, "real");
+    const usage = events.find((event) => event.type === "agent.usage");
+    assert.equal(usage.usage.inputTokens, 250);
+    assert.equal(usage.usage.outputTokens, 75);
+    assert.equal(usage.usage.totalTokens, 325);
+    assert.equal(usage.usage.cacheTokens, 40);
+    assert.equal(usage.usage.contextPercent, 32.5);
+    assert.equal(usage.provider, "test");
+    assert.equal(usage.model, "model-test");
   } finally {
     if (previousKey === undefined) delete process.env.TEST_OPENAI_KEY;
     else process.env.TEST_OPENAI_KEY = previousKey;

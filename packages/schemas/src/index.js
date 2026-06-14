@@ -16,9 +16,11 @@ export const EventType = z.enum([
   "task.unblocked",
   "task.unassigned",
   "agent.queued",
+  "agent.run",
   "agent.started",
   "agent.event",
   "agent.transcript",
+  "agent.usage",
   "agent.message",
   "agent.waiting_for_persona",
   "agent.waiting_for_human",
@@ -524,7 +526,8 @@ export const CommandSchema = z.discriminatedUnion("type", [
     taskId: z.string().min(1),
     runId: z.string().min(1),
     nextColumn: z.string().default("validate"),
-    summary: z.string().default("")
+    summary: z.string().default(""),
+    finalText: z.string().optional()
   }),
   commandBase.extend({
     type: z.literal("agent.report_blocker"),

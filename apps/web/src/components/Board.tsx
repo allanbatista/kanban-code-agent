@@ -96,13 +96,16 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                           {task.failure?.reason ? <p className="task-failure">Falha: {task.failure.reason}</p> : null}
                           <div className="task-tags">
                             {!isInboxIdle ? <span className={clsx("pill", task.status)}>{statusLabels[task.status] || task.status}</span> : null}
-                            {task.routing?.lastAgent ? <span className="pill soft">prev {task.routing.lastAgent}</span> : null}
                             {task.routing?.nextSuggestedColumn ? <span className="pill soft">next {task.routing.nextSuggestedColumn}</span> : null}
                             {(task.projectTargets || []).map((project) => <span className="pill" key={project}>{project}</span>)}
                           </div>
                           <div className="progress" aria-label={`Progresso ${progress}%`}><span style={{ width: `${progress}%` }} /></div>
                           <div className="task-footer">
                             <span className="mini-meta"><GitBranch size={13} />{task.worktree?.branch || "sem branch"}</span>
+                          </div>
+                          <div className="task-timing-row" aria-label="Criacao e tempo total">
+                            <time dateTime={task.createdAt || undefined}>{formatTaskDateTime(task.createdAt)}</time>
+                            <span>{formatTaskDuration(task.usage?.total?.durationMs)}</span>
                           </div>
                         </button>
                         <div className="task-actions">
@@ -122,4 +125,24 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
       </div>
     </div>
   );
+}
+
+function twoDigits(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function formatTaskDateTime(value?: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  return `${twoDigits(date.getDate())}/${twoDigits(date.getMonth() + 1)}/${date.getFullYear()} ${twoDigits(date.getHours())}:${twoDigits(date.getMinutes())}`;
+}
+
+function formatTaskDuration(value?: number) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "";
+  if (value < 1000) return `${Math.round(value)}ms`;
+  if (value < 60000) return `${Math.round(value / 1000)}s`;
+  const minutes = Math.floor(value / 60000);
+  const seconds = Math.round((value % 60000) / 1000);
+  return seconds ? `${minutes}m${seconds}s` : `${minutes}m`;
 }

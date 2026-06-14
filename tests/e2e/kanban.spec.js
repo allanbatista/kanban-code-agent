@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import YAML from "yaml";
 
@@ -78,6 +78,7 @@ test("refreshes the board when FSDB task files change externally", async ({ page
   const task = await createTask(request, `Watched task ${Date.now()}`);
   await page.goto("/");
   await expect(page.getByText(task.title)).toBeVisible();
+  await expect(page.locator(`[data-task-id="${task.id}"]`).getByLabel("Criacao e tempo total")).not.toContainText("n/d");
 
   const taskFile = resolve(storageRoot, "tasks", task.id, "task.yaml");
   const data = YAML.parse(await readFile(taskFile, "utf8"));
@@ -184,6 +185,105 @@ test("task modal exposes tabs and runs the assigned agent", async ({ page, reque
     const state = await request.get(`${daemonUrl}/api/state`);
     return (await state.json()).tasks.find((item) => item.id === task.id)?.title;
   }).toContain("editado");
+});
+
+test("task files open text and images inline and download binaries", async ({ page, request }) => {
+  const task = await createTask(request, `File actions ${Date.now()}`);
+  const taskDir = resolve(storageRoot, "tasks", task.id);
+  await mkdir(resolve(taskDir, "artifacts"), { recursive: true });
+  await writeFile(resolve(taskDir, "artifacts", "notes.txt"), "plain text\n");
+  await writeFile(resolve(taskDir, "artifacts", "pixel.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  await writeFile(resolve(taskDir, "artifacts", "archive.bin"), Buffer.from([0, 1, 2, 3]));
+
+  const textResponse = await request.get(`${daemonUrl}/api/task-file?${new URLSearchParams({ taskId: task.id, path: "artifacts/notes.txt" })}`);
+  await expect(textResponse).toBeOK();
+  expect(textResponse.headers()["content-type"]).toContain("text/plain");
+  expect(textResponse.headers()["content-disposition"]).toContain("inline");
+
+  const imageResponse = await request.get(`${daemonUrl}/api/task-file?${new URLSearchParams({ taskId: task.id, path: "artifacts/pixel.png" })}`);
+  await expect(imageResponse).toBeOK();
+  expect(imageResponse.headers()["content-type"]).toContain("image/png");
+  expect(imageResponse.headers()["content-disposition"]).toContain("inline");
+
+  const binaryResponse = await request.get(`${daemonUrl}/api/task-file?${new URLSearchParams({ taskId: task.id, path: "artifacts/archive.bin" })}`);
+  await expect(binaryResponse).toBeOK();
+  expect(binaryResponse.headers()["content-disposition"]).toContain("attachment");
+
+  const traversal = await request.get(`${daemonUrl}/api/task-file?${new URLSearchParams({ taskId: task.id, path: "../task.yaml" })}`);
+  expect(traversal.status()).toBe(400);
+
+  await page.goto("/");
+  await page.getByText(task.title).click();
+  await page.getByRole("tab", { name: "arquivos" }).click();
+  await expect(page.getByRole("link", { name: "Abrir arquivo artifacts/notes.txt" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Abrir arquivo artifacts/pixel.png" })).toBeVisible();
+
+  const textPopupPromise = page.waitForEvent("popup");
+  await page.getByRole("link", { name: "Abrir arquivo artifacts/notes.txt" }).click();
+  const textPopup = await textPopupPromise;
+  await expect(textPopup.locator("body")).toContainText("plain text");
+  await textPopup.close();
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("link", { name: "Baixar arquivo artifacts/archive.bin" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("archive.bin");
+});
+
+test("shows real token usage on task card timing and modal", async ({ page, request }) => {
+  const startedAt = "2026-06-14T00:00:00.000Z";
+  const endedAt = "2026-06-14T00:01:05.000Z";
+  const task = await createTask(request, `Usage UI ${Date.now()}`, {
+    column: "engineering",
+    status: "running",
+    routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } }
+  });
+  await writeFile(resolve(storageRoot, "tasks", task.id, "events.jsonl"), `${JSON.stringify({
+    ts: startedAt,
+    type: "agent.transcript",
+    actor: "engineering",
+    taskId: task.id,
+    runId: "run-usage-e2e",
+    providerEventType: "agent_start"
+  })}\n${JSON.stringify({
+    ts: endedAt,
+    type: "agent.usage",
+    actor: "engineering",
+    taskId: task.id,
+    runId: "run-usage-e2e",
+    agentId: "engineering",
+    role: "engineering",
+    responseId: "chatcmpl-usage-e2e",
+    provider: "openai",
+    model: "model-a",
+    usage: { inputTokens: 1000, outputTokens: 250, totalTokens: 1250, cacheTokens: 125, contextWindow: 4000, contextPercent: 25 }
+  })}\n${JSON.stringify({
+    ts: endedAt,
+    type: "agent.usage",
+    actor: "engineering",
+    taskId: task.id,
+    runId: "run-usage-e2e",
+    agentId: "engineering",
+    role: "engineering",
+    responseId: "chatcmpl-usage-e2e-b",
+    provider: "openai",
+    model: "model-b",
+    usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120, cacheTokens: 0, contextWindow: 4000, contextPercent: 2.5 }
+  })}\n`, { flag: "a" });
+
+  await page.goto("/");
+  const card = page.locator(`[data-task-id="${task.id}"]`);
+  await expect(card.getByLabel("Uso de tokens")).toHaveCount(0);
+  await expect(card.getByLabel("Criacao e tempo total")).toContainText(/\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}/);
+  await expect(card.getByLabel("Criacao e tempo total")).toContainText("1m5s");
+  await card.getByRole("button").first().click();
+  await page.getByRole("tab", { name: "execucao" }).click();
+  await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("engineering");
+  await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("modelo: openai/model-a");
+  await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("modelo: openai/model-b");
+  await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("1m 5s");
+  await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("1.250");
+  await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("125");
 });
 
 test("daemon scheduler starts tasks from persona events", async ({ request }) => {

@@ -6,10 +6,11 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
-import { CheckCircle, FileText, GitBranch, LoaderCircle, Paperclip, Pause, Play, Send, Split, Upload, X } from "lucide-react";
+import { CheckCircle, Download, ExternalLink, FileText, GitBranch, Image as ImageIcon, LoaderCircle, Paperclip, Pause, Play, Send, Split, Upload, X } from "lucide-react";
 import { z } from "zod";
 import { ChatMessageContent } from "./ChatMessageContent";
-import type { AgentLogEntry, ChatMessage, Task, TaskFiles } from "../types";
+import { daemonBase } from "../api";
+import type { AgentLogEntry, ChatMessage, Task, TaskFiles, TokenUsageAggregate } from "../types";
 
 const formSchema = z.object({
   title: z.string().optional(),
@@ -285,6 +286,7 @@ export function TaskModal({ task, draftTask, open, onClose, onSave, onUploadAtta
                     <input ref={fileInputRef} className="sr-only" type="file" multiple onChange={(event) => event.target.files && addAttachments(event.target.files)} />
                   </Tabs.Content>
                   <Tabs.Content value="execucao">
+                    <UsageSummary usage={files?.usage || task?.usage || null} />
                     <Panel title="Runtime" lines={[
                       `status: ${task?.status || "nova"}`,
                       `agent: ${task?.routing?.currentAgent || "assistant"}`,
@@ -308,7 +310,7 @@ export function TaskModal({ task, draftTask, open, onClose, onSave, onUploadAtta
                   </Tabs.Content>
                   <Tabs.Content value="hooks"><Panel title="Hooks da task" lines={task?.hooks?.active?.length ? task.hooks.active : ["nenhum hook ativo"]} /></Tabs.Content>
                   <Tabs.Content value="eventos"><Panel title="Timeline" lines={(files?.events?.length ? files.events.slice(-8).map((event) => `${event.type || "event"} · ${event.ts || ""}`) : [`updated: ${task?.updatedAt || "nao persistida"}`])} /></Tabs.Content>
-                  <Tabs.Content value="arquivos"><Panel title="Arquivos da task" lines={[...(files?.files || ["task.yaml", "description.md", "dependencies.yaml", "events.jsonl"]), ...attachments.map((item) => item.file.name)]} /></Tabs.Content>
+                  <Tabs.Content value="arquivos"><TaskFileList taskId={task?.id} files={files} attachments={attachments} /></Tabs.Content>
                 </div>
               </Tabs.Root>
               <div className="flex justify-end gap-2 border-t border-zinc-800 p-4">
@@ -570,6 +572,7 @@ function prettyLogKind(log: AgentLogEntry) {
 
 function prettyLogTitle(log: AgentLogEntry) {
   const actor = log.agentId || log.actor || "agent";
+  if (log.type === "agent.usage") return `Usage ${actor}`;
   if (log.category === "tool_call" || log.type === "agent.tool_call") return `${actor} chamou ${log.text.split(/\s+/).slice(0, 2).join(" ")}`;
   if (log.category === "tool_result" || log.type === "agent.tool_result") return `${actor} recebeu resultado`;
   if (log.category === "reasoning") return `${actor} raciocinando`;
@@ -587,7 +590,18 @@ function prettyLogTitle(log: AgentLogEntry) {
 function prettyLogLines(log: AgentLogEntry) {
   const raw = (log.raw && typeof log.raw === "object" ? log.raw : {}) as Record<string, unknown>;
   const command = (raw.command && typeof raw.command === "object" ? raw.command : {}) as Record<string, unknown>;
+  const usage = (raw.usage && typeof raw.usage === "object" ? raw.usage : {}) as Record<string, unknown>;
   const lines: string[] = [];
+  if (log.type === "agent.usage") {
+    const parts = [
+      `ctx ${formatUsageValue(usage.contextPercent, "%")}`,
+      `total ${formatUsageValue(usage.totalTokens)}`,
+      `cache ${formatUsageValue(usage.cacheTokens)}`,
+      `input ${formatUsageValue(usage.inputTokens)}`,
+      `output ${formatUsageValue(usage.outputTokens)}`
+    ];
+    return [parts.join(" · ")];
+  }
   const text = String(log.text || "").trim();
   if (text) lines.push(text);
   if (command.type) lines.push(`command ${String(command.type)}`);
@@ -622,6 +636,10 @@ function prettyLogDetails(log: AgentLogEntry) {
   const toolCall = objectValue(raw.toolCall);
   const toolResult = objectValue(raw.toolResult);
   const command = objectValue(raw.command);
+  const usage = objectValue(raw.usage);
+  if (raw.type === "agent.usage" && Object.keys(usage).length) {
+    details.push({ label: "usage", value: compactJson(usage) });
+  }
   if (toolCall.name || toolCall.tool || toolCall.arguments || toolCall.input) {
     details.push({ label: "tool call", value: compactJson({ name: toolCall.name || toolCall.tool, arguments: toolCall.arguments || toolCall.input || toolCall.params }) });
   }
@@ -652,6 +670,137 @@ function Panel({ title, lines }: { title: string; lines: string[] }) {
       <ul className="mt-3 space-y-2 text-sm text-zinc-400">
         {lines.map((line) => <li className="rounded-md border border-zinc-800 bg-zinc-950/70 p-2" key={line}>{line}</li>)}
       </ul>
+    </section>
+  );
+}
+
+function taskFileUrl(taskId: string, path: string, download = false) {
+  const params = new URLSearchParams({ taskId, path });
+  if (download) params.set("download", "1");
+  return `${daemonBase}/api/task-file?${params.toString()}`;
+}
+
+function formatFileSize(size?: number) {
+  if (typeof size !== "number" || !Number.isFinite(size)) return "";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(size / 1024)} KB`;
+  return `${new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 1 }).format(size / 1024 / 1024)} MB`;
+}
+
+function inferFileKind(path: string): "text" | "image" | "binary" {
+  if (/\.(apng|avif|gif|jpe?g|png|svg|webp)$/i.test(path)) return "image";
+  if (/\.(css|csv|diff|html|js|json|jsonl|log|md|mjs|patch|txt|ts|tsx|xml|ya?ml)$/i.test(path)) return "text";
+  return "binary";
+}
+
+function TaskFileList({ taskId, files, attachments }: { taskId?: string; files?: TaskFiles; attachments: AttachmentItem[] }) {
+  const persisted = (files?.fileEntries?.length ? files.fileEntries : (files?.files || ["task.yaml", "description.md", "dependencies.yaml", "events.jsonl"]).map((path) => ({ path, kind: inferFileKind(path), size: undefined as number | undefined })));
+  const pending = attachments.filter((item) => !item.path).map((item) => item.file.name);
+  return (
+    <section className="task-file-list">
+      <h3 className="text-sm font-semibold">Arquivos da task</h3>
+      <ul className="task-file-list-items" aria-label="Arquivos da task">
+        {persisted.map((entry) => {
+          const kind = entry.kind || inferFileKind(entry.path);
+          const primaryDownload = kind === "binary";
+          const Icon = kind === "image" ? ImageIcon : FileText;
+          const label = kind === "binary" ? "Baixar arquivo" : "Abrir arquivo";
+          return (
+            <li className="task-file-row" key={entry.path}>
+              {taskId ? (
+                <a className="task-file-primary" href={taskFileUrl(taskId, entry.path, primaryDownload)} target={primaryDownload ? undefined : "_blank"} rel={primaryDownload ? undefined : "noreferrer"} download={primaryDownload ? "" : undefined} aria-label={`${label} ${entry.path}`}>
+                  <Icon size={16} />
+                  <span>{entry.path}</span>
+                </a>
+              ) : (
+                <span className="task-file-primary"><Icon size={16} /><span>{entry.path}</span></span>
+              )}
+              <span className="task-file-meta">{kind}{entry.size !== undefined ? ` · ${formatFileSize(entry.size)}` : ""}</span>
+              {taskId ? (
+                <div className="task-file-actions">
+                  {kind !== "binary" ? <a className="icon-button" href={taskFileUrl(taskId, entry.path)} target="_blank" rel="noreferrer" aria-label={`Abrir ${entry.path}`} title="Abrir"><ExternalLink size={15} /></a> : null}
+                  <a className="icon-button" href={taskFileUrl(taskId, entry.path, true)} download aria-label={`Baixar ${entry.path}`} title="Baixar"><Download size={15} /></a>
+                </div>
+              ) : null}
+            </li>
+          );
+        })}
+        {pending.map((name) => <li className="task-file-row pending" key={name}><span className="task-file-primary"><FileText size={16} /><span>{name}</span></span><span className="task-file-meta">pendente</span></li>)}
+      </ul>
+    </section>
+  );
+}
+
+function formatUsageValue(value: unknown, suffix = "") {
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${new Intl.NumberFormat("pt-BR", { maximumFractionDigits: suffix ? 1 : 0 }).format(value)}${suffix}`
+    : "n/d";
+}
+
+function formatDuration(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "n/d";
+  if (value < 1000) return `${Math.round(value)}ms`;
+  const totalSeconds = Math.round(value / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function formatModelLabel(model: { provider?: string; model?: string }) {
+  const name = String(model.model || "").trim() || "n/d";
+  const provider = String(model.provider || "").trim();
+  return provider && name !== "n/d" ? `${provider}/${name}` : name;
+}
+
+function UsageSummary({ usage }: { usage?: TokenUsageAggregate | null }) {
+  if (!usage?.byAgent?.length) {
+    return <Panel title="Tokens por agent" lines={["sem usage real reportado pelo provider"]} />;
+  }
+  return (
+    <section className="usage-summary">
+      <h3>Tokens por agent</h3>
+      <div className="usage-summary-grid" role="table" aria-label="Uso real de tokens por agent">
+        <div className="usage-summary-row header" role="row">
+          <span>agent</span>
+          <span>tempo</span>
+          <span>ctx</span>
+          <span>total</span>
+          <span>cache</span>
+          <span>input</span>
+          <span>output</span>
+        </div>
+        {usage.byAgent.flatMap((agent) => [
+          <div className="usage-summary-row" role="row" key={agent.agentId}>
+            <span>{agent.agentId}</span>
+            <span>{formatDuration(agent.durationMs)}</span>
+            <span>{formatUsageValue(agent.contextPercent, "%")}</span>
+            <span>{formatUsageValue(agent.totalTokens)}</span>
+            <span>{formatUsageValue(agent.cacheTokens)}</span>
+            <span>{formatUsageValue(agent.inputTokens)}</span>
+            <span>{formatUsageValue(agent.outputTokens)}</span>
+          </div>,
+          ...(agent.models || []).map((model) => (
+            <div className="usage-summary-row model" role="row" key={`${agent.agentId}:${model.provider || ""}:${model.model}`}>
+              <span title={formatModelLabel(model)}>modelo: {formatModelLabel(model)}</span>
+              <span>{formatDuration(model.durationMs)}</span>
+              <span>{formatUsageValue(model.contextPercent, "%")}</span>
+              <span>{formatUsageValue(model.totalTokens)}</span>
+              <span>{formatUsageValue(model.cacheTokens)}</span>
+              <span>{formatUsageValue(model.inputTokens)}</span>
+              <span>{formatUsageValue(model.outputTokens)}</span>
+            </div>
+          ))
+        ])}
+        <div className="usage-summary-row total" role="row">
+          <span>Total task</span>
+          <span>{formatDuration(usage.total.durationMs)}</span>
+          <span>{formatUsageValue(usage.total.contextPercent, "%")}</span>
+          <span>{formatUsageValue(usage.total.totalTokens)}</span>
+          <span>{formatUsageValue(usage.total.cacheTokens)}</span>
+          <span>{formatUsageValue(usage.total.inputTokens)}</span>
+          <span>{formatUsageValue(usage.total.outputTokens)}</span>
+        </div>
+      </div>
     </section>
   );
 }

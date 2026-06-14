@@ -259,7 +259,7 @@ a { color: inherit; text-decoration: none; }
 }
 .task:hover { border-color: var(--border-strong); transform: translateY(-1px); box-shadow: 0 8px 22px rgba(18,18,18,.06); }
 :root[data-theme="dark"] .task:hover { box-shadow: 0 8px 22px rgba(0,0,0,.18); }
-.task-open { width: 100%; min-height: 0; display: grid; gap: 12px; padding: 0; border: 0; border-radius: 0; background: transparent; text-align: left; }
+.task-open { width: 100%; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; justify-items: stretch; align-items: stretch; gap: 12px; padding: 0; border: 0; border-radius: 0; background: transparent; text-align: left; }
 .task-open:hover { background: transparent; border-color: transparent; }
 .task-head { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 10px; }
 .task-title { min-width: 0; display: grid; gap: 5px; }
@@ -271,6 +271,10 @@ a { color: inherit; text-decoration: none; }
 .task-tags, .task-footer, .task-actions, .chat-meta, .chat-suggestions, .chat-composer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 .task-actions { display: none; }
 .task-footer { justify-content: space-between; gap: 10px; padding-top: 2px; }
+.task-timing-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; padding-top: 2px; color: var(--muted-2); font-size: .78em; font-variant-numeric: tabular-nums; }
+.task-timing-row time, .task-timing-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-timing-row time { flex: 1 1 auto; }
+.task-timing-row span { flex: 0 0 auto; text-align: right; }
 .mini-meta { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted-2); font-size: .82em; white-space: nowrap; }
 .mini-button { min-height: 30px; padding: 0 10px; border-radius: 999px; color: var(--muted); font-size: 12px; background: var(--surface-soft); }
 .pill { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 24px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: .82em; background: transparent; color: var(--muted); white-space: nowrap; }
@@ -388,6 +392,22 @@ a { color: inherit; text-decoration: none; }
 .markdown-editor .cm-cursor { border-left-color: var(--text); }
 .markdown-editor .cm-selectionBackground { background: color-mix(in srgb, var(--accent) 24%, transparent) !important; }
 .task-tab-body { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: auto; padding: 16px; }
+.usage-summary { display: grid; gap: 10px; margin-bottom: 16px; }
+.usage-summary-grid { display: grid; gap: 6px; min-width: 0; overflow-x: auto; }
+.usage-summary-row { min-width: 720px; display: grid; grid-template-columns: minmax(120px, 1.3fr) repeat(6, minmax(82px, 1fr)); gap: 8px; align-items: center; border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px; color: var(--muted); background: var(--surface); }
+.usage-summary-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.usage-summary-row.header { color: var(--muted-2); background: transparent; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.usage-summary-row.model { background: transparent; border-color: color-mix(in srgb, var(--border) 70%, transparent); }
+.usage-summary-row.model span:first-child { padding-left: 18px; color: var(--muted-2); }
+.usage-summary-row.total { color: var(--text); background: var(--surface-soft); font-weight: 680; }
+.task-file-list { display: grid; gap: 12px; }
+.task-file-list-items { display: grid; gap: 8px; min-width: 0; }
+.task-file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface); color: var(--muted); }
+.task-file-primary { min-width: 0; display: inline-flex; align-items: center; gap: 8px; color: var(--text); }
+.task-file-primary span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-file-meta { color: var(--muted-2); font-size: 12px; white-space: nowrap; }
+.task-file-actions { display: inline-flex; align-items: center; gap: 6px; }
+.task-file-row.pending { opacity: .72; }
 .task-summary { flex: 1; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) 100px; gap: 12px; }
 .task-logs-tab { min-height: 0; flex: 1; display: flex; }
 .task-description-field { min-height: 0; }

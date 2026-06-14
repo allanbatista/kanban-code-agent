@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import YAML from "yaml";
 import { handleCommand, handleQuery } from "../../packages/orchestrator/src/index.js";
 import { planningArtifactsForTask } from "../../packages/orchestrator/src/planning-service.js";
-import { addProject, appendJsonl, initStorage, paths } from "../../packages/fsdb/src/index.js";
+import { addProject, appendJsonl, boardSnapshot, initStorage, paths, refreshOpenRouterModelCache } from "../../packages/fsdb/src/index.js";
+import { readTaskComments } from "../../packages/fsdb/src/chat-store.js";
 import { createRepoFixture } from "../../packages/git-worktree/src/index.js";
 import { buildAgentChat } from "../../packages/agent-runtime/src/index.js";
 
@@ -99,7 +100,9 @@ test("draft tasks stay hidden until moved and support attachments", async () => 
   }, root);
   assert.match(uploaded.path, /^attachments\/\d+-clipboard-image\.png$/);
   assert.equal(await readFile(join(paths(root).tasks, created.task.id, uploaded.path), "utf8"), "png-data");
-  assert.equal((await handleQuery({ type: "task.files", taskId: created.task.id }, root)).files.includes(uploaded.path), true);
+  const draftFiles = await handleQuery({ type: "task.files", taskId: created.task.id }, root);
+  assert.equal(draftFiles.files.includes(uploaded.path), true);
+  assert.equal(draftFiles.fileEntries.find((file) => file.path === uploaded.path)?.kind, "image");
 
   const moved = await handleCommand({
     type: "task.move",
@@ -272,6 +275,37 @@ test("orchestrator starts, completes and summarizes a task session", async () =>
   assert.equal(autoRun.run.previousSessionRef, started.run.sessionRef);
   assert.equal(autoRun.run.previousSummaryRef, completed.summaryRef);
   assert.match(await readFile(join(root, autoRun.run.sessionRef), "utf8"), /previousSummaryRef/);
+});
+
+test("complete task persists final text in visible task chat", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-complete-chat-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-visible-create",
+    input: { title: "Responder direto", column: "inbox", projectTargets: [] }
+  }, root);
+  await handleCommand({
+    type: "task.update",
+    commandId: "cmd-visible-running",
+    taskId: created.task.id,
+    patch: {
+      status: "running",
+      column: "generalist",
+      routing: { ...created.task.routing, currentAgent: "generalist", currentRole: "generalist" },
+      agent: { currentRunId: "run-visible" }
+    }
+  }, root);
+  await handleCommand({
+    type: "agent.complete_task",
+    commandId: "cmd-visible-complete",
+    taskId: created.task.id,
+    runId: "run-visible",
+    nextColumn: "done",
+    summary: "Resumo curto.",
+    finalText: "Resposta final completa para o usuário."
+  }, root);
+  const comments = await readTaskComments(root, { taskId: created.task.id });
+  assert.equal(comments.some((message) => message.text === "Resposta final completa para o usuário."), true);
 });
 
 test("task run sends Pi prompt and persists prompt-sent evidence", async () => {
@@ -1440,6 +1474,8 @@ test("agentic workflow handoffs keep persona context and human wait distinct fro
   assert.equal(chatBuild.schema, "kanban-code-agent/agent-chat-build@1");
   assert.equal(chatBuild.messages[0].persona, "product");
   assert.equal(chatBuild.provider, "openai");
+  assert.match(chatBuild.system.content, /All visible agent comments and responses must be organized/);
+  assert.match(chatBuild.system.content, /For short final content, respond directly in chat/);
 
   const compacted = await handleCommand({
     type: "chat.compact",
@@ -1515,6 +1551,144 @@ test("provider models query normalizes context metadata", async () => {
     else process.env.OPENROUTER_API_KEY = previousKey;
     globalThis.fetch = previousFetch;
   }
+});
+
+test("task usage aggregates into board snapshot, files and logs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-usage-"));
+  const startedAt = "2026-06-14T00:00:00.000Z";
+  const endedAt = "2026-06-14T00:00:12.000Z";
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-usage-create",
+    input: { title: "Usage aggregate", column: "inbox", status: "idle", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } } }
+  }, root);
+  const cacheRefresh = await refreshOpenRouterModelCache(root, {
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        data: [
+          { id: "deepseek/deepseek-v4-pro", name: "DeepSeek: DeepSeek V4 Pro", context_length: 1048576, top_provider: { context_length: 1048576 } }
+        ]
+      })
+    })
+  });
+  assert.equal(cacheRefresh.ok, true);
+  await appendJsonl(join(paths(root).tasks, created.task.id, "events.jsonl"), {
+    ts: startedAt,
+    type: "agent.run",
+    actor: "orchestrator",
+    taskId: created.task.id,
+    runId: "run-usage",
+    agentId: "engineering",
+    role: "engineering",
+    provider: "openai",
+    model: "model-a",
+    effort: "medium"
+  });
+  await appendJsonl(join(paths(root).tasks, created.task.id, "events.jsonl"), {
+    ts: startedAt,
+    type: "agent.transcript",
+    actor: "engineering",
+    taskId: created.task.id,
+    runId: "run-usage",
+    providerEventType: "agent_start"
+  });
+  await appendJsonl(join(paths(root).tasks, created.task.id, "events.jsonl"), {
+    ts: endedAt,
+    type: "agent.usage",
+    actor: "engineering",
+    taskId: created.task.id,
+    runId: "run-usage",
+    agentId: "engineering",
+    role: "engineering",
+    responseId: "chatcmpl-usage",
+    provider: "openai",
+    model: "model-a",
+    usage: { inputTokens: 500, outputTokens: 120, totalTokens: 620, cacheTokens: 80, contextWindow: 2000, contextPercent: 25 }
+  });
+  await appendJsonl(join(paths(root).tasks, created.task.id, "events.jsonl"), {
+    ts: endedAt,
+    type: "agent.run",
+    actor: "orchestrator",
+    taskId: created.task.id,
+    runId: "run-usage-fallback",
+    agentId: "engineering",
+    role: "engineering",
+    provider: "openai",
+    model: "model-b",
+    effort: "medium"
+  });
+  await appendJsonl(join(paths(root).tasks, created.task.id, "events.jsonl"), {
+    ts: endedAt,
+    type: "agent.usage",
+    actor: "engineering",
+    taskId: created.task.id,
+    runId: "run-usage-fallback",
+    agentId: "engineering",
+    role: "engineering",
+    responseId: "chatcmpl-usage-fallback",
+    usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120, cacheTokens: 0, contextWindow: 2000, contextPercent: 5 }
+  });
+  await appendJsonl(join(paths(root).tasks, created.task.id, "events.jsonl"), {
+    ts: new Date().toISOString(),
+    type: "agent.transcript",
+    actor: "manager",
+    taskId: created.task.id,
+    runId: "run-legacy-usage",
+    providerEventType: "agent_end",
+    providerEvent: {
+      provider: "deepseek",
+      model: "deepseek-v4-pro",
+      messages: [{
+        role: "assistant",
+        responseId: "legacy-usage",
+        usage: { input: 50, output: 10, cacheRead: 100, cacheWrite: 0, totalTokens: 160 }
+      }]
+    }
+  });
+  const snapshot = await boardSnapshot(root);
+  const task = snapshot.tasks.find((item) => item.id === created.task.id);
+  assert.equal(task.usage.total.totalTokens, 900);
+  assert.equal(task.usage.total.inputTokens, 650);
+  assert.equal(task.usage.total.durationMs, 12000);
+  assert.equal(task.usage.total.contextWindow, 1048576);
+  assert.equal(task.usage.total.contextPercent, 0);
+  assert.equal(task.usage.byAgent[0].agentId, "engineering");
+  assert.equal(task.usage.byAgent[0].durationMs, 12000);
+  assert.equal(task.usage.byAgent[0].contextPercent, 6);
+  assert.equal(task.usage.byAgent[1].agentId, "manager");
+  assert.equal(task.usage.byAgent[1].contextWindow, 1048576);
+  assert.deepEqual(task.usage.byAgent[0].models.map((model) => `${model.provider}/${model.model}:${model.totalTokens}`), ["openai/model-a:620", "openai/model-b:120"]);
+  assert.equal(task.usage.byAgent[0].models[0].contextPercent, 31);
+  assert.equal(task.usage.byAgent[1].models[0].contextWindow, 1048576);
+  const files = await handleQuery({ type: "task.files", taskId: created.task.id }, root);
+  assert.equal(files.usage.total.cacheTokens, 180);
+  assert.equal(files.usage.byAgent[0].models[1].model, "model-b");
+  const logs = await handleQuery({ type: "agent.logs", taskId: created.task.id, limit: 10 }, root);
+  assert.equal(logs.items.some((item) => item.type === "agent.usage" && item.raw.usage.totalTokens === 620), true);
+});
+
+test("task files include kind, content type and size metadata", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-file-meta-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-file-meta-create",
+    input: { title: "File metadata", column: "inbox", status: "idle", projectTargets: ["kanban-code-agent"] }
+  }, root);
+  const taskDir = join(paths(root).tasks, created.task.id);
+  await mkdir(join(taskDir, "artifacts"), { recursive: true });
+  await writeFile(join(taskDir, "artifacts", "notes.txt"), "plain text\n");
+  await writeFile(join(taskDir, "artifacts", "image.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  await writeFile(join(taskDir, "artifacts", "archive.bin"), Buffer.from([0, 1, 2, 3]));
+
+  const files = await handleQuery({ type: "task.files", taskId: created.task.id }, root);
+  const byPath = new Map(files.fileEntries.map((file) => [file.path, file]));
+  assert.equal(byPath.get("artifacts/notes.txt").kind, "text");
+  assert.match(byPath.get("artifacts/notes.txt").contentType, /text\/plain/);
+  assert.equal(byPath.get("artifacts/image.png").kind, "image");
+  assert.equal(byPath.get("artifacts/image.png").contentType, "image/png");
+  assert.equal(byPath.get("artifacts/archive.bin").kind, "binary");
+  assert.equal(byPath.get("artifacts/archive.bin").size, 4);
 });
 
 test("real Pi orchestrator prompt smoke runs one task through multiple personas", { skip: realOrchestratorPromptSmokeEnabled ? false : "set KCA_PI_ORCH_PROMPT_SMOKE=1 to run real orchestrator prompt smoke" }, async () => {
