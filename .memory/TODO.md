@@ -49,7 +49,3 @@ The agent usage model implementation passed focused typecheck, syntax, adapter u
 # [medium] Fix broad orchestrator suite failures before claiming full regression coverage
 
 `rtk pnpm exec node --test --test-name-pattern "scheduler explains|settings scopes" tests/unit/orchestrator.test.js` was initially invoked with the filter after the file and ran the broad orchestrator suite. It finished with 44 passing, 12 failing, and 1 skipped. Focused checks for this implementation pass, but full-suite validation remains blocked by assistant chat, stale completion, file lock, decomposition, handoff, and chat compaction failures. Next step: triage those orchestrator failures separately and rerun the broad suite.
-
-# [high] Enforce manager Product routing before decomposition
-
-Audit of runtime task KCA-884177 showed `manager.routing_context` classified the first run as `contract_missing` with `targetRole: product`, but the manager still called `spawn_subtasks` and created four executable subtasks before Product ran. The routing context is prompt-only and `task.decompose` accepts the command without checking the manager recommendation. Next step: add a runtime guard or command policy so `spawn_subtasks` is rejected/redirected when manager mode is `intake` and target persona is `product`, then add a regression test using the KCA-884177 request shape.
