@@ -37,7 +37,7 @@ function acceptanceIsPlaceholder(acceptance = "") {
     || /funciona de ponta a ponta com evidencia/.test(normalized);
 }
 
-function managerRoutingContext(task, description = "", acceptance = "") {
+export function managerRoutingContext(task, description = "", acceptance = "") {
   const text = `${task.title || ""}\n${description}\n${acceptance}`.toLowerCase();
   const requestText = `${task.title || ""}\n${description}`.toLowerCase();
   const code = includesAny(text, [/\b(api|bug|fix|corrigir|implementar|codigo|c[oó]digo|teste|refactor|frontend|backend|endpoint|schema|migra)/i]);
@@ -292,6 +292,7 @@ export async function startRun(task, root, agentId = task.routing?.currentAgent 
   const scope = options.scope || (task.kind === "assistant" ? "board" : "task");
   const allowedTools = options.allowedTools || toolsForAgent(agentConfig);
   const settings = await readSettings(root);
+  const adapterMaxTurns = settings.runtime?.agentMaxTurns || 24;
   const maxActiveMessages = settings.runtime?.chatCompaction?.maxActiveMessages ?? 50;
   if (scope === "task" && maxActiveMessages > 0) {
     const activeMessages = await readChatHistory(root, { scope: "task", taskId: task.id, persona: role, limit: maxActiveMessages + 1 });
@@ -364,7 +365,8 @@ export async function startRun(task, root, agentId = task.routing?.currentAgent 
         onEvent: onToolEvent,
         getLastAssistantText
       }, { allowedTools }),
-      onEvent: onToolEvent
+      onEvent: onToolEvent,
+      maxTurns: adapterMaxTurns
     };
     adapter = activeProvider
       ? await startOpenAICompatibleSession({ ...commonAdapterOptions, providerConfig: activeProvider, model: chatBuild.model })

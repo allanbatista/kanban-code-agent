@@ -27,6 +27,26 @@ test("starts from a clean daemon storage without fixture tasks", async ({ page, 
   await page.goto("/");
   await expect(page.getByText("Kanban Code Agent")).toBeVisible();
   await expect(page.getByLabel("Board Kanban")).toBeVisible();
+  await expect(page.locator(".top-actions").getByRole("button", { name: "Nova task", exact: true })).toHaveCount(0);
+  await expect(page.locator('[data-column-id="inbox"]').getByRole("button", { name: /Nova task em Entrada/ })).toBeVisible();
+  await expect(page.locator('[data-column-id="manager"]').getByRole("button", { name: /Nova task em Manager/ })).toBeVisible();
+  await expect(page.locator('[data-column-id="product"]').getByRole("button", { name: /Nova task em Produto/ })).toHaveCount(0);
+  await expect(page.locator('[data-column-id="design"]').getByRole("button", { name: /Nova task em Design/ })).toHaveCount(0);
+  await expect(page.locator('[data-column-id="architecture"]').getByRole("button", { name: /Nova task em Arquitetura/ })).toHaveCount(0);
+  await expect(page.locator('[data-column-id="generalist"]').getByRole("button", { name: /Nova task em Generalista/ })).toHaveCount(0);
+  await expect(page.locator('[data-column-id="engineering"]').getByRole("button", { name: /Nova task em Engenharia/ })).toHaveCount(0);
+  await expect(page.locator('[data-column-id="quality"]').getByRole("button", { name: /Nova task em Qualidade/ })).toHaveCount(0);
+  await expect(page.locator('[data-column-id="review"]').getByRole("button", { name: /Nova task em Review/ })).toHaveCount(0);
+  await expect(page.locator('[data-column-id="deployment"]').getByRole("button", { name: /Nova task em Deployment/ })).toHaveCount(0);
+  await expect(page.locator('[data-column-id="human_wait"]').getByRole("button", { name: /Nova task em Aguardando Humano/ })).toHaveCount(0);
+  await expect(page.locator('[data-column-id="done"]').getByRole("button", { name: /Nova task em Pronto/ })).toHaveCount(0);
+  expect(await page.locator(".kanban").evaluate((node) =>
+    Array.from(node.children).map((child) => child.getAttribute("data-column-id") || child.getAttribute("data-column-stack"))
+  )).toEqual(["inbox", "manager", "human_wait", "done", "product+design", "architecture+generalist", "engineering+quality", "review+deployment"]);
+  await expect.poll(async () => page.locator('[data-column-stack="product+design"]').evaluate((node) => {
+    const boxes = Array.from(node.children).map((child) => child.getBoundingClientRect());
+    return Math.abs(boxes[0].height - boxes[1].height) <= 2;
+  })).toBe(true);
   await expect(page.getByLabel("Filtro operacional").getByRole("button", { name: "Tudo" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Assistant do board" }).getByLabel("Novo chat")).toBeVisible();
   await expect(page.getByText("Nenhuma task").first()).toBeVisible();
@@ -35,7 +55,7 @@ test("starts from a clean daemon storage without fixture tasks", async ({ page, 
 test("creates a task through React UI and persists it in FSDB", async ({ page, request }) => {
   const marker = `Draft UI ${Date.now()}`;
   await page.goto("/");
-  await page.getByRole("button", { name: "Nova task", exact: true }).click();
+  await page.locator('[data-column-id="inbox"]').getByRole("button", { name: /Nova task em Entrada/ }).click();
   await page.locator(".cm-content").fill(`Persistir via daemon ${marker}.`);
   await page.locator(".new-task-draft-form").evaluate((node) => {
     const transfer = new DataTransfer();
@@ -178,6 +198,8 @@ test("task modal exposes tabs and runs the assigned agent", async ({ page, reque
   await expect(decomposed).toBeOK();
   await page.getByRole("tab", { name: "subtasks" }).click();
   await expect(page.getByRole("dialog").getByText(new RegExp(`${task.id}-01 \\[`))).toBeVisible();
+  await expect(page.getByRole("dialog")).toContainText(`parent ${task.id}`);
+  await expect(page.getByRole("dialog")).toContainText(`main ${task.id}`);
   await page.getByRole("tab", { name: "resumo" }).click();
   await page.getByLabel("Título").fill(`${task.title} editado`);
   await page.getByRole("button", { name: "Salvar task" }).click();
@@ -185,6 +207,27 @@ test("task modal exposes tabs and runs the assigned agent", async ({ page, reque
     const state = await request.get(`${daemonUrl}/api/state`);
     return (await state.json()).tasks.find((item) => item.id === task.id)?.title;
   }).toContain("editado");
+});
+
+test("subtask relation id opens the related task modal", async ({ page, request }) => {
+  const task = await createTask(request, `Parent relation ${Date.now()}`, {
+    column: "generalist",
+    status: "queued",
+    routing: { currentAgent: "generalist", currentRole: "generalist", manualOverride: { active: false } }
+  });
+  const decomposed = await request.post(`${daemonUrl}/api/command`, {
+    data: { type: "task.decompose", commandId: `e2e-relation-${Date.now()}`, taskId: task.id }
+  });
+  await expect(decomposed).toBeOK();
+  const childId = (await decomposed.json()).subtasks[0].id;
+
+  await page.goto("/");
+  const subtaskCard = page.locator(`[data-task-id="${childId}"]`);
+  await expect(subtaskCard).toBeVisible();
+  await expect(subtaskCard).not.toContainText("main ");
+  await expect(subtaskCard).not.toContainText("parent ");
+  await subtaskCard.getByRole("button", { name: task.id, exact: true }).click();
+  await expect(page.getByRole("dialog").getByLabel("Título")).toHaveValue(task.title);
 });
 
 test("task files open text and images inline and download binaries", async ({ page, request }) => {
@@ -279,8 +322,8 @@ test("shows real token usage on task card timing and modal", async ({ page, requ
   await card.getByRole("button").first().click();
   await page.getByRole("tab", { name: "execucao" }).click();
   await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("engineering");
-  await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("modelo: openai/model-a");
-  await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("modelo: openai/model-b");
+  await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("openai/model-a");
+  await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("openai/model-b");
   await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("1m 5s");
   await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("1.250");
   await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("125");
@@ -314,7 +357,7 @@ test("saving and executing a new task sends it to manager workflow", async ({ pa
     data: { scope: "app", patch: { runtime: { maxParallelTasks: 10, agentTokens: { manager: 10 }, projectTokens: { "kanban-code-agent": 10 } } } }
   });
   await page.goto("/");
-  await page.locator('[data-column-id="product"]').getByRole("button", { name: /Nova task em Produto/ }).click();
+  await page.locator('[data-column-id="inbox"]').getByRole("button", { name: /Nova task em Entrada/ }).click();
   await page.getByLabel("Título").fill(title);
   await page.locator(".cm-content").fill("Criada como draft e enviada ao manager.");
   await page.getByRole("button", { name: "Salvar e executar" }).click();
@@ -330,6 +373,11 @@ test("saving and executing a new task sends it to manager workflow", async ({ pa
 test("task comments answer agent questions and logs are paginated", async ({ page, request }) => {
   await request.post(`${daemonUrl}/api/settings.update`, {
     data: { scope: "app", patch: { runtime: { maxParallelTasks: 10, agentTokens: { engineering: 10 }, projectTokens: { "kanban-code-agent": 10 } } } }
+  });
+  const initialState = await request.get(`${daemonUrl}/api/state`);
+  const columns = (await initialState.json()).columns.map((column) => column.id === "engineering" ? { ...column, wip: 20, wipLimit: 20 } : column);
+  await request.post(`${daemonUrl}/api/settings.update`, {
+    data: { scope: "columns", patch: { columns } }
   });
   const task = await createTask(request, `Task comments ${Date.now()}`, {
     column: "inbox",
@@ -374,22 +422,37 @@ test("task comments answer agent questions and logs are paginated", async ({ pag
 });
 
 test("settings modal persists scoped settings through the daemon", async ({ page, request }) => {
+  const providerModel = `openrouter/test-${Date.now()}`;
   await page.goto("/");
   await page.getByRole("button", { name: "Configurações" }).click();
   await page.locator(".settings-provider-row", { hasText: "OpenRouter" }).getByRole("checkbox").check();
+  await page.locator("#settings-provider-model-openrouter").fill(providerModel);
+  await page.locator("#settings-provider-effort-openrouter").selectOption("high");
   await page.locator("#settings-default-provider").selectOption("openrouter");
   const toggle = page.getByLabel("Mostrar progresso no card");
   const nextValue = !(await toggle.isChecked());
   await toggle.click();
   await page.getByRole("button", { name: "Salvar alterações" }).click();
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await page.getByRole("button", { name: "Configurações" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.locator("#settings-provider-model-openrouter")).toHaveValue(providerModel);
+  await expect(page.locator("#settings-provider-effort-openrouter")).toHaveValue("high");
+  await page.getByRole("button", { name: "Cancelar" }).click();
 
   await expect.poll(async () => {
     const settings = await request.post(`${daemonUrl}/api/query`, {
       data: { type: "settings.scope", scope: "app" }
     });
     const body = await settings.json();
-    return { progress: body.ui.showProgressOnCard, provider: body.ai.defaultProvider, enabled: body.ai.enabledProviders.includes("openrouter") };
-  }).toEqual({ progress: nextValue, provider: "openrouter", enabled: true });
+    return {
+      progress: body.ui.showProgressOnCard,
+      provider: body.ai.defaultProvider,
+      enabled: body.ai.enabledProviders.includes("openrouter"),
+      providerModel: body.ai.providers.openrouter.defaultModel,
+      providerEffort: body.ai.providers.openrouter.defaultEffort
+    };
+  }).toEqual({ progress: nextValue, provider: "openrouter", enabled: true, providerModel, providerEffort: "high" });
 });
 
 test("settings modal edits an agent prompt and persists it", async ({ page, request }) => {
@@ -424,7 +487,12 @@ test("agentic task workflow persists handoffs, human wait, delegation, compactio
 
   await expect(await command({ type: "agent.message", message: { scope: "task", taskId: task.id, persona: "product", agentId: "product", text: "Aceite definido.", visibility: "both" } })).toBeOK();
   await expect(await command({ type: "agent.wait_for_persona", taskId: task.id, targetRole: "generalist", question: "Preparar evidência operacional." })).toBeOK();
-  await expect(await command({ type: "agent.delegate_task", taskId: task.id, fromPersona: "generalist", toPersona: "engineering", wait: false, request: "Implementar ajuste técnico." })).toBeOK();
+  const delegated = await command({ type: "agent.delegate_task", taskId: task.id, fromPersona: "generalist", toPersona: "engineering", wait: true, request: "Implementar ajuste técnico." });
+  await expect(delegated).toBeOK();
+  const delegatedBody = await delegated.json();
+  expect(delegatedBody.task.column).toBe("generalist");
+  expect(delegatedBody.task.status).toBe("waiting");
+  expect(delegatedBody.subtask.column).toBe("engineering");
   await expect(await command({ type: "agent.wait_for_human", taskId: task.id, requestedByRole: "engineering", question: "Aprovar risco?", options: ["Aprovar"] })).toBeOK();
   await expect(await command({ type: "task.answer_input", taskId: task.id, answer: "Aprovado", returnRole: "engineering" })).toBeOK();
   await expect(await command({ type: "agent.wait_for_persona", taskId: task.id, targetRole: "quality", question: "Validar aceite." })).toBeOK();

@@ -18,7 +18,8 @@ export type Task = {
   priority: string;
   projectTargets: string[];
   routing?: { currentAgent?: string | null; currentRole?: string | null; lastAgent?: string | null; lastRole?: string | null; nextSuggestedColumn?: string | null; manualOverride?: { active?: boolean } };
-  worktree?: { branch?: string; path?: string; parentTaskId?: string | null; mergeTarget?: string };
+  worktree?: { branch?: string; path?: string; parentTaskId?: string | null; mainTaskId?: string | null; mergeTarget?: string };
+  subtasksSummary?: { total: number; running: number; done: number };
   dependencies?: { needs?: string[]; provides?: string[]; blockedBy?: string[]; fileLocks?: string[]; semaphores?: unknown[] };
   failure?: { type?: string; reason?: string; ts?: string; actor?: string; runId?: string };
   hooks?: { active?: string[] };
@@ -88,7 +89,7 @@ export type AgentSettings = {
   instructionsBody?: string;
   skills?: string[];
   tools?: string[] | { builtin?: string[]; custom?: string[] };
-  limits?: { tokens?: number };
+  limits?: { tokens?: number; maxParallelTasks?: number };
 };
 
 export type ProviderStatus = {
@@ -129,6 +130,7 @@ export type OrchestratorStatus = {
     running: number;
     maxParallelTasks: number;
     maxParallelMerges: number;
+    agentMaxParallelTasks?: Record<string, number>;
     agentTokens: Record<string, number>;
     projectTokens: Record<string, number>;
   };

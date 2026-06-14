@@ -9,7 +9,7 @@ type AgentEffort = "minimal" | "low" | "medium" | "high";
 type AgentDraft = {
   id: string;
   skills: string;
-  tokens: number;
+  maxParallelTasks: number;
   provider: string;
   model: string;
   effort: AgentEffort;
@@ -44,6 +44,7 @@ export function SettingsDialog({
   const currentDefaultEffort = settings?.ai?.defaultEffort || "medium";
   const currentEnabledProviders = settings?.ai?.enabledProviders || [];
   const currentProviderDefaults = settings?.ai?.providers || {};
+  const currentGlobalMaxParallelTasks = settings?.runtime?.maxParallelTasks ?? 1000;
   const [showProgress, setShowProgress] = useState(currentShowProgress);
   const [taskTextScale, setTaskTextScale] = useState(currentTaskTextScale);
   const [taskFontFamily, setTaskFontFamily] = useState(currentTaskFontFamily);
@@ -53,6 +54,7 @@ export function SettingsDialog({
   const [defaultEffort, setDefaultEffort] = useState<AgentEffort>(currentDefaultEffort);
   const [enabledProviders, setEnabledProviders] = useState<string[]>(currentEnabledProviders);
   const [providerDefaults, setProviderDefaults] = useState<Record<string, { defaultModel?: string; defaultEffort?: AgentEffort }>>(providerDefaultsToDraft(currentProviderDefaults));
+  const [globalMaxParallelTasks, setGlobalMaxParallelTasks] = useState(currentGlobalMaxParallelTasks);
   const [providerModels, setProviderModels] = useState<Record<string, ProviderModel[]>>({});
   const [providerModelLoading, setProviderModelLoading] = useState<Record<string, boolean>>({});
   const [selectedAgentId, setSelectedAgentId] = useState("assistant");
@@ -75,6 +77,7 @@ export function SettingsDialog({
     || defaultProvider !== currentDefaultProvider
     || defaultModel !== currentDefaultModel
     || defaultEffort !== currentDefaultEffort
+    || globalMaxParallelTasks !== currentGlobalMaxParallelTasks
     || enabledProviders.join("\n") !== currentEnabledProviders.join("\n")
     || JSON.stringify(providerDefaults) !== JSON.stringify(providerDefaultsToDraft(currentProviderDefaults));
   const hasChanges = appChanged || changedAgents.length > 0;
@@ -88,11 +91,12 @@ export function SettingsDialog({
     setDefaultProvider(currentDefaultProvider);
     setDefaultModel(currentDefaultModel);
     setDefaultEffort(currentDefaultEffort);
+    setGlobalMaxParallelTasks(currentGlobalMaxParallelTasks);
     setEnabledProviders(currentEnabledProviders);
     setProviderDefaults(providerDefaultsToDraft(currentProviderDefaults));
     setAgentDrafts(Object.fromEntries(agents.map((agent) => [agent.id, agentToDraft(agent)])));
     setSelectedAgentId((current) => agents.some((agent) => agent.id === current) ? current : agents[0]?.id || "assistant");
-  }, [open, hasChanges, currentShowProgress, currentTaskTextScale, currentTaskFontFamily, currentAllowNetwork, currentDefaultProvider, currentDefaultModel, currentDefaultEffort, currentEnabledProviders, currentProviderDefaults, agents]);
+  }, [open, hasChanges, currentShowProgress, currentTaskTextScale, currentTaskFontFamily, currentAllowNetwork, currentDefaultProvider, currentDefaultModel, currentDefaultEffort, currentGlobalMaxParallelTasks, currentEnabledProviders, currentProviderDefaults, agents]);
 
   function resetDrafts() {
     setShowProgress(currentShowProgress);
@@ -102,6 +106,7 @@ export function SettingsDialog({
     setDefaultProvider(currentDefaultProvider);
     setDefaultModel(currentDefaultModel);
     setDefaultEffort(currentDefaultEffort);
+    setGlobalMaxParallelTasks(currentGlobalMaxParallelTasks);
     setEnabledProviders(currentEnabledProviders);
     setProviderDefaults(providerDefaultsToDraft(currentProviderDefaults));
     setAgentDrafts(Object.fromEntries(agents.map((agent) => [agent.id, agentToDraft(agent)])));
@@ -164,6 +169,7 @@ export function SettingsDialog({
         await onSave({
           ui: { showProgressOnCard: showProgress, taskTextScale, taskFontFamily },
           safety: { allowNetwork },
+          runtime: { maxParallelTasks: globalMaxParallelTasks },
           ai: { defaultProvider, defaultModel, defaultEffort, enabledProviders, providers: providerDefaults }
         });
       }
@@ -245,9 +251,19 @@ export function SettingsDialog({
 
               <section className="settings-section" id="settings-runtime">
                 <SectionHead title="Runtime" description="Resumo dos limites ativos do orquestrador." />
+                <SettingRow label="Max tasks globais" description="Limite global de tasks rodando em paralelo.">
+                  <input
+                    id="settings-runtime-max-parallel-tasks"
+                    className="input"
+                    type="number"
+                    min={1}
+                    value={globalMaxParallelTasks}
+                    onChange={(event) => setGlobalMaxParallelTasks(Math.max(1, Number(event.target.value) || 1))}
+                  />
+                </SettingRow>
                 <div className="settings-metrics">
-                  <div className="metric"><strong>{settings?.runtime?.maxParallelTasks || 0}</strong><span>max tasks</span></div>
-                  <div className="metric"><strong>{Object.keys(settings?.runtime?.agentTokens || {}).length}</strong><span>agents</span></div>
+                  <div className="metric"><strong>{globalMaxParallelTasks}</strong><span>max tasks</span></div>
+                  <div className="metric"><strong>{agents.length}</strong><span>agents</span></div>
                   <div className="metric"><strong>{Object.keys(settings?.runtime?.projectTokens || {}).length}</strong><span>projetos</span></div>
                 </div>
               </section>
@@ -321,8 +337,8 @@ export function SettingsDialog({
                           <input id="settings-agent-id" className="input" value={selectedAgent.id} readOnly />
                         </div>
                         <div className="field">
-                          <label htmlFor="settings-agent-tokens">Concorrência</label>
-                          <input id="settings-agent-tokens" className="input" type="number" min={0} value={selectedAgentDraft.tokens} onChange={(event) => updateSelectedAgentDraft({ tokens: Number(event.target.value) })} />
+                          <label htmlFor="settings-agent-max-parallel-tasks">Max tasks paralelas</label>
+                          <input id="settings-agent-max-parallel-tasks" className="input" type="number" min={0} value={selectedAgentDraft.maxParallelTasks} onChange={(event) => updateSelectedAgentDraft({ maxParallelTasks: Math.max(0, Number(event.target.value) || 0) })} />
                         </div>
                       </div>
                       <div className="field">
@@ -505,7 +521,7 @@ function agentToDraft(agent: AgentSettings): AgentDraft {
   return {
     id: agent.id,
     skills: (agent.skills || []).join(", "),
-    tokens: agent.limits?.tokens ?? 1,
+    maxParallelTasks: agent.limits?.maxParallelTasks ?? agent.limits?.tokens ?? 50,
     provider: provider === "pi" ? "inherit" : provider,
     model: model === "default" ? "" : model,
     effort: agent.model?.effort || "medium",
@@ -520,7 +536,7 @@ function skillsFromDraft(skills: string) {
 function isAgentChanged(agent: AgentSettings, draft: AgentDraft) {
   const current = agentToDraft(agent);
   return skillsFromDraft(current.skills).join("\n") !== skillsFromDraft(draft.skills).join("\n")
-    || current.tokens !== draft.tokens
+    || current.maxParallelTasks !== draft.maxParallelTasks
     || current.provider !== draft.provider
     || current.model !== draft.model
     || current.effort !== draft.effort
@@ -531,7 +547,7 @@ function agentPatch(agent: AgentSettings, draft: AgentDraft) {
   return {
     id: agent.id,
     skills: skillsFromDraft(draft.skills),
-    limits: { ...(agent.limits || {}), tokens: Number(draft.tokens) || 1 },
+    limits: { ...(agent.limits || {}), maxParallelTasks: Math.max(0, Number(draft.maxParallelTasks) || 0) },
     provider: draft.provider,
     model: { ...(agent.model || {}), provider: draft.provider || "inherit", name: draft.model || "", effort: draft.effort },
     instructionsBody: draft.prompt

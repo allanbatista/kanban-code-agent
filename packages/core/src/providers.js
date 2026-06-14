@@ -165,7 +165,7 @@ export function normalizeModel(raw) {
 export async function listProviderModels(providerId, settings = {}, env = process.env, { fetchImpl = globalThis.fetch } = {}) {
   const discovered = discoverProviders(settings, env).providers.find((provider) => provider.id === providerId);
   if (!discovered) throw new Error(`Unknown provider: ${providerId}`);
-  if (!discovered.active) {
+  if (!discovered.configured) {
     return { schema: "kanban-code-agent/provider-models@1", providerId, models: [], error: `Provider ${providerId} inactive or missing env: ${discovered.missingEnv.join(", ") || "baseUrl"}` };
   }
   if (!fetchImpl) throw new Error("fetch unavailable");

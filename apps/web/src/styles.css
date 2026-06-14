@@ -214,6 +214,15 @@ a { color: inherit; text-decoration: none; }
 
 .board-scroll { width: 100%; height: 100%; max-height: 100%; min-width: 0; min-height: 0; overflow: auto hidden; padding: 2px 0 0; scroll-snap-type: x proximity; }
 .kanban { height: 100%; max-height: 100%; min-height: 0; min-width: max-content; display: grid; grid-auto-flow: column; grid-auto-columns: var(--column-w); gap: 14px; align-items: stretch; }
+.column-stack {
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  scroll-snap-align: start;
+}
 .column {
   min-width: 0;
   height: 100%;
@@ -227,6 +236,7 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden;
   scroll-snap-align: start;
 }
+.column-stack .column { scroll-snap-align: none; }
 .column-head {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -238,9 +248,13 @@ a { color: inherit; text-decoration: none; }
   background: color-mix(in srgb, var(--surface) 94%, transparent);
   backdrop-filter: blur(12px);
 }
-.column-head h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.column-title-row { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.column-title-row h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.column-count { flex: 0 0 auto; min-width: 24px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-soft); color: var(--muted); font-size: 12px; font-weight: 680; }
 .add-card { width: 34px; height: 34px; min-height: 34px; padding: 0; border-radius: 50%; }
 .cards { min-height: 0; display: grid; align-content: start; gap: 10px; overflow: auto; padding: 12px; }
+.stacked-column .column-head { min-height: 48px; padding: 9px 12px; }
+.stacked-column .cards { padding: 10px; }
 
 .task, .empty-state, .side-panel, .metric, .settings-dialog, .task-dialog {
   border: 1px solid var(--border);
@@ -261,6 +275,7 @@ a { color: inherit; text-decoration: none; }
 :root[data-theme="dark"] .task:hover { box-shadow: 0 8px 22px rgba(0,0,0,.18); }
 .task-open { width: 100%; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; justify-items: stretch; align-items: stretch; gap: 12px; padding: 0; border: 0; border-radius: 0; background: transparent; text-align: left; }
 .task-open:hover { background: transparent; border-color: transparent; }
+.task-open:focus-visible { outline: none; box-shadow: var(--focus); border-radius: 10px; }
 .task-head { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 10px; }
 .task-title { min-width: 0; display: grid; gap: 5px; }
 .task-title strong { overflow-wrap: anywhere; font-size: 1em; line-height: 1.25; font-weight: 660; letter-spacing: 0; }
@@ -279,6 +294,9 @@ a { color: inherit; text-decoration: none; }
 .mini-button { min-height: 30px; padding: 0 10px; border-radius: 999px; color: var(--muted); font-size: 12px; background: var(--surface-soft); }
 .pill { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 24px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: .82em; background: transparent; color: var(--muted); white-space: nowrap; }
 .pill.soft { background: var(--surface-soft); border-color: transparent; }
+.task-relation-row { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; white-space: nowrap; }
+.relation-pill { min-height: 22px; padding: 2px 7px; font-family: var(--font-mono); font-size: .78em; }
+.relation-pill:hover { color: var(--text); background: var(--surface-hover); }
 .pill.done { color: var(--good); border-color: color-mix(in srgb, var(--good) 24%, var(--border)); background: color-mix(in srgb, var(--good) 8%, transparent); }
 .pill.running, .pill.info { color: var(--info); border-color: color-mix(in srgb, var(--info) 24%, var(--border)); background: color-mix(in srgb, var(--info) 8%, transparent); }
 .pill.blocked, .pill.failed { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 24%, var(--border)); background: color-mix(in srgb, var(--bad) 8%, transparent); }

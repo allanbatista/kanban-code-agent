@@ -1,17 +1,20 @@
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { interruptRun, startRun, writeRunSummary } from "@kca/agent-runtime";
 import { createWorktree } from "@kca/git-worktree";
-import { appendJsonl, boardSnapshot, getTask, normalizeColumnId, paths, readJsonl, readProject, updateTask, writeTaskFile } from "@kca/fsdb";
+import { appendJsonl, boardSnapshot, getTask, listTasks, normalizeColumnId, paths, readJsonl, readProject, readSettings, updateTask, writeTaskFile } from "@kca/fsdb";
 import { appendChatMessage } from "@kca/fsdb/chat-store";
 import { releaseSemaphoreLeases } from "@kca/fsdb/runtime-store";
 import { TaskSchema } from "@kca/schemas";
 import { logStep } from "@kca/core/log";
 import { roleById } from "@kca/core/roles";
+import { discoverProviders } from "@kca/core/providers";
 
 const exec = promisify(execFile);
 const ROOT_TASK_ARTIFACTS = new Set(["acceptance.md"]);
+const GENERATED_TITLE_PLACEHOLDERS = new Set(["rascunho sem titulo", "task sem titulo", "nova task", "aguardando detalhes da tarefa"]);
 
 function roleColumn(roleId) {
   if (roleId === "done") return "done";
@@ -40,6 +43,123 @@ async function deferredCommentsForRun(root, taskId, runId) {
   return events.filter((event) => event.type === "task.comment" && event.deferredForRunId === runId);
 }
 
+function normalizeTitleText(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function descriptionBody(description, title) {
+  const lines = String(description || "").split("\n");
+  const first = lines[0]?.match(/^#\s+(.+?)\s*$/)?.[1];
+  if (first && normalizeTitleText(first) === normalizeTitleText(title)) return lines.slice(1).join("\n").trim();
+  return String(description || "").trim();
+}
+
+function fallbackTitleFromDescription(description) {
+  return String(description || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[#*_>`[\]()!-]/g, " ")
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean)?.slice(0, 80) || "";
+}
+
+function shouldGenerateTitle(task, description) {
+  const title = String(task.title || "").trim();
+  if (!title) return true;
+  if (GENERATED_TITLE_PLACEHOLDERS.has(normalizeTitleText(title))) return true;
+  return Boolean(description && title === fallbackTitleFromDescription(descriptionBody(description, title)));
+}
+
+function cleanGeneratedTitle(value) {
+  return String(value || "")
+    .split("\n")
+    .map((line) => line.replace(/^["'`]+|["'`.]+$/g, "").trim())
+    .find(Boolean)?.slice(0, 80) || "";
+}
+
+const SYSTEM_PROMPT_TITLE_GENERATOR = `Você é um gerador de títulos curtos para tasks.
+
+Sua função é criar um título claro, específico e útil com base no contexto da task fornecida.
+
+Regras obrigatórias:
+- Responda somente com o título
+- Não use aspas
+- Não use pontuação final
+- Não use emojis
+- Não escreva explicações
+- Não use palavras genéricas como "Task", "Tarefa", "Atividade" ou "Ajustes" quando houver contexto melhor
+- O título deve ter preferencialmente entre 3 e 12 palavras
+- Use verbo de ação quando fizer sentido
+- Preserve termos técnicos, nomes de features, IDs ou entidades importantes quando forem essenciais
+- O título deve refletir o objetivo principal da task, não detalhes secundários
+- Use o mesmo idioma predominante da task
+
+Priorize títulos objetivos, específicos e fáceis de identificar em uma lista ou kanban.`;
+
+async function requestGeneratedTitle(task, root, description) {
+  const settings = await readSettings(root);
+  const discovery = discoverProviders(settings);
+  const provider = discovery.providers.find((item) => item.id === discovery.defaultProvider && item.active);
+  const model = discovery.defaultModel || provider?.defaultModel;
+  if (!provider || !model || !globalThis.fetch) return null;
+  const apiKey = provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : null;
+  const headers = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` };
+  if (process.env.OPENROUTER_HTTP_REFERER) headers["HTTP-Referer"] = process.env.OPENROUTER_HTTP_REFERER;
+  if (process.env.OPENROUTER_APP_TITLE) headers["X-Title"] = process.env.OPENROUTER_APP_TITLE;
+  const response = await globalThis.fetch(`${provider.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT_TITLE_GENERATOR},
+        { role: "user", content: `Descricao da task:\n${descriptionBody(description, task.title).slice(0, 4000)}` }
+      ]
+    })
+  });
+  if (!response.ok) return null;
+  const data = await response.json();
+  return cleanGeneratedTitle(data?.choices?.[0]?.message?.content);
+}
+
+async function ensureTaskTitleBeforeRun(task, root) {
+  let description = "";
+  try {
+    description = await readFile(`${paths(root).tasks}/${task.id}/description.md`, "utf8");
+  } catch {}
+  if (!shouldGenerateTitle(task, description)) return task;
+  const title = await requestGeneratedTitle(task, root, description);
+  const event = { ts: new Date().toISOString(), type: "task.title.generated", actor: "orchestrator", taskId: task.id, previousTitle: task.title, title: title || null };
+  await appendJsonl(`${paths(root).tasks}/${task.id}/events.jsonl`, event);
+  return title ? TaskSchema.parse(await updateTask(task.id, { title }, root, "task.title.generated")) : task;
+}
+
+async function requeueWaitingParentForChild(child, root, summary) {
+  const parentTaskId = child.worktree?.parentTaskId;
+  if (!parentTaskId) return null;
+  const parent = await getTask(parentTaskId, root);
+  if (!parent || parent.status !== "waiting") return null;
+  const directChildren = (await listTasks(root)).filter((task) => task.worktree?.parentTaskId === parentTaskId);
+  const completed = directChildren.filter((task) => task.status === "done").map((task) => task.id);
+  const pending = directChildren.filter((task) => task.status !== "done").map((task) => task.id);
+  const finalInstruction = pending.length
+    ? ""
+    : " Todas as subtasks diretas esperadas terminaram; nao solicite input, nao crie subtasks, consolide os resultados reportados e chame complete_task com nextColumn done.";
+  const text = `Subtask concluida: ${child.id}. Concluidas: ${completed.join(", ") || "nenhuma"}. Pendentes: ${pending.join(", ") || "nenhuma"}. Resultado: ${summary || "sem resumo"}.${finalInstruction}`;
+  await appendChatMessage(root, { scope: "task", taskId: parentTaskId, role: "assistant", persona: "orchestrator", agentId: "orchestrator", disposition: "subtask.result_reported", text, visibility: "both" });
+  await appendJsonl(`${paths(root).tasks}/${child.id}/events.jsonl`, { ts: new Date().toISOString(), type: "subtask.result_reported", actor: "orchestrator", taskId: child.id, parentTaskId, summary });
+  await appendJsonl(`${paths(root).tasks}/${parentTaskId}/events.jsonl`, { ts: new Date().toISOString(), type: "subtask.parent_requeued", actor: "orchestrator", taskId: parentTaskId, subtaskId: child.id, completed, pending });
+  if (pending.length) return null;
+  return TaskSchema.parse(await updateTask(parentTaskId, { status: "queued", column: parent.column, routing: parent.routing }, root, "subtask.parent_requeued"));
+}
+
+async function childResultSummary(child, root) {
+  const events = await readJsonl(`${paths(root).tasks}/${child.id}/events.jsonl`);
+  const reported = events.findLast?.((event) => event.type === "subtask.result_reported" && event.summary)
+    || [...events].reverse().find((event) => event.type === "subtask.result_reported" && event.summary);
+  return reported?.summary || "sem resumo reportado";
+}
+
 export async function runTaskWorkflow(command, root, whyNotRunning, executeCommand) {
   logStep("orchestrator", "task.run.start", { commandId: command.commandId, taskId: command.taskId });
   const current = await getTask(command.taskId, root);
@@ -47,7 +167,9 @@ export async function runTaskWorkflow(command, root, whyNotRunning, executeComma
   const why = await whyNotRunning(current, root);
   if (!why.runnable) {
     logStep("orchestrator", "task.run.blocked", { taskId: command.taskId, reasons: why.reasons });
-    const task = TaskSchema.parse(await updateTask(command.taskId, { status: "queued" }, root, "agent.queued"));
+    const task = current.status === "done"
+      ? TaskSchema.parse(current)
+      : TaskSchema.parse(await updateTask(command.taskId, { status: "queued" }, root, "agent.queued"));
     return { ok: false, commandId: command.commandId, task, why };
   }
   logStep("orchestrator", "task.run.launch", { taskId: command.taskId, agentId: command.agentId });
@@ -67,6 +189,7 @@ export async function runTaskWorkflow(command, root, whyNotRunning, executeComma
       return { ok: false, commandId: command.commandId, task, why: { runnable: false, reasons: [reason] } };
     }
   }
+  runnableTask = await ensureTaskTitleBeforeRun(runnableTask, root);
   const run = await startRun(runnableTask, root, command.agentId, {
     executeCommand: (toolCommand) => executeCommand(toolCommand, root),
     beforePrompt: ({ runId, sessionRef, summaryRef, agentId, role }) => updateTask(command.taskId, {
@@ -94,9 +217,11 @@ export async function runTaskWorkflow(command, root, whyNotRunning, executeComma
     return { ok: false, commandId: command.commandId, task, run, reason };
   }
   const latest = await getTask(command.taskId, root);
-  if (latest && (latest.status !== runnableTask.status || latest.column !== runnableTask.column)) {
+  if (latest && (latest.status !== runnableTask.status || latest.column !== runnableTask.column || latest.updatedAt !== runnableTask.updatedAt)) {
     const task = TaskSchema.parse(await updateTask(command.taskId, {
-      routing: { ...latest.routing, currentAgent: latest.routing?.currentAgent || run.agentId, currentRole: latest.routing?.currentRole || run.role || run.agentId },
+      routing: latest.column === "human_wait"
+        ? latest.routing
+        : { ...latest.routing, currentAgent: latest.routing?.currentAgent || run.agentId, currentRole: latest.routing?.currentRole || run.role || run.agentId },
       agent: { ...latest.agent, currentRunId: run.runId, currentSessionRef: run.sessionRef, resumeMode: "continue", lastSummary: latest.agent?.lastSummary || run.summaryRef }
     }, root, "agent.run_recorded"));
     logStep("orchestrator", "task.run.tool_mutated", { taskId: command.taskId, runId: run.runId, status: task.status, column: task.column });
@@ -143,7 +268,7 @@ export async function completeTaskWorkflow(command, root) {
     await releaseSemaphoreLeases({ root, taskId: command.taskId });
     return { ok: true, commandId: command.commandId, task, summaryRef, deferredComments: deferredComments.length };
   }
-  const nextColumn = normalizeColumnId(command.nextColumn);
+  const nextColumn = current.worktree?.parentTaskId ? "done" : normalizeColumnId(command.nextColumn);
   const target = (await boardSnapshot(root)).columns.find((column) => column.id === nextColumn);
   const task = TaskSchema.parse(await updateTask(command.taskId, {
     status: nextColumn === "done" ? "done" : "queued",
@@ -152,8 +277,9 @@ export async function completeTaskWorkflow(command, root) {
     agent: { ...current.agent, lastSummary: summaryRef }
   }, root, "agent.completed"));
   await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: current.routing?.currentRole || current.routing?.currentAgent || "assistant", agentId: current.routing?.currentAgent || "assistant", runId: command.runId, disposition: "agent.completed", text: visibleText, visibility: "both" });
+  const parentTask = await requeueWaitingParentForChild(task, root, command.summary || visibleText);
   await releaseSemaphoreLeases({ root, taskId: command.taskId });
-  return { ok: true, commandId: command.commandId, task, summaryRef };
+  return { ok: true, commandId: command.commandId, task, summaryRef, parentTask };
 }
 
 export async function reportBlockerWorkflow(command, root) {
@@ -173,6 +299,26 @@ export async function requestUserInputWorkflow(command, root) {
   const current = await getTask(command.taskId, root);
   if (!current) throw new Error(`Task not found: ${command.taskId}`);
   assertActiveRun(current, command.runId);
+  const directChildren = (await listTasks(root)).filter((task) => task.worktree?.parentTaskId === command.taskId);
+  if (directChildren.length && directChildren.every((task) => task.status === "done")) {
+    const childSummaries = await Promise.all(directChildren
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map(async (child) => `- ${child.id} (${child.title}): ${await childResultSummary(child, root)}`));
+    const summary = [
+      `Consolidacao final: todas as ${directChildren.length} subtasks diretas estao done.`,
+      ...childSummaries,
+      `Completando o parent sem solicitar input humano. Pergunta ignorada: ${command.question}`
+    ].join("\n");
+    await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: "orchestrator", agentId: "orchestrator", runId: command.runId, disposition: "subtasks.completed_parent_done", text: summary, visibility: "both" });
+    const task = TaskSchema.parse(await updateTask(command.taskId, {
+      status: "done",
+      column: "done",
+      dependencies: { ...current.dependencies, blockedBy: [] }
+    }, root, "subtasks.completed_parent_done"));
+    await releaseSemaphoreLeases({ root, taskId: command.taskId });
+    await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "subtasks.completed_parent_done", actor: "orchestrator", taskId: command.taskId, ignoredQuestion: command.question, subtasks: directChildren.map((task) => task.id) });
+    return { ok: true, commandId: command.commandId, task, summary };
+  }
   const relativePath = `summaries/input-${Date.now()}.md`;
   await writeTaskFile(command.taskId, relativePath, `# Input solicitado\n\n${command.question}\n`, root);
   const requester = current.routing?.currentRole || current.routing?.currentAgent || "assistant";

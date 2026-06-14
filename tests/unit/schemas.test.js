@@ -41,7 +41,9 @@ test("schemas parse generated FSDB settings, task files and events", async () =>
   assert.equal(AppSettingsSchema.parse(await readYamlFile(join(root, "settings", "app.yaml"))).schema, "kanban-code-agent/app@1");
   assert.equal(BoardSettingsSchema.parse(await readYamlFile(join(root, "settings", "boards", "default.yaml"))).columns.length, 12);
   assert.equal(ProjectSettingsSchema.parse(await readYamlFile(join(root, "settings", "projects", "kanban-code-agent.yaml"))).id, "kanban-code-agent");
-  assert.equal(AgentSettingsSchema.parse(await readYamlFile(join(root, "settings", "agents", "engineering.yaml"))).provider, "inherit");
+  const engineeringAgent = AgentSettingsSchema.parse(await readYamlFile(join(root, "settings", "agents", "engineering.yaml")));
+  assert.equal(engineeringAgent.provider, "inherit");
+  assert.equal(engineeringAgent.limits.maxParallelTasks, 50);
   const role = RoleSettingsSchema.parse(await readYamlFile(join(root, "settings", "roles", "engineering.yaml")));
   assert.equal(role.id, "engineering");
   assert.equal(role.scope, "task");
@@ -50,7 +52,7 @@ test("schemas parse generated FSDB settings, task files and events", async () =>
   assert.equal(generalist.id, "generalist");
   assert.equal(HookSettingsSchema.parse(await readYamlFile(join(root, "settings", "hooks", "summarize-blocker.yaml"))).id, "summarize-blocker");
   assert.equal(SkillSettingsSchema.parse(await readYamlFile(join(root, "settings", "skills", "implementation.yaml"))).id, "implementation");
-  assert.equal(SemaphoreStateSchema.parse(await readYamlFile(join(root, "settings", "runtime", "semaphores.yaml"))).tokens["global:tasks"], 4);
+  assert.equal(SemaphoreStateSchema.parse(await readYamlFile(join(root, "settings", "runtime", "semaphores.yaml"))).tokens["global:tasks"], 1000);
   assert.match(await readFile(join(root, "settings", "skills", "implementation", "SKILL.md"), "utf8"), /Implementation Skill/);
 
   assert.equal(TaskSchema.parse(await readYamlFile(join(root, "tasks", task.id, "task.yaml"))).id, task.id);

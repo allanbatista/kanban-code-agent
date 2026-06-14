@@ -306,7 +306,7 @@ export function TaskModal({ task, draftTask, open, onClose, onSave, onUploadAtta
                   <Tabs.Content value="worktree"><Panel title="Worktree da task" lines={[`branch: ${task?.worktree?.branch || "a definir"}`, `path: ${task?.worktree?.path || "nao criado"}`, `merge target: ${task?.worktree?.mergeTarget || "main"}`]} /></Tabs.Content>
                   <Tabs.Content value="dependencias"><Panel title="Contratos da task" lines={[`needs -> ${(task?.dependencies?.needs || []).join(", ") || "nenhum"}`, `${task?.id || "task"} -> provides`, (task?.dependencies?.provides || []).join(", ") || "nenhum"]} /></Tabs.Content>
                   <Tabs.Content value="subtasks">
-                    <Panel title="Subtasks paralelas" lines={subtasks.length ? subtasks.map((item) => `${item.id} [${item.status}] ${item.title}`) : ["Use decompor para criar subtasks com needs/provides e agents sugeridos."]} />
+                    <Panel title="Subtasks paralelas" lines={subtasks.length ? subtasks.map((item) => `${item.id} [${item.status}] ${item.routing?.currentRole || item.routing?.currentAgent || "sem role"} · parent ${item.worktree?.parentTaskId || "-"} · main ${item.worktree?.mainTaskId || item.worktree?.parentTaskId || item.id} · ${item.agent && typeof item.agent === "object" && item.agent.lastSummary ? item.agent.lastSummary : item.title}`) : ["Use decompor para criar subtasks com needs/provides e agents sugeridos."]} />
                   </Tabs.Content>
                   <Tabs.Content value="hooks"><Panel title="Hooks da task" lines={task?.hooks?.active?.length ? task.hooks.active : ["nenhum hook ativo"]} /></Tabs.Content>
                   <Tabs.Content value="eventos"><Panel title="Timeline" lines={(files?.events?.length ? files.events.slice(-8).map((event) => `${event.type || "event"} · ${event.ts || ""}`) : [`updated: ${task?.updatedAt || "nao persistida"}`])} /></Tabs.Content>
@@ -781,7 +781,7 @@ function UsageSummary({ usage }: { usage?: TokenUsageAggregate | null }) {
           </div>,
           ...(agent.models || []).map((model) => (
             <div className="usage-summary-row model" role="row" key={`${agent.agentId}:${model.provider || ""}:${model.model}`}>
-              <span title={formatModelLabel(model)}>modelo: {formatModelLabel(model)}</span>
+              <span title={formatModelLabel(model)}>{formatModelLabel(model)}</span>
               <span>{formatDuration(model.durationMs)}</span>
               <span>{formatUsageValue(model.contextPercent, "%")}</span>
               <span>{formatUsageValue(model.totalTokens)}</span>

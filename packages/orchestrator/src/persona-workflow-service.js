@@ -1,4 +1,4 @@
-import { appendJsonl, normalizeColumnId, paths, updateTask, writeTaskFile } from "@kca/fsdb";
+import { appendJsonl, createTask, normalizeColumnId, paths, readYaml, updateTask, writeTaskFile, writeYaml } from "@kca/fsdb";
 import { appendChatMessage } from "@kca/fsdb/chat-store";
 import { releaseSemaphoreLeases } from "@kca/fsdb/runtime-store";
 import { roleById } from "@kca/core/roles";
@@ -47,12 +47,43 @@ export async function waitForHumanWorkflow(command, current, root) {
 }
 
 export async function delegateTaskWorkflow(command, current, root) {
+  const targetRole = command.toPersona;
+  const targetColumn = roleColumn(targetRole);
+  const agentId = roleAgent(targetRole);
+  const mainTaskId = current.worktree?.mainTaskId || current.worktree?.parentTaskId || current.id;
+  const childId = `${current.id}-${Date.now().toString(36)}`;
   await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "delegation.requested", actor: command.fromPersona, taskId: command.taskId, fromPersona: command.fromPersona, toPersona: command.toPersona, wait: command.wait, request: command.request, expectedOutput: command.expectedOutput });
-  const task = TaskSchema.parse(await updateTask(command.taskId, {
+  const child = TaskSchema.parse(await createTask({
+    id: childId,
+    title: `${current.title}: ${targetRole}`,
+    kind: "subtask",
+    column: targetColumn,
     status: "queued",
-    column: roleColumn(command.toPersona),
-    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: command.fromPersona, currentAgent: roleAgent(command.toPersona), currentRole: command.toPersona }
-  }, root, "agent.waiting_for_persona"));
+    projectTargets: current.projectTargets,
+    agent: agentId,
+    role: targetRole,
+    description: [
+      `Delegated request: ${command.request}`,
+      `Expected output: ${command.expectedOutput || "Report result to parent task."}`,
+      `Parent task id: ${current.id}`,
+      `Main task id: ${mainTaskId}`,
+      `Target persona: ${targetRole}`
+    ].join("\n\n"),
+    worktree: { enabled: true, kind: "subtask", branch: `kca/${childId}`, pathRef: "worktree.yaml", parentTaskId: current.id, mainTaskId, mergeTarget: current.worktree?.branch || "main" },
+    dependencies: { needs: [], provides: [`subtask:${current.id}:${childId}`], blockedBy: [], fileLocks: [], semaphores: [] }
+  }, root));
+  await writeTaskFile(child.id, "acceptance.md", `# Critérios de aceite\n\n- [ ] Request atendido: ${command.request}\n- [ ] Expected output entregue: ${command.expectedOutput || "result summary"}\n- [ ] Parent task id: ${current.id}\n- [ ] Main task id: ${mainTaskId}\n- [ ] Target persona: ${targetRole}\n`, root);
+  const subtasksPath = `${paths(root).tasks}/${current.id}/subtasks.yaml`;
+  const existing = await readYaml(subtasksPath, { schema: "kanban-code-agent/subtasks@2", taskId: current.id, parentTaskId: current.id, strategy: "dag", mergePolicy: "sequential-into-parent-feature", nodes: [], subtasks: [], edges: [] });
+  const node = { id: child.id, title: child.title, status: child.status, column: child.column, role: targetRole, agent: agentId, needs: [], provides: child.dependencies?.provides || [], fileLocks: [], semaphores: [], parentTaskId: current.id, mainTaskId };
+  const nodes = [...(existing.nodes || existing.subtasks || []), node];
+  await writeYaml(subtasksPath, { ...existing, nodes, subtasks: nodes, edges: existing.edges || [] });
+  await appendJsonl(`${paths(root).tasks}/${current.id}/events.jsonl`, { ts: new Date().toISOString(), type: "delegation.subtask_created", actor: command.fromPersona, taskId: current.id, subtaskId: child.id, toPersona: targetRole, wait: command.wait });
+  const task = TaskSchema.parse(await updateTask(command.taskId, {
+    status: command.wait ? "waiting" : "queued",
+    column: current.column,
+    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: command.fromPersona }
+  }, root, "delegation.subtask_created"));
   await releaseSemaphoreLeases({ root, taskId: command.taskId });
-  return { ok: true, commandId: command.commandId, task, delegation: { fromPersona: command.fromPersona, toPersona: command.toPersona, wait: command.wait } };
+  return { ok: true, commandId: command.commandId, task, subtask: child, delegation: { fromPersona: command.fromPersona, toPersona: command.toPersona, wait: command.wait } };
 }

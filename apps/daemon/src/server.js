@@ -215,11 +215,9 @@ async function runSchedulerTick(source = "startup") {
   try {
     logStep("daemon", "schedulerTick.start", { source });
     await ensureReady();
-    const state = await boardService.snapshot();
-    if (!state.tasks?.some((task) => task.status === "queued")) return null;
     const result = await handleCommand({ type: "scheduler.tick", commandId: `scheduler-${source}-${Date.now()}` }, root);
-    if (result.started?.length || result.blocked?.length || result.skipped?.length) {
-      logStep("daemon", "schedulerTick.result", { source, started: result.started?.map((item) => item.taskId) || [], blocked: result.blocked?.length || 0, skipped: result.skipped?.length || 0 });
+    if (result.autoQueued?.length || result.started?.length || result.blocked?.length || result.skipped?.length) {
+      logStep("daemon", "schedulerTick.result", { source, autoQueued: result.autoQueued || [], started: result.started?.map((item) => item.taskId) || [], blocked: result.blocked?.length || 0, skipped: result.skipped?.length || 0 });
     }
     await eventBus.publish({ type: "scheduler.tick", result });
     return result;

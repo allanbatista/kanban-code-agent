@@ -7,6 +7,10 @@ import { createFsdbRepositories } from "@kca/fsdb/repositories";
 import { TaskSchema } from "@kca/schemas";
 import { BoardProjection } from "./projection.js";
 
+function agentMaxParallelTasks(agent, runtime = {}, agentId = "assistant") {
+  return agent?.limits?.maxParallelTasks ?? agent?.limits?.tokens ?? runtime.agentTokens?.[agentId] ?? 50;
+}
+
 export class BoardService {
   constructor({ root, repositories, projection } = {}) {
     this.root = root;
@@ -40,10 +44,11 @@ export class BoardService {
 
   async orchestratorStatus({ semaphoreState } = {}) {
     logStep("board-service", "orchestratorStatus.start");
-    const [tasks, settings, semaphores] = await Promise.all([
+    const [tasks, settings, semaphores, agentScope] = await Promise.all([
       this.repositories.tasks.list(),
       this.repositories.settings.readAll(),
-      semaphoreState ? Promise.resolve(semaphoreState) : this.repositories.semaphores.readState()
+      semaphoreState ? Promise.resolve(semaphoreState) : this.repositories.semaphores.readState(),
+      this.repositories.settings.readScope ? this.repositories.settings.readScope("agents") : Promise.resolve({ agents: [] })
     ]);
     const running = tasks.filter((task) => task.status === "running");
     const queued = tasks.filter((task) => task.status === "queued");
@@ -55,6 +60,7 @@ export class BoardService {
         running: running.length,
         maxParallelTasks: settings.runtime?.maxParallelTasks ?? 3,
         maxParallelMerges: settings.runtime?.maxParallelMerges ?? 1,
+        agentMaxParallelTasks: Object.fromEntries((agentScope.agents || []).map((agent) => [agent.id, agentMaxParallelTasks(agent, settings.runtime || {}, agent.id)])),
         agentTokens: settings.runtime?.agentTokens || {},
         projectTokens: settings.runtime?.projectTokens || {}
       },

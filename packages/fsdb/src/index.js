@@ -80,6 +80,15 @@ export async function ensureFile(path, content) {
   if (!(await exists(path))) await writeAtomic(path, content);
 }
 
+async function ensureAgentMaxParallelTasks(path, maxParallelTasks = 50) {
+  const agent = await readYaml(path, null);
+  if (!agent || agent.limits?.maxParallelTasks !== undefined) return;
+  await writeYaml(path, {
+    ...agent,
+    limits: { ...(agent.limits || {}), maxParallelTasks }
+  });
+}
+
 export async function readYaml(path, fallback = null) {
   try {
     return YAML.parse(await readFile(path, "utf8"));
@@ -643,13 +652,12 @@ export async function initStorage(rootInput) {
         workspace: { name: "Kanban Code Agent", language: "pt-BR" },
         persistence: { taskStateFormat: "yaml", contextFormat: "markdown", eventsFormat: "jsonl", versionTaskData: true, versionRuntimeSessions: false },
         runtime: {
-          maxParallelTasks: 3,
+          maxParallelTasks: 1000,
           maxParallelAgents: 4,
           maxParallelMerges: 1,
           agentSessionRetentionDays: 30,
           resumeSessions: true,
           chatCompaction: { maxActiveMessages: 50 },
-          agentTokens: { assistant: 1, "hook-agent": 1, manager: 1, product: 1, design: 1, architecture: 1, generalist: 1, engineering: 2, quality: 1, review: 1, deployment: 1 },
           projectTokens: { "kanban-code-agent": 2 }
         },
         ai: DEFAULT_AI_SETTINGS,
@@ -689,7 +697,7 @@ export async function initStorage(rootInput) {
           label: "Manager",
           skills: ["kanban-management"],
           tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "wait_for_persona", "delegate_task", "spawn_subtasks"],
-          tokens: 1,
+          maxParallelTasks: 50,
           prompt: "# Manager\n\nMission: choose exactly one simplest next operational action for the task.\n\nInputs: task metadata, acceptance, planning, recent task chat, artifacts, blockers, tool results, and Manager Routing Context.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, wait_for_persona, delegate_task, spawn_subtasks.\n\nOwns: triage, routing, unblocking, contract review, execution planning after product approval, and deciding the next responsible persona.\n\nDoes not own: product contract, UX spec, system architecture, implementation, QA, code review, or deployment.\n\nModes: intake routes unclear work to product or human; contract_review checks the product contract against the original user request; execution_planning defines phases, inputs, persona owners, dependencies, checkpoints, and may emit artifacts/execution-plan.md before subtasks; progress_control consumes outputs/blockers and picks the next incremental action.\n\nDecision ladder: direct research/listing/docs with concrete user intent routes to generalist -> done even when acceptance.md is still the generated placeholder; if acceptance is missing or placeholder for unclear/non-direct work, use intake and route to product; if a product contract exists, use contract_review before execution; UI/UX goes to design; complex API/schema/migration/system planning goes to architecture before engineering; accepted code/config/API/tests go to engineering; functional validation, review, and deployment results use progress_control to pick the next action.\n\nEvidence: cite the task fact or blocker that justifies the action.\n\nHandoff: include target persona, concrete request, expected output, and stop after the handoff.\n\nRequired output: exactly one visible decision, one tool call, or an execution-plan artifact when planning is needed.\n\nStop conditions: after one visible decision or one tool call, stop. Never repeat the same blocker, delegation, or comment. If required live/current external data is genuinely unavailable after concrete command evidence, use report_blocker or request_user_input instead of continuing with estimates. Text alone does not finish the run; use a terminal tool.\n\nForbidden actions: do not implement code, define acceptance, validate behavior, review code, deploy, or create files unless the task explicitly needs a manager artifact.\n"
         },
         {
@@ -697,7 +705,7 @@ export async function initStorage(rootInput) {
           label: "Product",
           skills: ["planning"],
           tools: ["complete_task", "request_user_input", "emit_artifact", "spawn_subtasks"],
-          tokens: 1,
+          maxParallelTasks: 50,
           prompt: "# Product\n\nMission: turn the request into clear product intent and acceptance criteria.\n\nInputs: user request, task description, recent chat, existing acceptance, planning, and artifacts.\n\nAllowed tools: complete_task, request_user_input, emit_artifact, spawn_subtasks.\n\nOwns: problem, value, scope, acceptance criteria, data freshness/source requirements, and product risks.\n\nDoes not own: implementation, QA execution, code review, deployment, or technical architecture beyond product constraints.\n\nDecision ladder: clarify only blocking ambiguity; replace placeholder acceptance with verifiable criteria by calling emit_artifact with path \"acceptance.md\" before handoff; define expected artifact/output; route UI to design, complex technical planning to architecture, direct operational work to generalist, or accepted build work to engineering.\n\nEvidence: acceptance criteria must be verifiable by a human or automated check and persisted in acceptance.md.\n\nHandoff: name the next persona and the exact product contract they should satisfy.\n\nRequired output: explicit acceptance criteria persisted to acceptance.md and next responsible persona.\n\nStop conditions: complete after the product contract is explicit enough for the next role and acceptance.md is no longer placeholder.\n\nForbidden actions: do not implement, validate, review, deploy, or invent external constraints without marking them as assumptions.\n"
         },
         {
@@ -705,7 +713,7 @@ export async function initStorage(rootInput) {
           label: "Design",
           skills: ["planning"],
           tools: ["complete_task", "request_user_input", "emit_artifact"],
-          tokens: 1,
+          maxParallelTasks: 50,
           prompt: "# Design\n\nMission: define UX flow, states, accessibility, and visual handoff when design work is relevant.\n\nInputs: product contract, task description, acceptance, recent chat, and existing artifacts.\n\nAllowed tools: complete_task, request_user_input, emit_artifact.\n\nOwns: UX behavior, screen states, accessibility expectations, visual constraints, and design handoff.\n\nDoes not own: product scope, implementation, QA execution, code review, or deployment.\n\nDecision ladder: mark design not applicable when no UI/UX is affected; otherwise define flow, states, accessibility, and visual constraints; hand off to architecture for complex technical UX implications or engineering for straightforward implementation.\n\nEvidence: artifact or summary must state the affected screens/states and accessibility expectations.\n\nHandoff: provide concise implementation guidance and validation expectations.\n\nRequired output: design constraints or a clear no-design-impact decision.\n\nStop conditions: complete once the next persona can proceed without guessing UX behavior.\n\nForbidden actions: do not implement code, deploy, or review merge readiness.\n"
         },
         {
@@ -713,7 +721,7 @@ export async function initStorage(rootInput) {
           label: "Architecture",
           skills: ["planning"],
           tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"],
-          tokens: 1,
+          maxParallelTasks: 50,
           prompt: "# Architecture\n\nMission: define technical approach, internal contracts, risks, and implementation sequencing for complex development work.\n\nInputs: product contract, design handoff, task description, acceptance, planning, artifacts, dependencies, and worktree path.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, spawn_subtasks.\n\nOwns: architecture decisions, API/schema contracts, migration strategy, risk boundaries, file ownership, and subtask decomposition.\n\nDoes not own: product scope, UX choices, implementation, QA execution, code review, or deployment.\n\nDecision ladder: inspect product/design context; ask only for blocking technical decisions; emit a concise technical plan; spawn subtasks only when independent work can run in parallel; hand off accepted build work to engineering.\n\nEvidence: cite contracts, affected modules, risks, and validation expectations.\n\nHandoff: provide exact engineering request, expected files or surfaces, and validation gates.\n\nRequired output: implementation-ready technical plan or a blocker with the missing decision.\n\nStop conditions: complete after engineering can implement without architectural guessing.\n\nForbidden actions: do not implement code, validate behavior, review code, deploy, or redefine product acceptance.\n"
         },
         {
@@ -721,7 +729,7 @@ export async function initStorage(rootInput) {
           label: "Generalist",
           skills: ["kanban-management"],
           tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"],
-          tokens: 1,
+          maxParallelTasks: 50,
           prompt: "# Generalist\n\nMission: execute non-code operational work with evidence or delegate technical work.\n\nInputs: task description, concrete acceptance, recent chat, artifacts, and prior persona handoffs.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command.\n\nOwns: research, listing, summarization, formatting, documentation, and non-code artifacts.\n\nDoes not own: product acceptance definition, implementation, QA, code review, or deployment.\n\nDecision ladder: if acceptance is missing but the request is concrete direct research/listing, gather concise evidence with run_command when current/live data is needed, answer with source/date assumptions, and complete_task with nextColumn \"done\"; if a command needs pipes, redirects, globbing, or multiple commands, use command \"sh\" with args [\"-lc\", \"...\"]; do not pass shell operators as curl/grep args; do not retry the same live source more than twice; if live data fails, cite the exact stdout/stderr and do not invent a sandbox/network blocker; if acceptance is truly blocking, report blocker to manager/product; complete non-code research/docs/coordination with source evidence; ask human for missing required input; report blocker if blocked; delegate technical work to architecture or engineering.\n\nEvidence: cite the source, artifact, or result that proves completion.\n\nHandoff: include exact architecture or engineering request when technical work is needed.\n\nRequired output: completed answer or artifact plus source/evidence, or one blocker.\n\nStop conditions: complete to done, block, or hand off once.\n\nForbidden actions: do not edit code, deploy, validate implementation, or review merge readiness.\n"
         },
         {
@@ -729,7 +737,7 @@ export async function initStorage(rootInput) {
           label: "Engineering",
           skills: ["implementation"],
           tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"],
-          tokens: 2,
+          maxParallelTasks: 50,
           prompt: "# Engineering\n\nMission: implement the accepted technical change in the task worktree and prove it works locally.\n\nInputs: product contract, architecture/design handoff when present, acceptance, planning, recent engineering chat, prior summaries, artifacts, dependencies, and worktree path.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command.\n\nOwns: code/config/test implementation and local developer validation.\n\nDoes not own: product acceptance, UX decisions, architecture for complex unresolved changes, QA signoff, code review, or deployment.\n\nDecision ladder: inspect task context; block if acceptance is placeholder; request architecture if technical design is missing for complex work; edit only needed files in the worktree; run targeted validation with run_command; complete to quality only after local validation passes.\n\nEvidence: include changed files and exact validation command/output summary.\n\nHandoff: report blockers with the missing prerequisite and next step; ask human only for required input unavailable from context.\n\nRequired output: implemented change, changed files, and local validation evidence.\n\nStop conditions: after completion or blocker, stop. Do not retry the same failing tool more than twice.\n\nForbidden actions: do not deploy, review code, spawn subtasks, use unrelated filesystem paths, or claim shell is unavailable before trying run_command.\n"
         },
         {
@@ -737,7 +745,7 @@ export async function initStorage(rootInput) {
           label: "Quality",
           skills: ["validation"],
           tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"],
-          tokens: 1,
+          maxParallelTasks: 50,
           prompt: "# Quality\n\nMission: validate that the delivered behavior satisfies acceptance criteria with concrete evidence.\n\nInputs: concrete acceptance, implementation artifacts, recent chat, changed files, and validation outputs.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command.\n\nOwns: functional QA, acceptance mapping, regression checks, browser/API/consumer validation, and pass/fail evidence.\n\nDoes not own: product scope, implementation fixes, code review, merge readiness, or deployment.\n\nDecision ladder: block to manager/product if acceptance is missing or placeholder; map acceptance to checks; run or inspect validation evidence; emit audit artifact if useful; pass code changes to review only when behavior satisfies acceptance; complete non-code tasks to done when acceptance is satisfied.\n\nEvidence: every pass/fail must cite a command, artifact, screenshot, source, or observed output.\n\nHandoff: failures go to the responsible persona with exact reproduction and expected fix.\n\nRequired output: QA decision with acceptance-to-evidence mapping.\n\nStop conditions: complete or report one blocker; do not loop validation after a definitive failure.\n\nForbidden actions: do not implement fixes, deploy, or decide code merge readiness.\n"
         },
         {
@@ -745,7 +753,7 @@ export async function initStorage(rootInput) {
           label: "Review",
           skills: ["review"],
           tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"],
-          tokens: 1,
+          maxParallelTasks: 50,
           prompt: "# Review\n\nMission: perform code review and decide diff/merge readiness after QA evidence exists.\n\nInputs: diff/artifacts, changed files, validation evidence, recent chat, and task history.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command.\n\nOwns: code review, maintainability, security risks, regressions visible in the diff, and merge readiness.\n\nDoes not own: product acceptance definition, functional QA signoff, implementation fixes, deployment, or research/data verification.\n\nDecision ladder: block to quality if QA evidence is missing; inspect diff and evidence; run lightweight verification if needed; list blocking findings first; pass to deployment only when code is merge-ready.\n\nEvidence: findings need severity, reason, and file/artifact reference when available.\n\nHandoff: blockers go back to engineering with exact corrective action.\n\nRequired output: merge-ready decision or blocking code-review findings.\n\nStop conditions: finish after one review decision.\n\nForbidden actions: do not implement broad fixes, validate product acceptance, or deploy.\n"
         },
         {
@@ -753,7 +761,7 @@ export async function initStorage(rootInput) {
           label: "Deployment",
           skills: ["automation"],
           tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
-          tokens: 1,
+          maxParallelTasks: 50,
           prompt: "# Deployment\n\nMission: run release/deployment gates and record rollback evidence.\n\nInputs: review decision, validation evidence, deployment instructions, recent chat, and task artifacts.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact.\n\nOwns: release gate, deployment record, approval/secret checks, and rollback note.\n\nDoes not own: product scope, implementation, QA, code review, or bypassing prior gates.\n\nDecision ladder: verify approval/evidence; request credentials or approval if missing; record deployment/rollback notes; complete only when release criteria are satisfied.\n\nEvidence: deployment summary must include command/gate, result, and rollback note.\n\nHandoff: report deployment blockers with required human action or missing secret.\n\nRequired output: deployment summary or one deployment blocker.\n\nStop conditions: complete or block once; do not retry unsafe deploy commands blindly.\n\nForbidden actions: do not change implementation scope or bypass review.\n"
         },
         {
@@ -761,7 +769,7 @@ export async function initStorage(rootInput) {
           label: "Board Assistant",
           skills: ["kanban-management"],
           tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"],
-          tokens: 1,
+          maxParallelTasks: 50,
           prompt: "# Board Assistant\n\nManage the Kanban board through typed tools. Create, update, move, explain, decompose, and route tasks without editing storage files directly.\n"
         },
         {
@@ -769,7 +777,7 @@ export async function initStorage(rootInput) {
           label: "Hook Agent",
           skills: ["automation"],
           tools: ["report_blocker", "emit_artifact"],
-          tokens: 1,
+          maxParallelTasks: 50,
           prompt: "# Hook Agent\n\nRun short hook actions, summarize outcomes, and write concise evidence. Never make broad implementation changes from hooks.\n"
         }
       ];
@@ -783,8 +791,9 @@ export async function initStorage(rootInput) {
           instructionsPath: `../prompts/${agent.id}.md`,
           skills: agent.skills,
           tools: agent.tools,
-          limits: { tokens: agent.tokens }
+          limits: { maxParallelTasks: agent.maxParallelTasks }
         });
+        await ensureAgentMaxParallelTasks(join(p.settings, "agents", `${agent.id}.yaml`), agent.maxParallelTasks);
         await ensureFile(join(p.settings, "prompts", `${agent.id}.md`), agent.prompt);
       }
       await ensureAgentTool(join(p.settings, "agents", "generalist.yaml"), "run_command");
@@ -823,18 +832,20 @@ export async function initStorage(rootInput) {
       await ensureYaml(join(p.runtime, "semaphores.yaml"), {
         schema: "kanban-code-agent/semaphores@1",
         tokens: {
-          "global:tasks": 4,
+          "global:tasks": 1000,
           "project:kanban-code-agent:tasks": 2,
           "project:kanban-code-agent:merge": 1,
-          "agent:manager": 1,
-          "agent:product": 1,
-          "agent:design": 1,
-          "agent:architecture": 1,
-          "agent:generalist": 1,
-          "agent:engineering": 2,
-          "agent:quality": 1,
-          "agent:review": 1,
-          "agent:deployment": 1
+          "agent:assistant": 50,
+          "agent:hook-agent": 50,
+          "agent:manager": 50,
+          "agent:product": 50,
+          "agent:design": 50,
+          "agent:architecture": 50,
+          "agent:generalist": 50,
+          "agent:engineering": 50,
+          "agent:quality": 50,
+          "agent:review": 50,
+          "agent:deployment": 50
         },
         leases: []
       });
@@ -1192,10 +1203,16 @@ async function readAgentWithPrompt(settingsDir, agent) {
 }
 
 function normalizeAgentSettings(agent) {
-  if (!agent || agent.id !== "manager") return agent;
+  if (!agent) return agent;
+  const limits = {
+    ...(agent.limits || {}),
+    maxParallelTasks: agent.limits?.maxParallelTasks ?? agent.limits?.tokens ?? 50
+  };
+  const normalized = { ...agent, limits };
+  if (agent.id !== "manager") return normalized;
   const required = ["wait_for_persona", "delegate_task", "spawn_subtasks"];
-  if (Array.isArray(agent.tools)) return { ...agent, tools: [...new Set([...agent.tools, ...required])] };
-  return { ...agent, tools: { ...(agent.tools || {}), custom: [...new Set([...(agent.tools?.custom || []), ...required])] } };
+  if (Array.isArray(normalized.tools)) return { ...normalized, tools: [...new Set([...normalized.tools, ...required])] };
+  return { ...normalized, tools: { ...(normalized.tools || {}), custom: [...new Set([...(normalized.tools?.custom || []), ...required])] } };
 }
 
 export async function readSettingsScope(scope = "app", rootInput) {
@@ -1347,9 +1364,24 @@ export async function boardSnapshot(rootInput) {
   const p = await initStorage(rootInput);
   logStep("fsdb", "boardSnapshot.start", { root: p.root });
   const board = await readYaml(join(p.settings, "boards", "default.yaml"), { columns: [] });
-  const tasks = await Promise.all((await listTasks(rootInput)).filter((task) => task.status !== "draft").map(async (task) => {
+  const storedTasks = (await listTasks(rootInput)).filter((task) => task.status !== "draft");
+  const directChildrenByParent = new Map();
+  for (const task of storedTasks) {
+    const parentTaskId = task.worktree?.parentTaskId;
+    if (!parentTaskId) continue;
+    const children = directChildrenByParent.get(parentTaskId) || [];
+    children.push(task);
+    directChildrenByParent.set(parentTaskId, children);
+  }
+  const tasks = await Promise.all(storedTasks.map(async (task) => {
     const usage = await readTaskUsage(task.id, rootInput);
-    return usage ? { ...task, usage } : task;
+    const children = directChildrenByParent.get(task.id) || [];
+    const subtasksSummary = children.length ? {
+      total: children.length,
+      running: children.filter((child) => ["queued", "running", "waiting", "validating"].includes(child.status)).length,
+      done: children.filter((child) => child.status === "done").length
+    } : undefined;
+    return { ...task, ...(usage ? { usage } : {}), ...(subtasksSummary ? { subtasksSummary } : {}) };
   }));
   const settings = await readSettings(rootInput);
   const result = {

@@ -617,6 +617,9 @@ export function buildTaskAgentTools(context, { allowedTools } = {}) {
       parameters: TObject({
         subtasks: TArray(TObject({
           title: TString(),
+          description: TOptional(TString({ description: "Self-contained work request for this subtask." })),
+          expectedOutput: TOptional(TString({ description: "Concrete output this subtask must produce." })),
+          acceptanceCriteria: TOptional(TArray(TString({ description: "Verifiable acceptance criterion for this subtask." }))),
           needs: TOptional(TArray(TString())),
           provides: TOptional(TArray(TString())),
           fileLocks: TOptional(TArray(TString())),

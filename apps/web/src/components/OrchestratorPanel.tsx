@@ -2,7 +2,7 @@ import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
 import type { OrchestratorStatus } from "../types";
 
 export function OrchestratorPanel({ status, loading }: { status?: OrchestratorStatus; loading: boolean }) {
-  const tokenData = Object.entries(status?.capacity.agentTokens || {}).map(([name, tokens]) => ({ name, tokens }));
+  const capacityData = Object.entries(status?.capacity.agentMaxParallelTasks || status?.capacity.agentTokens || {}).map(([name, maxParallelTasks]) => ({ name, maxParallelTasks }));
   const leases = status?.semaphores?.leases || [];
   return (
     <section aria-label="Orchestrator" className="side-panel ops-panel active">
@@ -17,10 +17,10 @@ export function OrchestratorPanel({ status, loading }: { status?: OrchestratorSt
       </div>
       <div className="ops-chart">
         <ResponsiveContainer width="100%" height={128} minWidth={1} minHeight={1}>
-          <BarChart data={tokenData}>
+          <BarChart data={capacityData}>
             <XAxis dataKey="name" tick={{ fill: "var(--muted)", fontSize: 11 }} />
             <YAxis tick={{ fill: "var(--muted)", fontSize: 11 }} allowDecimals={false} />
-            <Bar dataKey="tokens" fill="var(--info)" radius={[4, 4, 0, 0]} />
+            <Bar dataKey="maxParallelTasks" fill="var(--info)" radius={[4, 4, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>

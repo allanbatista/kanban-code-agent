@@ -31,7 +31,7 @@ test("orchestrator updates task and explains why it is not running", async () =>
   const created = await handleCommand({
     type: "task.create",
     commandId: "cmd-create-2",
-    input: { title: "Aguardar contrato", projectTargets: ["kanban-code-agent"] }
+    input: { title: "Aguardar contrato", column: "inbox", projectTargets: ["kanban-code-agent"] }
   }, root);
   await handleCommand({
     type: "task.update",
@@ -46,36 +46,50 @@ test("orchestrator updates task and explains why it is not running", async () =>
 
 test("moving a task into an autoStart column drains the scheduler", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-auto-start-move-"));
-  const created = await handleCommand({
-    type: "task.create",
-    commandId: "cmd-auto-start-create",
-    input: { title: "Auto start on definition", column: "inbox", projectTargets: ["kanban-code-agent"] }
-  }, root);
-  const moved = await handleCommand({
-    type: "task.move",
-    commandId: "cmd-auto-start-move",
-    taskId: created.task.id,
-    toColumn: "definition"
-  }, root);
-  assert.equal(moved.task.column, "product");
-  assert.equal(moved.task.status, "queued");
-  assert.equal(moved.task.routing.currentRole, "product");
-  assert.deepEqual(moved.scheduler.started.map((item) => item.taskId), [created.task.id]);
-  assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
+  const previousAdapter = process.env.KCA_PI_ADAPTER;
+  process.env.KCA_PI_ADAPTER = "fake";
+  try {
+    const created = await handleCommand({
+      type: "task.create",
+      commandId: "cmd-auto-start-create",
+      input: { title: "Auto start on definition", column: "inbox", projectTargets: ["kanban-code-agent"] }
+    }, root);
+    const moved = await handleCommand({
+      type: "task.move",
+      commandId: "cmd-auto-start-move",
+      taskId: created.task.id,
+      toColumn: "definition"
+    }, root);
+    assert.equal(moved.task.column, "product");
+    assert.equal(moved.task.status, "queued");
+    assert.equal(moved.task.routing.currentRole, "product");
+    assert.deepEqual(moved.scheduler.started.map((item) => item.taskId), [created.task.id]);
+    assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
+  } finally {
+    if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
+    else process.env.KCA_PI_ADAPTER = previousAdapter;
+  }
 });
 
 test("creating a task directly in an autoStart column drains the scheduler", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-auto-start-create-"));
-  const created = await handleCommand({
-    type: "task.create",
-    commandId: "cmd-direct-auto-start-create",
-    input: { title: "Auto start direct create", column: "product", projectTargets: [] }
-  }, root);
-  assert.equal(created.task.column, "product");
-  assert.equal(created.task.status, "queued");
-  assert.equal(created.task.routing.currentRole, "product");
-  assert.deepEqual(created.scheduler.started.map((item) => item.taskId), [created.task.id]);
-  assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
+  const previousAdapter = process.env.KCA_PI_ADAPTER;
+  process.env.KCA_PI_ADAPTER = "fake";
+  try {
+    const created = await handleCommand({
+      type: "task.create",
+      commandId: "cmd-direct-auto-start-create",
+      input: { title: "Auto start direct create", column: "product", projectTargets: [] }
+    }, root);
+    assert.equal(created.task.column, "product");
+    assert.equal(created.task.status, "queued");
+    assert.equal(created.task.routing.currentRole, "product");
+    assert.deepEqual(created.scheduler.started.map((item) => item.taskId), [created.task.id]);
+    assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
+  } finally {
+    if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
+    else process.env.KCA_PI_ADAPTER = previousAdapter;
+  }
 });
 
 test("draft tasks stay hidden until moved and support attachments", async () => {
@@ -128,6 +142,56 @@ test("manager task without title infers title from actionable prompt", async () 
   assert.equal(created.task.status, "queued");
 });
 
+test("task run generates missing title with default model before agent prompt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-title-before-run-"));
+  await handleCommand({
+    type: "settings.update",
+    commandId: "cmd-title-settings",
+    scope: "app",
+    patch: { ai: { defaultProvider: "openai", defaultModel: "gpt-title-test", enabledProviders: ["openai"] } }
+  }, root);
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-title-create",
+    input: { title: "", description: "Implementar exportacao CSV para relatorios financeiros", column: "engineering", projectTargets: [] }
+  }, root);
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.OPENAI_API_KEY;
+  const calls = [];
+  process.env.OPENAI_API_KEY = "test-key";
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push(body);
+    if (calls.length === 1) {
+      return { ok: true, json: async () => ({ id: "title-response", model: "gpt-title-test", choices: [{ message: { role: "assistant", content: "Exportar CSV financeiro" } }] }) };
+    }
+    return {
+      ok: true,
+      json: async () => ({
+        id: "run-response",
+        model: "gpt-title-test",
+        choices: [{
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [{ id: "call-complete", type: "function", function: { name: "complete_task", arguments: JSON.stringify({ nextColumn: "done", summary: "ok" }) } }]
+          }
+        }]
+      })
+    };
+  };
+  try {
+    await handleCommand({ type: "task.run", commandId: "cmd-title-run", taskId: created.task.id, agentId: "engineering" }, root);
+    const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+    assert.equal(detail.title, "Exportar CSV financeiro");
+    assert.match(JSON.stringify(calls[1].messages), /title: Exportar CSV financeiro/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+  }
+});
+
 test("manager task without actionable title waits for human input", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-title-human-wait-"));
   const created = await handleCommand({
@@ -145,31 +209,38 @@ test("manager task without actionable title waits for human input", async () => 
 
 test("moving a running task into an autoStart column queues the target agent", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-running-move-autostart-"));
-  const created = await handleCommand({
-    type: "task.create",
-    commandId: "cmd-running-move-create",
-    input: { title: "Running move", column: "product", status: "queued", routing: { currentAgent: "product", currentRole: "product", manualOverride: { active: false } } }
-  }, root);
-  const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
-  assert.equal(detail.status, "running");
-  await appendJsonl(join(paths(root).tasks, created.task.id, "events.jsonl"), { ts: new Date().toISOString(), type: "gate.failed", actor: "quality", taskId: created.task.id, reason: "status:queued" });
-  assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).failure.reason, "status:queued");
-  const moved = await handleCommand({
-    type: "task.move",
-    commandId: "cmd-running-move-manager",
-    taskId: created.task.id,
-    toColumn: "manager"
-  }, root);
-  assert.equal(moved.task.column, "manager");
-  assert.equal(moved.task.status, "queued");
-  assert.equal(moved.task.routing.currentAgent, "manager");
-  assert.equal(moved.task.routing.currentRole, "manager");
-  assert.equal(moved.task.routing.manualOverride.active, false);
-  assert.deepEqual(moved.scheduler.started.map((item) => item.taskId), [created.task.id]);
-  const latest = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
-  assert.equal(latest.status, "running");
-  assert.equal(latest.routing.currentAgent, "manager");
-  assert.equal(latest.failure, undefined);
+  const previousAdapter = process.env.KCA_PI_ADAPTER;
+  process.env.KCA_PI_ADAPTER = "fake";
+  try {
+    const created = await handleCommand({
+      type: "task.create",
+      commandId: "cmd-running-move-create",
+      input: { title: "Running move", column: "product", status: "queued", routing: { currentAgent: "product", currentRole: "product", manualOverride: { active: false } } }
+    }, root);
+    const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+    assert.equal(detail.status, "running");
+    await appendJsonl(join(paths(root).tasks, created.task.id, "events.jsonl"), { ts: new Date().toISOString(), type: "gate.failed", actor: "quality", taskId: created.task.id, reason: "status:queued" });
+    assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).failure.reason, "status:queued");
+    const moved = await handleCommand({
+      type: "task.move",
+      commandId: "cmd-running-move-manager",
+      taskId: created.task.id,
+      toColumn: "manager"
+    }, root);
+    assert.equal(moved.task.column, "manager");
+    assert.equal(moved.task.status, "queued");
+    assert.equal(moved.task.routing.currentAgent, "manager");
+    assert.equal(moved.task.routing.currentRole, "manager");
+    assert.equal(moved.task.routing.manualOverride.active, false);
+    assert.deepEqual(moved.scheduler.started.map((item) => item.taskId), [created.task.id]);
+    const latest = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+    assert.equal(latest.status, "running");
+    assert.equal(latest.routing.currentAgent, "manager");
+    assert.equal(latest.failure, undefined);
+  } finally {
+    if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
+    else process.env.KCA_PI_ADAPTER = previousAdapter;
+  }
 });
 
 test("moving a task to the same column is a no-op without scheduler drain", async () => {
@@ -193,26 +264,33 @@ test("moving a task to the same column is a no-op without scheduler drain", asyn
 
 test("moving a task to inbox clears active agent and leaves it idle", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-inbox-special-"));
-  const created = await handleCommand({
-    type: "task.create",
-    commandId: "cmd-inbox-special-create",
-    input: { title: "Inbox special", column: "product", status: "queued", routing: { currentAgent: "product", currentRole: "product", lastAgent: "engineering", lastRole: "engineering", manualOverride: { active: false } } }
-  }, root);
-  assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
-  const moved = await handleCommand({
-    type: "task.move",
-    commandId: "cmd-inbox-special-move",
-    taskId: created.task.id,
-    toColumn: "inbox"
-  }, root);
-  assert.equal(moved.task.column, "inbox");
-  assert.equal(moved.task.status, "idle");
-  assert.equal(moved.task.routing.currentAgent, null);
-  assert.equal(moved.task.routing.currentRole, null);
-  assert.equal(moved.task.routing.lastAgent, "engineering");
-  assert.equal(moved.task.routing.lastRole, "engineering");
-  assert.equal(moved.task.routing.manualOverride.active, false);
-  assert.equal(moved.scheduler.started.length, 0);
+  const previousAdapter = process.env.KCA_PI_ADAPTER;
+  process.env.KCA_PI_ADAPTER = "fake";
+  try {
+    const created = await handleCommand({
+      type: "task.create",
+      commandId: "cmd-inbox-special-create",
+      input: { title: "Inbox special", column: "product", status: "queued", routing: { currentAgent: "product", currentRole: "product", lastAgent: "engineering", lastRole: "engineering", manualOverride: { active: false } } }
+    }, root);
+    assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
+    const moved = await handleCommand({
+      type: "task.move",
+      commandId: "cmd-inbox-special-move",
+      taskId: created.task.id,
+      toColumn: "inbox"
+    }, root);
+    assert.equal(moved.task.column, "inbox");
+    assert.equal(moved.task.status, "idle");
+    assert.equal(moved.task.routing.currentAgent, null);
+    assert.equal(moved.task.routing.currentRole, null);
+    assert.equal(moved.task.routing.lastAgent, "engineering");
+    assert.equal(moved.task.routing.lastRole, "engineering");
+    assert.equal(moved.task.routing.manualOverride.active, false);
+    assert.equal(moved.scheduler.started.length, 0);
+  } finally {
+    if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
+    else process.env.KCA_PI_ADAPTER = previousAdapter;
+  }
 });
 
 test("moving to legacy definition column keeps task visible on that board", async () => {
@@ -241,40 +319,47 @@ test("moving to legacy definition column keeps task visible on that board", asyn
 
 test("orchestrator starts, completes and summarizes a task session", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-orch-"));
-  const created = await handleCommand({
-    type: "task.create",
-    commandId: "cmd-create-3",
-    input: { title: "Executar agent", column: "inbox", projectTargets: ["kanban-code-agent"] }
-  }, root);
-  const started = await handleCommand({
-    type: "task.run",
-    commandId: "cmd-run-3",
-    taskId: created.task.id,
-    agentId: "engineering"
-  }, root);
-  assert.equal(started.task.status, "running");
-  assert.match(started.run.sessionRef, /settings\/runtime\/sessions/);
-  const session = await readFile(join(root, "settings", "runtime", "sessions", created.task.id, "engineering", "session.jsonl"), "utf8");
-  assert.match(session, /agent.config/);
-  assert.match(session, /agent.run/);
-  assert.match(session, /promptHash/);
-  assert.match(session, /allowedTools/);
+  const previousAdapter = process.env.KCA_PI_ADAPTER;
+  process.env.KCA_PI_ADAPTER = "fake";
+  try {
+    const created = await handleCommand({
+      type: "task.create",
+      commandId: "cmd-create-3",
+      input: { title: "Executar agent", column: "inbox", projectTargets: ["kanban-code-agent"] }
+    }, root);
+    const started = await handleCommand({
+      type: "task.run",
+      commandId: "cmd-run-3",
+      taskId: created.task.id,
+      agentId: "engineering"
+    }, root);
+    assert.equal(started.task.status, "running");
+    assert.match(started.run.sessionRef, /settings\/runtime\/sessions/);
+    const session = await readFile(join(root, "settings", "runtime", "sessions", created.task.id, "engineering", "session.jsonl"), "utf8");
+    assert.match(session, /agent.config/);
+    assert.match(session, /agent.run/);
+    assert.match(session, /promptHash/);
+    assert.match(session, /allowedTools/);
 
-  const completed = await handleCommand({
-    type: "agent.complete_task",
-    commandId: "cmd-complete-3",
-    taskId: created.task.id,
-    runId: started.run.runId,
-    nextColumn: "validate",
-    summary: "Implementado e pronto para validação."
-  }, root);
-  assert.equal(completed.task.column, "quality");
-  assert.equal(completed.task.status, "queued");
-  assert.match(completed.summaryRef, /summaries\/run-/);
-  const autoRun = completed.scheduler.started.find((item) => item.taskId === created.task.id)?.result;
-  assert.equal(autoRun.run.previousSessionRef, started.run.sessionRef);
-  assert.equal(autoRun.run.previousSummaryRef, completed.summaryRef);
-  assert.match(await readFile(join(root, autoRun.run.sessionRef), "utf8"), /previousSummaryRef/);
+    const completed = await handleCommand({
+      type: "agent.complete_task",
+      commandId: "cmd-complete-3",
+      taskId: created.task.id,
+      runId: started.run.runId,
+      nextColumn: "validate",
+      summary: "Implementado e pronto para validação."
+    }, root);
+    assert.equal(completed.task.column, "quality");
+    assert.equal(completed.task.status, "queued");
+    assert.match(completed.summaryRef, /summaries\/run-/);
+    const autoRun = completed.scheduler.started.find((item) => item.taskId === created.task.id)?.result;
+    assert.equal(autoRun.run.previousSessionRef, started.run.sessionRef);
+    assert.equal(autoRun.run.previousSummaryRef, completed.summaryRef);
+    assert.match(await readFile(join(root, autoRun.run.sessionRef), "utf8"), /previousSummaryRef/);
+  } finally {
+    if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
+    else process.env.KCA_PI_ADAPTER = previousAdapter;
+  }
 });
 
 test("complete task persists final text in visible task chat", async () => {
@@ -959,6 +1044,46 @@ test("orchestrator decomposes a master task into queued subtasks", async () => {
   assert.match((await handleQuery({ type: "why_not_running", taskId: decomposed.subtasks[1].id }, root)).reasons.join(" "), /runtime:agent/);
 });
 
+test("manager decomposition with missing product contract redirects to product", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-manager-decompose-product-"));
+  await handleCommand({ type: "settings.update", commandId: "cmd-manager-decompose-settings", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root);
+  const description = [
+    "execute as 4 seguintes tasks:",
+    "",
+    "- me responda oi em japones.",
+    "- crie uma história infantil com até 100 palavras:",
+    "- pequise e faça uma lista com top 10 paises com as menores temperaturas hoje:",
+    "- crie um script em python que consulte as temperaturas de todos os estados brasileiros e print no terminal."
+  ].join("\n");
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-manager-decompose-create",
+    input: { title: "execute as 4 seguintes tasks:", description, column: "inbox", draft: true, projectTargets: [] }
+  }, root);
+  await handleCommand({
+    type: "task.update",
+    commandId: "cmd-manager-decompose-queue",
+    taskId: created.task.id,
+    patch: { column: "manager", status: "queued", routing: { currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } } }
+  }, root);
+  const result = await handleCommand({
+    type: "task.decompose",
+    commandId: "cmd-manager-decompose",
+    taskId: created.task.id,
+    runId: `run_${created.task.id}_manager_test`,
+    subtasks: [{ title: "Responder oi em japones", role: "generalist", needs: [], provides: ["t1"] }]
+  }, root);
+  assert.equal(result.redirected, true);
+  assert.equal(result.task.column, "product");
+  assert.equal(result.task.routing.currentRole, "product");
+  assert.equal(result.guard.type, "manager_intake_requires_product");
+  const subtasksFile = YAML.parse(await readFile(join(root, "tasks", created.task.id, "subtasks.yaml"), "utf8"));
+  assert.equal(subtasksFile.nodes.length, 0);
+  const files = await handleQuery({ type: "task.files", taskId: created.task.id }, root);
+  assert.equal(files.events.some((event) => event.type === "task.decompose.redirected"), true);
+  assert.equal(files.events.some((event) => event.type === "subtasks.spawned"), false);
+});
+
 test("planning service creates planning and acceptance artifacts for a master task", () => {
   const artifacts = planningArtifactsForTask({ id: "KCA-PLAN", title: "Master ready" });
   assert.equal(artifacts.planning.taskId, "KCA-PLAN");
@@ -986,6 +1111,40 @@ test("orchestrator decomposes a master task into N subtasks with DAG edges", asy
   const subtasksFile = YAML.parse(await readFile(join(root, "tasks", parent.task.id, "subtasks.yaml"), "utf8"));
   assert.equal(subtasksFile.nodes.length, 6);
   assert.equal(subtasksFile.edges.length, 5);
+});
+
+test("completed delegated subtask requeues waiting parent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-delegated-requeue-"));
+  const parent = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-delegated-parent",
+    input: { title: "Validar delegacao", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "generalist", currentRole: "generalist", manualOverride: { active: false } }, column: "generalist", status: "queued" }
+  }, root);
+  const delegated = await handleCommand({
+    type: "agent.delegate_task",
+    commandId: "cmd-delegated-child",
+    taskId: parent.task.id,
+    fromPersona: "generalist",
+    toPersona: "engineering",
+    wait: true,
+    request: "Executar parte delegada.",
+    expectedOutput: "Resumo da subtask."
+  }, root);
+  assert.equal(delegated.task.status, "waiting");
+  const child = await handleQuery({ type: "task.detail", taskId: delegated.subtask.id }, root);
+  const completed = await handleCommand({
+    type: "agent.complete_task",
+    commandId: "cmd-delegated-complete",
+    taskId: delegated.subtask.id,
+    runId: child.agent.currentRunId,
+    nextColumn: "done",
+    summary: "Subtask entregue."
+  }, root);
+  assert.equal(completed.task.status, "done");
+  assert.equal(completed.parentTask.status, "queued");
+  assert.equal(completed.parentTask.column, "generalist");
+  const comments = await handleQuery({ type: "task.comments", taskId: parent.task.id }, root);
+  assert.equal(comments.some((message) => message.disposition === "subtask.result_reported" && /Subtask entregue/.test(message.text)), true);
 });
 
 test("orchestrator rejects invalid DAG decomposition with manager triage", async () => {
@@ -1016,6 +1175,7 @@ test("orchestrator rejects invalid DAG decomposition with manager triage", async
 test("scheduler explains global limits, agent/project tokens and semaphores", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-orch-"));
   await handleCommand({ type: "settings.update", commandId: "cmd-settings-limits", scope: "app", patch: { runtime: { maxParallelTasks: 1, agentTokens: { engineering: 1 }, projectTokens: { "kanban-code-agent": 1 } } } }, root);
+  await handleCommand({ type: "settings.update", commandId: "cmd-agent-limit", scope: "agents", patch: { id: "engineering", limits: { maxParallelTasks: 1 } } }, root);
   const running = await handleCommand({
     type: "task.create",
     commandId: "cmd-running-limit",
@@ -1030,13 +1190,13 @@ test("scheduler explains global limits, agent/project tokens and semaphores", as
     type: "task.update",
     commandId: "cmd-running-limit-update",
     taskId: running.task.id,
-    patch: { status: "running", routing: { ...running.task.routing, currentAgent: "engineering" }, dependencies: { ...running.task.dependencies, semaphores: [{ name: "global:merge", tokens: 1 }] } }
+    patch: { column: "engineering", status: "running", routing: { ...running.task.routing, currentAgent: "engineering" }, dependencies: { ...running.task.dependencies, semaphores: [{ name: "global:merge", tokens: 1 }] } }
   }, root);
   await handleCommand({
     type: "task.update",
     commandId: "cmd-queued-limit-update",
     taskId: queued.task.id,
-    patch: { status: "queued", routing: { ...queued.task.routing, currentAgent: "engineering" }, dependencies: { ...queued.task.dependencies, semaphores: [{ name: "global:merge", tokens: 1 }] } }
+    patch: { column: "engineering", status: "queued", routing: { ...queued.task.routing, currentAgent: "engineering" }, dependencies: { ...queued.task.dependencies, semaphores: [{ name: "global:merge", tokens: 1 }] } }
   }, root);
   const why = await handleQuery({ type: "why_not_running", taskId: queued.task.id }, root);
   assert.match(why.reasons.join(" "), /Limite global/);
@@ -1062,13 +1222,13 @@ test("settings scopes map to concrete settings files", async () => {
     type: "settings.update",
     commandId: "cmd-agent-settings",
     scope: "agents",
-    patch: { id: "engineering", limits: { tokens: 3 }, skills: ["implementation", "testing"] }
+    patch: { id: "engineering", limits: { maxParallelTasks: 3 }, skills: ["implementation", "testing"] }
   }, root);
-  assert.equal(agentUpdate.settings.limits.tokens, 3);
-  assert.match(await readFile(join(root, "settings", "agents", "engineering.yaml"), "utf8"), /tokens: 3/);
+  assert.equal(agentUpdate.settings.limits.maxParallelTasks, 3);
+  assert.match(await readFile(join(root, "settings", "agents", "engineering.yaml"), "utf8"), /maxParallelTasks: 3/);
 
   const agents = await handleQuery({ type: "settings.scope", scope: "agents" }, root);
-  assert.equal(agents.agents.some((agent) => agent.id === "engineering" && agent.limits.tokens === 3), true);
+  assert.equal(agents.agents.some((agent) => agent.id === "engineering" && agent.limits.maxParallelTasks === 3), true);
 
   const boardUpdate = await handleCommand({
     type: "settings.update",
@@ -1443,11 +1603,17 @@ test("agentic workflow handoffs keep persona context and human wait distinct fro
     taskId: created.task.id,
     fromPersona: "generalist",
     toPersona: "engineering",
-    wait: false,
+    wait: true,
     request: "Implementar parte técnica."
   }, root);
-  assert.equal(delegated.task.column, "engineering");
-  assert.equal(delegated.task.routing.currentAgent, "engineering");
+  assert.equal(delegated.task.column, "generalist");
+  assert.equal(delegated.task.status, "waiting");
+  assert.equal(delegated.subtask.column, "engineering");
+  assert.equal(delegated.subtask.routing.currentAgent, "engineering");
+  assert.equal(delegated.subtask.worktree.parentTaskId, created.task.id);
+  assert.equal(delegated.subtask.worktree.mainTaskId, created.task.id);
+  assert.match(await readFile(join(root, "tasks", delegated.subtask.id, "description.md"), "utf8"), new RegExp(`Parent task id: ${created.task.id}`));
+  assert.match(await readFile(join(root, "tasks", delegated.subtask.id, "acceptance.md"), "utf8"), /Target persona: engineering/);
 
   const human = await handleCommand({
     type: "agent.wait_for_human",
@@ -1526,7 +1692,7 @@ test("provider model settings block runs when required env is missing", async ()
   assert.match(why.reasons.join(" "), /OPENAI_COMPATIBLE_API_KEY|OPENAI_COMPATIBLE_BASE_URL/);
 });
 
-test("provider models query normalizes context metadata", async () => {
+test("provider models query normalizes context metadata for configured providers before enable", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-provider-models-"));
   const previousKey = process.env.OPENROUTER_API_KEY;
   const previousFetch = globalThis.fetch;
@@ -1536,12 +1702,9 @@ test("provider models query normalizes context metadata", async () => {
     json: async () => ({ data: [{ id: "openai/gpt-test", name: "GPT Test", top_provider: { context_length: 8192, max_completion_tokens: 4096 } }] })
   });
   try {
-    await handleCommand({
-      type: "settings.update",
-      commandId: "cmd-provider-models-app",
-      scope: "app",
-      patch: { ai: { enabledProviders: ["openrouter"] } }
-    }, root);
+    const discovered = await handleQuery({ type: "provider.discover" }, root);
+    assert.equal(discovered.providers.find((provider) => provider.id === "openrouter").configured, true);
+    assert.equal(discovered.providers.find((provider) => provider.id === "openrouter").active, false);
     const result = await handleQuery({ type: "provider.models", providerId: "openrouter" }, root);
     assert.equal(result.models[0].id, "openai/gpt-test");
     assert.equal(result.models[0].contextWindow, 8192);

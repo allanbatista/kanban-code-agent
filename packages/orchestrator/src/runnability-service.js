@@ -1,6 +1,7 @@
-import { boardSnapshot, listTasks, readSettings } from "@kca/fsdb";
+import { boardSnapshot, listTasks, readAgent, readSettings } from "@kca/fsdb";
 import { logStep } from "@kca/core/log";
 import { columnWip, locksConflict, providedContracts, providerMissingReason, taskSemaphores } from "./policies/runnability-specs.js";
+import { agentMaxParallelTasks } from "./agent-capacity.js";
 
 export class RunnabilityService {
   constructor({ root, repositories, boardService } = {}) {
@@ -17,12 +18,25 @@ export class RunnabilityService {
     return this.repositories?.settings?.readAll ? this.repositories.settings.readAll() : readSettings(this.root);
   }
 
+  async readAgent(agentId) {
+    if (this.repositories?.settings?.readScope) {
+      const scope = await this.repositories.settings.readScope("agents");
+      return scope?.agents?.find((agent) => agent.id === agentId);
+    }
+    return readAgent(agentId, this.root);
+  }
+
   async snapshot() {
     return this.boardService ? this.boardService.snapshot() : boardSnapshot(this.root);
   }
 
   async explain(task) {
     logStep("runnability-service", "explain.start", { taskId: task.id });
+    if (task.column === "human_wait") {
+      const result = { taskId: task.id, runnable: false, reasons: ["Aguardando resposta humana."] };
+      logStep("runnability-service", "explain.done", { taskId: task.id, runnable: false });
+      return result;
+    }
     if (task.status === "running") {
       const result = { taskId: task.id, runnable: true, reasons: [] };
       logStep("runnability-service", "explain.done", { taskId: task.id, runnable: true });
@@ -36,7 +50,7 @@ export class RunnabilityService {
     const conflicts = locksConflict(task, tasks);
     const running = tasks.filter((candidate) => candidate.status === "running");
     const agentId = task.routing?.currentAgent || task.agent?.currentAgent || task.agent || "assistant";
-    const agentLimit = settings.runtime?.agentTokens?.[agentId] ?? 1;
+    const agentLimit = agentMaxParallelTasks(await this.readAgent(agentId), settings.runtime || {}, agentId);
     const agentRunning = running.filter((candidate) => (candidate.routing?.currentAgent || candidate.agent?.currentAgent || candidate.agent || "assistant") === agentId);
     const projectTokenLimits = settings.runtime?.projectTokens || {};
     const projectConflicts = (task.projectTargets || []).flatMap((projectId) => {
@@ -47,7 +61,7 @@ export class RunnabilityService {
     });
     const maxParallelTasks = settings.runtime?.maxParallelTasks ?? 3;
     const wip = columnWip(task.column, snapshot);
-    const columnActive = tasks.filter((candidate) => candidate.column === task.column && ["queued", "running", "validating", "merge_pending"].includes(candidate.status));
+    const columnActive = tasks.filter((candidate) => candidate.id !== task.id && candidate.column === task.column && ["running", "validating", "merge_pending"].includes(candidate.status));
     const semaphores = taskSemaphores(task);
     const semaphoreConflicts = semaphores.flatMap((semaphore) => {
       const users = running.filter((candidate) => taskSemaphores(candidate).some((item) => item.name === semaphore.name));

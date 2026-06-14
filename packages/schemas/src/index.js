@@ -39,7 +39,10 @@ export const EventType = z.enum([
   "chat.compaction_requested",
   "chat.compacted",
   "delegation.requested",
+  "delegation.subtask_created",
   "delegation.result",
+  "subtask.result_reported",
+  "subtask.parent_requeued",
   "provider.missing_env",
   "artifact.emitted",
   "hook.started",
@@ -196,6 +199,7 @@ export const WorktreeSchema = z.object({
   pathRef: z.string().optional(),
   path: z.string().optional(),
   parentTaskId: z.string().nullable().optional(),
+  mainTaskId: z.string().nullable().optional(),
   mergeTarget: z.string().optional()
 }).passthrough();
 
@@ -307,7 +311,10 @@ export const AgentSettingsSchema = z.object({
   instructions: z.any().optional(),
   skills: z.array(z.string()).default([]),
   tools: z.union([z.array(z.string()), z.object({ builtin: z.array(z.string()).default([]), custom: z.array(z.string()).default([]) }).passthrough()]).default([]),
-  limits: z.object({ tokens: z.number().int().nonnegative().optional() }).passthrough().optional()
+  limits: z.object({
+    tokens: z.number().int().nonnegative().optional(),
+    maxParallelTasks: z.number().int().nonnegative().optional()
+  }).passthrough().optional()
 }).passthrough();
 
 export const HookSettingsSchema = z.object({
@@ -358,6 +365,7 @@ export const TaskSchema = z.object({
     branch: z.string(),
     pathRef: z.string().optional(),
     parentTaskId: z.string().nullable().optional(),
+    mainTaskId: z.string().nullable().optional(),
     mergeTarget: z.string().optional()
   }).passthrough(),
   dependencies: DependenciesSchema.omit({ schema: true }),
@@ -501,6 +509,7 @@ export const CommandSchema = z.discriminatedUnion("type", [
   commandBase.extend({
     type: z.literal("task.decompose"),
     taskId: z.string().min(1),
+    runId: z.string().optional(),
     subtasks: z.array(z.object({
       id: z.string().optional(),
       title: z.string().min(1),

@@ -1,5 +1,8 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { CommandBus } from "@kca/application/command-bus";
 import { QueryBus } from "@kca/application/query-bus";
+import { managerRoutingContext } from "@kca/agent-runtime";
 import { createBoardService } from "@kca/board-service";
 import { roleById } from "@kca/core/roles";
 import { appendJsonl, getTask, listTasks, paths, readCommandResult, recordCommandResult, updateSettings } from "@kca/fsdb";
@@ -41,13 +44,13 @@ export async function whyNotRunning(task, root) {
   return services(root).runnabilityService.explain(task);
 }
 
-function shouldDrainSchedulerAfterCommand(command) {
+export function shouldDrainSchedulerAfterCommand(command) {
   return [
     "task.create",
     "task.move",
+    "task.decompose",
     "task.answer_input",
     "task.comment",
-    "task.decompose",
     "task.merge",
     "agent.complete_task",
     "agent.report_blocker",
@@ -88,6 +91,51 @@ async function requiredTask(taskId, root) {
   const current = await getTask(taskId, root);
   if (!current) throw new Error(`Task not found: ${taskId}`);
   return current;
+}
+
+async function taskTextFiles(taskId, root) {
+  const p = paths(root);
+  const read = async (file) => {
+    try {
+      return await readFile(join(p.tasks, taskId, file), "utf8");
+    } catch {
+      return "";
+    }
+  };
+  return { description: await read("description.md"), acceptance: await read("acceptance.md") };
+}
+
+async function redirectManagerDecomposeToProduct(command, current, root) {
+  if (!command.runId || (current.routing?.currentRole || current.routing?.currentAgent) !== "manager") return null;
+  const { description, acceptance } = await taskTextFiles(current.id, root);
+  const routing = managerRoutingContext(current, description, acceptance);
+  if (routing.managerMode !== "intake" || routing.targetRole !== "product") return null;
+  const question = [
+    `Define the product contract for ${current.id} before decomposition.`,
+    routing.reason,
+    "Persist verifiable acceptance criteria in `acceptance.md`, then choose the next execution path."
+  ].join("\n\n");
+  const result = await waitForPersonaWorkflow({
+    type: "agent.wait_for_persona",
+    commandId: command.commandId,
+    taskId: command.taskId,
+    runId: command.runId,
+    targetRole: "product",
+    question,
+    expectedArtifact: "acceptance.md"
+  }, current, root);
+  await appendJsonl(`${paths(root).tasks}/${current.id}/events.jsonl`, {
+    ts: new Date().toISOString(),
+    type: "task.decompose.redirected",
+    actor: "orchestrator",
+    taskId: current.id,
+    runId: command.runId,
+    fromRole: "manager",
+    toRole: "product",
+    reason: routing.reason,
+    attemptedSubtasks: command.subtasks?.length || 0
+  });
+  return { ...result, redirected: true, guard: { type: "manager_intake_requires_product", reason: routing.reason } };
 }
 
 function createWorkflowCommandHandlers(root) {
@@ -233,7 +281,11 @@ function createWorkflowCommandHandlers(root) {
 
     "agent.chat": (command) => agentChatWorkflow(command, root, whyNotRunning),
 
-    "task.decompose": async (command) => decomposeTaskWorkflow(command, await requiredTask(command.taskId, root), root),
+    "task.decompose": async (command) => {
+    const current = await requiredTask(command.taskId, root);
+    const redirected = await redirectManagerDecomposeToProduct(command, current, root);
+    return redirected || decomposeTaskWorkflow(command, current, root);
+    },
 
     "task.merge": async (command) => {
     logStep("orchestrator", "task.merge.start", { commandId: command.commandId, taskId: command.taskId });

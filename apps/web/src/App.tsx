@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, Route, Routes, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Moon, Plus, Settings, Sun } from "lucide-react";
+import { Moon, Settings, Sun } from "lucide-react";
 import { commandDaemon, commandId, daemonWebSocketUrl, loadState, queryDaemon, queryOrchestrator } from "./api";
 import { AssistantPanel } from "./components/AssistantPanel";
 import { Board } from "./components/Board";
@@ -164,6 +164,16 @@ function AppShell() {
       void queryClient.invalidateQueries({ queryKey: ["orchestrator"] });
     }
   });
+
+  async function saveAppSettings(patch: Record<string, unknown>) {
+    const result = await runCommand.mutateAsync({ type: "settings.update", commandId: commandId("settings-update"), scope: "app", patch });
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["state"] }),
+      queryClient.invalidateQueries({ queryKey: ["providers"] }),
+      queryClient.invalidateQueries({ queryKey: ["settings"] })
+    ]);
+    return result;
+  }
 
   function patchParams(next: Record<string, string | null>) {
     const copy = new URLSearchParams(params);
@@ -338,7 +348,6 @@ function AppShell() {
         </Link>
         <div className="top-actions">
           <button className="quiet" type="button" onClick={() => setSettingsOpen(true)}><Settings size={16} />Configurações</button>
-          <button className="quiet" type="button" onClick={() => { setDraftTask(null); patchParams({ task: "new" }); }}><Plus size={16} />Nova task</button>
           <button className="icon-button quiet" aria-label="Alternar tema" title="Alternar tema" type="button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}</button>
         </div>
       </header>
@@ -392,7 +401,7 @@ function AppShell() {
         agents={agents.data?.agents || []}
         providers={providers.data?.providers || []}
         onOpenChange={setSettingsOpen}
-        onSave={(patch) => runCommand.mutateAsync({ type: "settings.update", commandId: commandId("settings-update"), scope: "app", patch })}
+        onSave={saveAppSettings}
         onSaveAgent={(patch) => runCommand.mutateAsync({ type: "settings.update", commandId: commandId("agent-settings-update"), scope: "agents", patch }).then(() => queryClient.invalidateQueries({ queryKey: ["settings", "agents"] }))}
         onLoadProviderModels={(providerId) => queryDaemon<{ models: ProviderModel[] }>({ type: "provider.models", providerId }).then((result) => result.models || [])}
       />

@@ -18,3 +18,7 @@ Frontend interactions should be optimistic by default: update the visible UI imm
 ## Cleanup Rule
 
 After finishing any test, validation, preview, or manual QA flow, stop and release every process, server, watcher, browser session, port, or temporary resource the agent started.
+
+## Regression Validation Rule
+
+Do not take implementation action based on a probable cause. First verify the behavior with concrete evidence and create tasks to validate the regression. Only after the regression is confirmed should an agent implement the correction.

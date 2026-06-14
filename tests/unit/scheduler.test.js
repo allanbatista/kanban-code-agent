@@ -56,23 +56,126 @@ test("scheduler tick starts queued runnable tasks and records leases", async () 
   const first = await handleCommand({
     type: "task.create",
     commandId: "scheduler-create-a",
-    input: { title: "Runnable A", column: "inbox", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued" }
+    input: { title: "Runnable A", column: "inbox", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "idle" }
   }, root);
   const second = await handleCommand({
     type: "task.create",
     commandId: "scheduler-create-b",
-    input: { title: "Runnable B", column: "inbox", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued" }
+    input: { title: "Runnable B", column: "inbox", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "idle" }
   }, root);
-  assert.equal(semaphoreRequestsForTask(first.task, { runtime: {} }).some((request) => request.name === "global:tasks"), true);
+  const firstQueued = await handleCommand({ type: "task.update", commandId: "scheduler-queue-a", taskId: first.task.id, patch: { status: "queued" } }, root);
+  const secondQueued = await handleCommand({ type: "task.update", commandId: "scheduler-queue-b", taskId: second.task.id, patch: { status: "queued" } }, root);
+  const defaultRequests = semaphoreRequestsForTask(firstQueued.task, { runtime: {} });
+  assert.equal(defaultRequests.some((request) => request.name === "global:tasks"), true);
+  assert.equal(defaultRequests.find((request) => request.name === "agent:engineering").capacity, 50);
+  assert.equal(semaphoreRequestsForTask(firstQueued.task, { runtime: { agentTokens: { engineering: 2 } } }).find((request) => request.name === "agent:engineering").capacity, 2);
+  assert.equal(semaphoreRequestsForTask(firstQueued.task, { runtime: { agentTokens: { engineering: 2 } }, agentSettings: { limits: { maxParallelTasks: 7 } } }).find((request) => request.name === "agent:engineering").capacity, 7);
   const tick = await schedulerTick(root, {
     whyNotRunning,
     maxStarts: 2,
-    runTask: (task) => handleCommand({ type: "task.run", commandId: `scheduler-test-run-${task.id}`, taskId: task.id, agentId: "engineering" }, root)
+    runTask: (task) => handleCommand({ type: "task.update", commandId: `scheduler-test-run-${task.id}`, taskId: task.id, patch: { status: "running" } }, root)
   });
-  assert.deepEqual(tick.started.map((item) => item.taskId).sort(), [first.task.id, second.task.id].sort());
-  assert.equal((await handleQuery({ type: "task.detail", taskId: first.task.id }, root)).status, "running");
-  assert.equal((await handleQuery({ type: "task.detail", taskId: second.task.id }, root)).status, "running");
-  assert.equal((await readSemaphoreState(root)).leases.some((lease) => lease.taskId === first.task.id), true);
+  assert.deepEqual(tick.started.map((item) => item.taskId).sort(), [firstQueued.task.id, secondQueued.task.id].sort());
+  assert.equal((await handleQuery({ type: "task.detail", taskId: firstQueued.task.id }, root)).status, "running");
+  assert.equal((await handleQuery({ type: "task.detail", taskId: secondQueued.task.id }, root)).status, "running");
+  assert.equal((await readSemaphoreState(root)).leases.some((lease) => lease.taskId === firstQueued.task.id), true);
+});
+
+test("scheduler tick auto-queues eligible idle autoStart tasks only", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-scheduler-autostart-"));
+  await handleCommand({
+    type: "settings.update",
+    commandId: "scheduler-autostart-settings",
+    scope: "app",
+    patch: { runtime: { maxParallelTasks: 10, agentTokens: { product: 10 }, projectTokens: { "kanban-code-agent": 10 } } }
+  }, root);
+  const eligible = await handleCommand({
+    type: "task.create",
+    commandId: "scheduler-autostart-eligible",
+    input: { title: "Eligible idle", column: "inbox", projectTargets: ["kanban-code-agent"], status: "idle" }
+  }, root);
+  await handleCommand({ type: "task.update", commandId: "scheduler-autostart-eligible-idle", taskId: eligible.task.id, patch: { column: "product", status: "idle", routing: { manualOverride: { active: false } } } }, root);
+
+  const excluded = [];
+  for (const [status, patch = {}] of [
+    ["draft"],
+    ["failed"],
+    ["done"],
+    ["running"],
+    ["waiting"],
+    ["waiting_human"],
+    ["blocked"],
+    ["idle", { routing: { manualOverride: { active: true } } }],
+    ["idle", { dependencies: { needs: [], provides: [], blockedBy: ["human"], fileLocks: [], semaphores: [] } }],
+    ["idle", { column: "human_wait" }]
+  ]) {
+    const created = await handleCommand({
+      type: "task.create",
+      commandId: `scheduler-autostart-${status}-${excluded.length}`,
+      input: { title: `Excluded ${status} ${excluded.length}`, column: "inbox", projectTargets: ["kanban-code-agent"], status: "idle" }
+    }, root);
+    await handleCommand({
+      type: "task.update",
+      commandId: `scheduler-autostart-excluded-${excluded.length}`,
+      taskId: created.task.id,
+      patch: { column: "product", status, routing: { manualOverride: { active: false } }, ...patch }
+    }, root);
+    excluded.push({ id: created.task.id, status, patch });
+  }
+
+  const tick = await schedulerTick(root, {
+    whyNotRunning,
+    maxStarts: 10,
+    runTask: (task) => handleCommand({ type: "task.update", commandId: `scheduler-autostart-run-${task.id}`, taskId: task.id, patch: { status: "running" } }, root)
+  });
+
+  assert.deepEqual(tick.autoQueued, [eligible.task.id]);
+  assert.deepEqual(tick.event.autoQueued, [eligible.task.id]);
+  assert.deepEqual(tick.started.map((item) => item.taskId), [eligible.task.id]);
+  assert.equal((await handleQuery({ type: "task.detail", taskId: eligible.task.id }, root)).status, "running");
+  for (const item of excluded) {
+    const detail = await handleQuery({ type: "task.detail", taskId: item.id }, root);
+    assert.equal(detail.status, item.status);
+    if (item.patch.column) assert.equal(detail.column, item.patch.column);
+  }
+});
+
+test("human wait tasks are not runnable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-human-wait-runnable-"));
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "human-wait-create",
+    input: { title: "Needs human", column: "human_wait", status: "idle" }
+  }, root);
+
+  const why = await whyNotRunning(created.task, root);
+
+  assert.equal(why.runnable, false);
+  assert.deepEqual(why.reasons, ["Aguardando resposta humana."]);
+});
+
+test("queued tasks in same WIP column do not deadlock each other", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-wip-queued-"));
+  const created = [];
+  for (let index = 0; index < 4; index += 1) {
+    const result = await handleCommand({
+      type: "task.create",
+      commandId: `wip-queued-${index}`,
+      input: { title: `Queued ${index}`, column: "inbox", status: "idle", routing: { currentAgent: "generalist", currentRole: "generalist", manualOverride: { active: false } } }
+    }, root);
+    const queued = await handleCommand({
+      type: "task.update",
+      commandId: `wip-queued-update-${index}`,
+      taskId: result.task.id,
+      patch: { column: "generalist", status: "queued", routing: { currentAgent: "generalist", currentRole: "generalist", manualOverride: { active: false } } }
+    }, root);
+    created.push(queued.task);
+  }
+
+  const why = await whyNotRunning(created[0], root);
+
+  assert.equal(why.runnable, true);
+  assert.equal(why.reasons.some((reason) => reason.includes("WIP da coluna generalist")), false);
 });
 
 test("scheduler recovery fails running tasks whose prompt was not sent", async () => {
