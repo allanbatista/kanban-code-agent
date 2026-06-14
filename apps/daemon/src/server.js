@@ -133,7 +133,7 @@ function stateFingerprint(state) {
   return JSON.stringify({
     columns: state.columns?.map((column) => ({ id: column.id, label: column.label, agent: column.agent, role: column.role, autoStart: column.autoStart, wip: column.wip, wipLimit: column.wipLimit, hooks: column.hooks })),
     tasks: state.tasks?.map((task) => ({ id: task.id, title: task.title, column: task.column, status: task.status, updatedAt: task.updatedAt, projectTargets: task.projectTargets, routing: task.routing, dependencies: task.dependencies, worktree: task.worktree })),
-    settings: { ui: state.settings?.ui, runtime: state.settings?.runtime, safety: state.settings?.safety }
+    settings: { ui: state.settings?.ui, runtime: state.settings?.runtime, safety: state.settings?.safety, ai: state.settings?.ai }
   });
 }
 

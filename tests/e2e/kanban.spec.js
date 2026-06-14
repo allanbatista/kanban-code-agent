@@ -228,6 +228,9 @@ test("saving and executing a new task sends it to manager workflow", async ({ pa
 });
 
 test("task comments answer agent questions and logs are paginated", async ({ page, request }) => {
+  await request.post(`${daemonUrl}/api/settings.update`, {
+    data: { scope: "app", patch: { runtime: { maxParallelTasks: 10, agentTokens: { engineering: 10 }, projectTokens: { "kanban-code-agent": 10 } } } }
+  });
   const task = await createTask(request, `Task comments ${Date.now()}`, {
     column: "inbox",
     status: "idle",
@@ -249,11 +252,16 @@ test("task comments answer agent questions and logs are paginated", async ({ pag
   await page.getByPlaceholder("Comente ou responda ao agent").fill("Use staging.");
   await page.getByRole("dialog").getByLabel("Enviar").click();
   await expect(page.getByRole("dialog").getByText("Use staging.")).toBeVisible();
+  await expect(page.locator(".task-comment-card.user", { hasText: "Use staging." }).locator(".task-comment-meta span")).toHaveText(/human/i);
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
     const item = (await state.json()).tasks.find((candidate) => candidate.id === task.id);
     return item?.column;
   }).toBe("engineering");
+  await expect.poll(async () => {
+    const state = await request.get(`${daemonUrl}/api/state`);
+    return (await state.json()).events.some((event) => event.type === "scheduler.tick" && event.started?.includes(task.id));
+  }).toBe(true);
   await page.getByRole("tab", { name: "logs" }).click();
   await expect(page.getByRole("region", { name: "Logs dos agents" })).toBeVisible();
   await expect(page.locator(".pretty-log-entry").first()).toBeVisible();
@@ -268,6 +276,8 @@ test("task comments answer agent questions and logs are paginated", async ({ pag
 test("settings modal persists scoped settings through the daemon", async ({ page, request }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Configurações" }).click();
+  await page.locator(".settings-provider-row", { hasText: "OpenRouter" }).getByRole("checkbox").check();
+  await page.locator("#settings-default-provider").selectOption("openrouter");
   const toggle = page.getByLabel("Mostrar progresso no card");
   const nextValue = !(await toggle.isChecked());
   await toggle.click();
@@ -277,20 +287,22 @@ test("settings modal persists scoped settings through the daemon", async ({ page
     const settings = await request.post(`${daemonUrl}/api/query`, {
       data: { type: "settings.scope", scope: "app" }
     });
-    return (await settings.json()).ui.showProgressOnCard;
-  }).toBe(nextValue);
+    const body = await settings.json();
+    return { progress: body.ui.showProgressOnCard, provider: body.ai.defaultProvider, enabled: body.ai.enabledProviders.includes("openrouter") };
+  }).toEqual({ progress: nextValue, provider: "openrouter", enabled: true });
 });
 
 test("settings modal edits an agent prompt and persists it", async ({ page, request }) => {
   const marker = `Prompt especializado ${Date.now()}`;
   await page.goto("/");
   await page.getByRole("button", { name: "Configurações" }).click();
+  await page.locator(".settings-provider-row", { hasText: "OpenAI Compatible" }).getByRole("checkbox").check();
   await page.getByRole("button", { name: "Engineering", exact: true }).click();
-  await page.getByLabel("Provider").selectOption("openai_compatible");
-  await page.getByLabel("Modelo").fill("gpt-test-e2e");
-  await page.getByLabel("Effort").selectOption("high");
-  await expect(page.getByText("missing_env")).toBeVisible();
-  await expect(page.getByText(/^missing: OPENAI_COMPATIBLE_API_KEY, OPENAI_COMPATIBLE_BASE_URL$/)).toBeVisible();
+  await page.locator("#settings-agent-provider").fill("openai_compatible");
+  await page.locator("#settings-agent-model").fill("gpt-test-e2e");
+  await page.locator("#settings-agent-effort").selectOption("high");
+  await expect(page.locator(".settings-provider-status").getByText("missing_env")).toBeVisible();
+  await expect(page.locator(".settings-provider-status").getByText(/^missing: OPENAI_COMPATIBLE_API_KEY, OPENAI_COMPATIBLE_BASE_URL$/)).toBeVisible();
   await page.getByLabel("Prompt editável").fill(`# Engineering\n\n${marker}`);
   await page.getByRole("button", { name: "Salvar alterações" }).click();
   await expect.poll(async () => {

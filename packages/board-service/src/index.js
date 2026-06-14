@@ -1,5 +1,5 @@
 import { buildAgentChat } from "@kca/agent-runtime";
-import { discoverProviders } from "@kca/core/providers";
+import { discoverProviders, listProviderModels } from "@kca/core/providers";
 import { logStep } from "@kca/core/log";
 import { readAgentLogs } from "@kca/fsdb";
 import { readChatHistory, readTaskComments } from "@kca/fsdb/chat-store";
@@ -85,8 +85,14 @@ export class BoardService {
     return this.repositories.settings.readScope(scope);
   }
 
-  providerDiscover() {
-    return discoverProviders();
+  async providerDiscover() {
+    const settings = await this.repositories.settings.readAll();
+    return discoverProviders(settings);
+  }
+
+  async providerModels(query) {
+    const settings = await this.repositories.settings.readAll();
+    return listProviderModels(query.providerId, settings);
   }
 
   async chatBuild(query, buildChat = buildAgentChat) {

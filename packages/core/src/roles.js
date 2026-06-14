@@ -11,7 +11,7 @@ export const DEFAULT_ROLES = [
     tools: { custom: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "wait_for_persona", "delegate_task", "spawn_subtasks"] },
     limits: { tokens: 1 },
     policies: { canCreateSubtasks: true, requiresWorktree: false, autoStart: true },
-    model: { provider: "pi", name: "default", effort: "low" },
+    model: { provider: "inherit", name: "", effort: "low" },
     gate: "Task foi classificada por tipo de trabalho e encaminhada para a primeira persona necessaria, evitando produto/decomposicao quando for trabalho direto."
   },
   {
@@ -24,7 +24,7 @@ export const DEFAULT_ROLES = [
     tools: { custom: ["request_user_input", "emit_artifact", "spawn_subtasks"] },
     limits: { tokens: 1 },
     policies: { canCreateSubtasks: true, requiresWorktree: false, autoStart: true },
-    model: { provider: "pi", name: "default", effort: "medium" },
+    model: { provider: "inherit", name: "", effort: "medium" },
     gate: "Problema, valor, aceite e riscos de produto claros."
   },
   {
@@ -37,7 +37,7 @@ export const DEFAULT_ROLES = [
     tools: { custom: ["request_user_input", "emit_artifact"] },
     limits: { tokens: 1 },
     policies: { canCreateSubtasks: true, requiresWorktree: false, autoStart: true },
-    model: { provider: "pi", name: "default", effort: "medium" },
+    model: { provider: "inherit", name: "", effort: "medium" },
     gate: "Fluxos, estados e impacto visual documentados."
   },
   {
@@ -50,7 +50,7 @@ export const DEFAULT_ROLES = [
     tools: { custom: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"] },
     limits: { tokens: 1 },
     policies: { canCreateSubtasks: true, requiresWorktree: true, autoStart: true },
-    model: { provider: "pi", name: "default", effort: "high" },
+    model: { provider: "inherit", name: "", effort: "high" },
     gate: "Plano tecnico, contratos internos, riscos e sequencia de implementacao claros."
   },
   {
@@ -60,11 +60,11 @@ export const DEFAULT_ROLES = [
     scope: "task",
     promptPath: "../prompts/generalist.md",
     columnIds: ["generalist"],
-    tools: { custom: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"] },
+    tools: { custom: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"] },
     limits: { tokens: 1 },
     policies: { canCreateSubtasks: true, requiresWorktree: false, autoStart: true },
-    model: { provider: "pi", name: "default", effort: "low" },
-    gate: "Trabalho nao-engenharia executado com evidencia ou escalado para a persona correta."
+    model: { provider: "inherit", name: "", effort: "low" },
+    gate: "Trabalho nao-engenharia executado com evidencia e concluido direto em done quando nao exige codigo, ou escalado para a persona correta."
   },
   {
     id: "engineering",
@@ -76,7 +76,7 @@ export const DEFAULT_ROLES = [
     tools: { custom: ["complete_task", "report_blocker", "emit_artifact", "run_command"] },
     limits: { tokens: 2 },
     policies: { canCreateSubtasks: false, requiresWorktree: true, autoStart: true },
-    model: { provider: "pi", name: "default", effort: "high" },
+    model: { provider: "inherit", name: "", effort: "high" },
     gate: "Codigo implementado com validacao local."
   },
   {
@@ -89,7 +89,7 @@ export const DEFAULT_ROLES = [
     tools: { custom: ["complete_task", "report_blocker", "emit_artifact", "run_command"] },
     limits: { tokens: 1 },
     policies: { canCreateSubtasks: false, requiresWorktree: true, autoStart: true },
-    model: { provider: "pi", name: "default", effort: "medium" },
+    model: { provider: "inherit", name: "", effort: "medium" },
     gate: "Criterios de aceite validados com evidencia."
   },
   {
@@ -102,7 +102,7 @@ export const DEFAULT_ROLES = [
     tools: { custom: ["complete_task", "report_blocker", "emit_artifact", "run_command"] },
     limits: { tokens: 1 },
     policies: { canCreateSubtasks: false, requiresWorktree: true, autoStart: true },
-    model: { provider: "pi", name: "default", effort: "medium" },
+    model: { provider: "inherit", name: "", effort: "medium" },
     gate: "Diff revisado e merge readiness decidido."
   },
   {
@@ -115,7 +115,7 @@ export const DEFAULT_ROLES = [
     tools: { custom: ["complete_task", "report_blocker", "emit_artifact"] },
     limits: { tokens: 1 },
     policies: { canCreateSubtasks: false, requiresWorktree: true, autoStart: false },
-    model: { provider: "pi", name: "default", effort: "low" },
+    model: { provider: "inherit", name: "", effort: "low" },
     gate: "Release/deploy registrado com rollback conhecido."
   }
 ];

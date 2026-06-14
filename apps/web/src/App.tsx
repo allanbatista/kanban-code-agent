@@ -8,7 +8,7 @@ import { Board } from "./components/Board";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TaskModal } from "./components/TaskModal";
 import { OrchestratorPanel } from "./components/OrchestratorPanel";
-import type { AgentLogPage, AgentSettings, ChatMessage, ProviderStatus, Task, TaskFiles } from "./types";
+import type { AgentLogPage, AgentSettings, ChatMessage, ProviderModel, ProviderStatus, Task, TaskFiles } from "./types";
 
 function now() {
   return new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" }).format(new Date());
@@ -19,6 +19,7 @@ function chatMessage(message: Record<string, unknown>): ChatMessage {
     id: String(message.id || commandId("chat")),
     role: message.role === "user" ? "user" : "assistant",
     persona: message.persona ? String(message.persona) : undefined,
+    displayPersona: message.displayPersona ? String(message.displayPersona) : undefined,
     agentId: message.agentId ? String(message.agentId) : undefined,
     runId: message.runId ? String(message.runId) : undefined,
     disposition: message.disposition ? String(message.disposition) : undefined,
@@ -199,12 +200,17 @@ function AppShell() {
   }
 
   async function sendTaskComment(text: string, taskId: string) {
-    const result = await commandDaemon<{ resumed?: boolean }>({ type: "task.comment", commandId: commandId("task-comment"), taskId, text });
+    const result = await commandDaemon<{ resumed?: boolean; task?: Task; scheduler?: { started?: Array<{ taskId?: string }>; skipped?: Array<{ taskId?: string; reason?: string; reasons?: string[] }>; blocked?: Array<{ taskId?: string; error?: string }> } }>({ type: "task.comment", commandId: commandId("task-comment"), taskId, text });
     await queryClient.invalidateQueries({ queryKey: ["state"] });
     await queryClient.invalidateQueries({ queryKey: ["orchestrator"] });
     await queryClient.invalidateQueries({ queryKey: ["comments", "task", taskId] });
     await queryClient.invalidateQueries({ queryKey: ["agent-logs", taskId] });
-    return result.resumed ? "Resposta registrada. Task retomada automaticamente." : "Comentario registrado.";
+    if (!result.resumed) return "Comentario registrado.";
+    if (result.scheduler?.started?.some((item) => item.taskId === taskId)) return "Resposta registrada. Task retomada automaticamente.";
+    const skipped = result.scheduler?.skipped?.find((item) => item.taskId === taskId);
+    const blocked = result.scheduler?.blocked?.find((item) => item.taskId === taskId);
+    const reason = skipped?.reasons?.join(" ") || skipped?.reason || blocked?.error;
+    return reason ? `Resposta registrada. Task voltou para ${result.task?.column || "fila"}; aguardando scheduler: ${reason}` : "Resposta registrada. Task voltou para a fila.";
   }
 
   async function loadMoreTaskLogs(taskId: string) {
@@ -388,6 +394,7 @@ function AppShell() {
         onOpenChange={setSettingsOpen}
         onSave={(patch) => runCommand.mutateAsync({ type: "settings.update", commandId: commandId("settings-update"), scope: "app", patch })}
         onSaveAgent={(patch) => runCommand.mutateAsync({ type: "settings.update", commandId: commandId("agent-settings-update"), scope: "agents", patch }).then(() => queryClient.invalidateQueries({ queryKey: ["settings", "agents"] }))}
+        onLoadProviderModels={(providerId) => queryDaemon<{ models: ProviderModel[] }>({ type: "provider.models", providerId }).then((result) => result.models || [])}
       />
     </div>
   );

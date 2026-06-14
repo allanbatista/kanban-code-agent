@@ -45,6 +45,19 @@ test("kca task move updates materialized YAML and appends event", async () => {
   assert.match(await readFile(join(root, "tasks", task.id, "events.jsonl"), "utf8"), /task.moved/);
 });
 
+test("kca task interrupt loads orchestrator dependencies and interrupts task", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-"));
+  const { stdout } = await run(["task", "create", "--title", "Interrupt via CLI"], root);
+  const task = JSON.parse(stdout);
+  const { stdout: interruptStdout, stderr } = await run(["task", "interrupt", task.id, "--mode", "hard"], root);
+  const result = JSON.parse(interruptStdout);
+  assert.equal(stderr, "");
+  assert.equal(result.ok, true);
+  assert.equal(result.task.status, "idle");
+  assert.equal(result.event.type, "agent.interrupted");
+  assert.match(await readFile(join(root, "tasks", task.id, "events.jsonl"), "utf8"), /agent.interrupted/);
+});
+
 test("kca task recover rebuilds materialized YAML from append-only events", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-"));
   const { stdout } = await run(["task", "create", "--title", "Recuperar task"], root);

@@ -40,6 +40,7 @@ export const QUERY_TYPES = [
   "agent.logs",
   "chat.build",
   "provider.discover",
+  "provider.models",
   "why_not_running"
 ];
 

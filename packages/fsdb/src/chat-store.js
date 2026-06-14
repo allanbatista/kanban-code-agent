@@ -13,7 +13,7 @@ function normalizeMessageText(value) {
   return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-export async function appendChatMessage(root, { scope = "board", taskId, role, persona, agentId = "assistant", text, commandId, runId, disposition, visibility = "chat", toolCalls = [], toolResults = [], chatId, generation = 1, replyToMessageId }) {
+export async function appendChatMessage(root, { scope = "board", taskId, role, persona, displayPersona, agentId = "assistant", text, commandId, runId, disposition, visibility = "chat", toolCalls = [], toolResults = [], chatId, generation = 1, replyToMessageId }) {
   const effectivePersona = persona || agentId || role || "assistant";
   logStep("fsdb", "appendChatMessage.start", { scope, taskId: taskId || null, role, persona: effectivePersona });
   if (visibility !== "timeline") {
@@ -36,6 +36,7 @@ export async function appendChatMessage(root, { scope = "board", taskId, role, p
     taskId: taskId || null,
     role,
     persona: effectivePersona,
+    displayPersona,
     agentId,
     commandId,
     runId,

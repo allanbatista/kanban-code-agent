@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { appendJsonl, paths, readAgent, readSettings, readSkill, writeAtomic } from "@kca/fsdb";
 import { compactTaskPersonaChat, readChatHistory } from "@kca/fsdb/chat-store";
-import { buildTaskAgentTools, startPiSession } from "@kca/pi-adapter";
+import { buildTaskAgentTools, startOpenAICompatibleSession, startPiSession } from "@kca/pi-adapter";
 import { logStep } from "@kca/core/log";
+import { discoverProviders, resolveProviderModel } from "@kca/core/providers";
 import { roleById } from "../../core/src/roles.js";
 
 export function createRunId(taskId, agentId) {
@@ -37,19 +38,21 @@ function acceptanceIsPlaceholder(acceptance = "") {
 
 function managerRoutingContext(task, description = "", acceptance = "") {
   const text = `${task.title || ""}\n${description}\n${acceptance}`.toLowerCase();
+  const requestText = `${task.title || ""}\n${description}`.toLowerCase();
   const code = includesAny(text, [/\b(api|bug|fix|corrigir|implementar|codigo|c[oó]digo|teste|refactor|frontend|backend|endpoint|schema|migra)/i]);
   const architecture = includesAny(text, [/\b(api|endpoint|schema|migra|arquitet|contrato|integrac[aã]o|database|banco|refactor|cross-cutting)/i]);
   const design = includesAny(text, [/\b(ui|ux|visual|layout|tela|design|figma|acessibilidade|interface)/i]);
   const deploy = includesAny(text, [/\b(deploy|release|publicar|rollback|produ[cç][aã]o)/i]);
-  const review = includesAny(text, [/\b(review|revisar|merge|pull request|pr|diff)/i]);
+  const review = includesAny(text, [/\b(review|revisar|merge|pull request|diff)\b/i, /\bpr\b/i]);
   const quality = includesAny(text, [/\b(validar|qa|quality|e2e|regress[aã]o|testar)/i]);
-  const product = includesAny(text, [/\b(prd|roadmap|escopo|persona de usu[aá]rio|crit[eé]rios de aceite|requisito|valor de produto)/i]);
+  const product = includesAny(requestText, [/\b(prd|roadmap|escopo|persona de usu[aá]rio|crit[eé]rios de aceite|requisito|valor de produto)/i]);
   const operational = includesAny(text, [/\b(pesquis|research|listar|resum|format|emit|colet|analis|relat[oó]rio|documentar)/i]);
   const missingAcceptance = acceptanceIsPlaceholder(acceptance);
+  const directOperational = operational && !code && !design && !product;
   let targetRole = "generalist";
   let classification = "direct_operational";
-  let order = "generalist -> quality -> done";
-  if (missingAcceptance) {
+  let order = "generalist -> done";
+  if (missingAcceptance && !directOperational) {
     targetRole = "product";
     classification = "contract_missing";
     order = "product -> next persona";
@@ -82,7 +85,7 @@ function managerRoutingContext(task, description = "", acceptance = "") {
     classification = "product_discovery";
     order = "product -> design/engineering";
   }
-  const managerMode = missingAcceptance || classification === "product_discovery"
+  const managerMode = (missingAcceptance && !directOperational) || classification === "product_discovery"
     ? "intake"
     : ["deployment", "review", "validation"].includes(classification)
       ? "progress_control"
@@ -93,10 +96,12 @@ function managerRoutingContext(task, description = "", acceptance = "") {
     targetRole,
     recommendedTool: "wait_for_persona",
     order,
-    direct: !missingAcceptance && operational && !code && !design && !product,
+    direct: directOperational,
     reason: missingAcceptance
-      ? "Acceptance is missing or placeholder; product must define the contract before execution, QA, or review."
-      : operational && !code && !design && !product
+      ? directOperational
+        ? "Direct research/listing/formatting work is concrete enough for generalist; complete to done with concise source/date evidence."
+        : "Acceptance is missing or placeholder; product must define the contract before execution, QA, or review."
+      : directOperational
         ? "Direct research/listing/formatting work with concrete acceptance should go to generalist."
         : "Route by dominant work type; use product only when product decisions are missing."
   };
@@ -124,6 +129,7 @@ function managerRoutingSection(context) {
     "- Use architecture for complex code/API/schema/migration planning before engineering.",
     "- Use quality for functional validation; use review only for code/diff merge readiness.",
     "- Use spawn_subtasks only when independent work can run in parallel with explicit needs/provides.",
+    "- For direct_task=yes, route to generalist and ask it to complete to done with concise source/date evidence; no more than two live-data command attempts before done/block; do not send to product, engineering, quality, or review unless there is a real blocker.",
     "- Text alone does not finish a run; call complete_task, report_blocker, wait_for_persona, delegate_task, or request_user_input."
   ].join("\n");
 }
@@ -169,10 +175,11 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
   const managerRouting = persona === "manager" ? managerRoutingContext(task, description, acceptance) : null;
   const messages = await readChatHistory(root, { scope: "task", taskId: task.id, persona, limit: 200 });
   const tools = toolsForAgent(agentConfig).map((name) => ({ name }));
-  const modelConfig = agentConfig?.model || role?.model || {};
-  const providerId = provider || modelConfig.provider || agentConfig?.provider || "pi";
-  const modelName = model || modelConfig.name || "default";
-  const modelEffort = effort || modelConfig.effort || "medium";
+  const settings = await readSettings(root);
+  const resolvedModel = resolveProviderModel({ settings, agentConfig, role, provider, model, effort });
+  const providerId = resolvedModel.provider;
+  const modelName = resolvedModel.model;
+  const modelEffort = resolvedModel.effort;
   const system = {
     role: "system",
     content: [
@@ -222,6 +229,7 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
     provider: providerId,
     model: modelName,
     effort: modelEffort,
+    modelResolution: resolvedModel,
     system,
     task: taskContext,
     messages,
@@ -333,17 +341,15 @@ export async function startRun(task, root, agentId = task.routing?.currentAgent 
   };
   let adapter;
   try {
-    adapter = await startPiSession({
+    const providerDiscovery = discoverProviders(settings);
+    const activeProvider = providerDiscovery.providers.find((item) => item.id === chatBuild.provider && item.active);
+    const legacyFallback = !providerDiscovery.providers.some((item) => item.active) && chatBuild.modelResolution?.inheritedProvider;
+    const commonAdapterOptions = {
       task,
       agentId,
       runId,
       cwd: task.worktree?.path || p.root,
-      sessionDir,
       prompt,
-      previousSessionFile: previousSessionRef ? join(p.root, previousSessionRef) : undefined,
-      instructionsPath: agentConfig?.instructionsPath,
-      skills: configuredSkills.filter(Boolean),
-      runPrompt: true,
       customToolFactory: ({ sdkExports }) => buildTaskAgentTools({
         sdkExports,
         taskId: task.id,
@@ -354,7 +360,20 @@ export async function startRun(task, root, agentId = task.routing?.currentAgent 
         onEvent: onToolEvent
       }, { allowedTools }),
       onEvent: onToolEvent
-    });
+    };
+    adapter = activeProvider
+      ? await startOpenAICompatibleSession({ ...commonAdapterOptions, providerConfig: activeProvider, model: chatBuild.model })
+      : legacyFallback
+        ? await startPiSession({
+        ...commonAdapterOptions,
+        sessionDir,
+        previousSessionFile: previousSessionRef ? join(p.root, previousSessionRef) : undefined,
+        instructionsPath: agentConfig?.instructionsPath,
+        skills: configuredSkills.filter(Boolean),
+        runPrompt: true,
+        legacyFallback
+      })
+        : { mode: "failed", provider: chatBuild.provider, reason: "provider_inactive", sessionId: runId, cwd: task.worktree?.path || p.root, promptSent: false };
   } finally {
     if (transcriptStreamLogged) logStep("agent", "stream.end", { taskId: task.id, runId, agentId, role });
   }

@@ -41,7 +41,7 @@ test("schemas parse generated FSDB settings, task files and events", async () =>
   assert.equal(AppSettingsSchema.parse(await readYamlFile(join(root, "settings", "app.yaml"))).schema, "kanban-code-agent/app@1");
   assert.equal(BoardSettingsSchema.parse(await readYamlFile(join(root, "settings", "boards", "default.yaml"))).columns.length, 12);
   assert.equal(ProjectSettingsSchema.parse(await readYamlFile(join(root, "settings", "projects", "kanban-code-agent.yaml"))).id, "kanban-code-agent");
-  assert.equal(AgentSettingsSchema.parse(await readYamlFile(join(root, "settings", "agents", "engineering.yaml"))).provider, "pi");
+  assert.equal(AgentSettingsSchema.parse(await readYamlFile(join(root, "settings", "agents", "engineering.yaml"))).provider, "inherit");
   const role = RoleSettingsSchema.parse(await readYamlFile(join(root, "settings", "roles", "engineering.yaml")));
   assert.equal(role.id, "engineering");
   assert.equal(role.scope, "task");

@@ -1,6 +1,6 @@
-import { discoverProviders } from "@kca/core/providers";
+import { discoverProviders, resolveProviderModel } from "@kca/core/providers";
 import { roleById } from "@kca/core/roles";
-import { readAgent } from "@kca/fsdb";
+import { readAgent, readSettings } from "@kca/fsdb";
 
 export function providedContracts(tasks) {
   return new Set(tasks.filter((task) => ["done", "validating"].includes(task.status)).flatMap((task) => task.dependencies?.provides || []));
@@ -25,8 +25,15 @@ export function columnWip(columnId, board) {
 export async function providerMissingReason(task, root, agentId) {
   const role = roleById(task.routing?.currentRole || task.routing?.currentAgent);
   const agentConfig = await readAgent(agentId, root);
-  const provider = agentConfig?.model?.provider || role?.model?.provider;
-  if (!provider || provider === "pi") return null;
-  const discovered = discoverProviders().providers.find((item) => item.id === provider);
-  return discovered && !discovered.configured ? `Provider ${provider} sem envvars: ${discovered.missingEnv.join(", ")}.` : null;
+  const settings = await readSettings(root);
+  const resolved = resolveProviderModel({ settings, agentConfig, role });
+  const discovery = discoverProviders(settings);
+  const anyActive = discovery.providers.some((item) => item.active);
+  if (!anyActive && (resolved.inheritedProvider || resolved.legacyPi)) return null;
+  const discovered = discovery.providers.find((item) => item.id === resolved.provider);
+  if (!discovered) return `Provider ${resolved.provider} não encontrado.`;
+  if (!discovered.enabled) return `Provider ${resolved.provider} inativo.`;
+  if (!discovered.configured) return `Provider ${resolved.provider} sem envvars: ${discovered.missingEnv.join(", ")}.`;
+  if (!resolved.model) return `Provider ${resolved.provider} sem modelo padrão configurado.`;
+  return null;
 }

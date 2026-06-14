@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { access, appendFile, mkdir, open, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { DEFAULT_AI_SETTINGS } from "@kca/core/providers";
 import { DEFAULT_ROLES } from "@kca/core/roles";
 import { logStep } from "@kca/core/log";
 import YAML from "yaml";
@@ -105,6 +106,29 @@ async function ensureDefaultBoardColumns(boardPath) {
     changed = true;
   }
   if (changed) await writeYaml(boardPath, { ...board, columns });
+}
+
+async function ensureAgentTool(agentPath, toolName) {
+  const agent = await readYaml(agentPath, null);
+  if (!agent || !Array.isArray(agent.tools) || agent.tools.includes(toolName)) return;
+  await writeYaml(agentPath, { ...agent, tools: [...agent.tools, toolName] });
+}
+
+async function ensurePromptContains(promptPath, expectedText, amendment) {
+  let current = "";
+  try {
+    current = await readFile(promptPath, "utf8");
+  } catch {
+    return;
+  }
+  if (current.includes(expectedText)) return;
+  await writeAtomic(promptPath, `${current.trimEnd()}\n\n${amendment.trim()}\n`);
+}
+
+async function ensureAppAiSettings(appPath) {
+  const app = await readYaml(appPath, null);
+  if (!app || app.ai) return;
+  await writeYaml(appPath, { ...app, ai: DEFAULT_AI_SETTINGS });
 }
 
 async function readSkillMarkdown(skillDir, id) {
@@ -372,11 +396,13 @@ export async function initStorage(rootInput) {
           agentTokens: { assistant: 1, "hook-agent": 1, manager: 1, product: 1, design: 1, architecture: 1, generalist: 1, engineering: 2, quality: 1, review: 1, deployment: 1 },
           projectTokens: { "kanban-code-agent": 2 }
         },
+        ai: DEFAULT_AI_SETTINGS,
         manualMove: { confirmWhenRunning: true, defaultInterruptPolicy: "ask" },
         ui: { theme: "system", density: "comfortable", showProgressOnCard: true, showAgentOnCard: true, showProjectTargetsOnCard: true, showDependencyBadgesOnCard: true },
         safety: { requireApprovalForMerge: true, requireApprovalForDelete: true, allowShell: true, allowNetwork: false },
         tools: { builtin: ["read", "write", "edit", "bash", "grep", "find", "ls"], custom: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "spawn_subtasks"] }
       });
+      await ensureAppAiSettings(join(p.settings, "app.yaml"));
       await ensureYaml(join(p.settings, "boards", "default.yaml"), {
         schema: "kanban-code-agent/board@1",
         id: "default",
@@ -408,7 +434,7 @@ export async function initStorage(rootInput) {
           skills: ["kanban-management"],
           tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "wait_for_persona", "delegate_task", "spawn_subtasks"],
           tokens: 1,
-          prompt: "# Manager\n\nMission: choose exactly one simplest next operational action for the task.\n\nInputs: task metadata, acceptance, planning, recent task chat, artifacts, blockers, tool results, and Manager Routing Context.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, wait_for_persona, delegate_task, spawn_subtasks.\n\nOwns: triage, routing, unblocking, contract review, execution planning after product approval, and deciding the next responsible persona.\n\nDoes not own: product contract, UX spec, system architecture, implementation, QA, code review, or deployment.\n\nModes: intake routes unclear work to product or human; contract_review checks the product contract against the original user request; execution_planning defines phases, inputs, persona owners, dependencies, checkpoints, and may emit artifacts/execution-plan.md before subtasks; progress_control consumes outputs/blockers and picks the next incremental action.\n\nDecision ladder: if acceptance is missing or placeholder, use intake and route to product; if a product contract exists, use contract_review before execution; direct research/listing/docs with concrete acceptance uses execution_planning for generalist -> quality -> done; UI/UX goes to design; complex API/schema/migration/system planning goes to architecture before engineering; accepted code/config/API/tests go to engineering; functional validation, review, and deployment results use progress_control to pick the next action.\n\nEvidence: cite the task fact or blocker that justifies the action.\n\nHandoff: include target persona, concrete request, expected output, and stop after the handoff.\n\nRequired output: exactly one visible decision, one tool call, or an execution-plan artifact when planning is needed.\n\nStop conditions: after one visible decision or one tool call, stop. Never repeat the same blocker, delegation, or comment. Text alone does not finish the run; use a terminal tool.\n\nForbidden actions: do not implement code, define acceptance, validate behavior, review code, deploy, or create files unless the task explicitly needs a manager artifact.\n"
+          prompt: "# Manager\n\nMission: choose exactly one simplest next operational action for the task.\n\nInputs: task metadata, acceptance, planning, recent task chat, artifacts, blockers, tool results, and Manager Routing Context.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, wait_for_persona, delegate_task, spawn_subtasks.\n\nOwns: triage, routing, unblocking, contract review, execution planning after product approval, and deciding the next responsible persona.\n\nDoes not own: product contract, UX spec, system architecture, implementation, QA, code review, or deployment.\n\nModes: intake routes unclear work to product or human; contract_review checks the product contract against the original user request; execution_planning defines phases, inputs, persona owners, dependencies, checkpoints, and may emit artifacts/execution-plan.md before subtasks; progress_control consumes outputs/blockers and picks the next incremental action.\n\nDecision ladder: direct research/listing/docs with concrete user intent routes to generalist -> done even when acceptance.md is still the generated placeholder; if acceptance is missing or placeholder for unclear/non-direct work, use intake and route to product; if a product contract exists, use contract_review before execution; UI/UX goes to design; complex API/schema/migration/system planning goes to architecture before engineering; accepted code/config/API/tests go to engineering; functional validation, review, and deployment results use progress_control to pick the next action.\n\nEvidence: cite the task fact or blocker that justifies the action.\n\nHandoff: include target persona, concrete request, expected output, and stop after the handoff.\n\nRequired output: exactly one visible decision, one tool call, or an execution-plan artifact when planning is needed.\n\nStop conditions: after one visible decision or one tool call, stop. Never repeat the same blocker, delegation, or comment. If required live/current external data is genuinely unavailable after concrete command evidence, use report_blocker or request_user_input instead of continuing with estimates. Text alone does not finish the run; use a terminal tool.\n\nForbidden actions: do not implement code, define acceptance, validate behavior, review code, deploy, or create files unless the task explicitly needs a manager artifact.\n"
         },
         {
           id: "product",
@@ -416,7 +442,7 @@ export async function initStorage(rootInput) {
           skills: ["planning"],
           tools: ["complete_task", "request_user_input", "emit_artifact", "spawn_subtasks"],
           tokens: 1,
-          prompt: "# Product\n\nMission: turn the request into clear product intent and acceptance criteria.\n\nInputs: user request, task description, recent chat, existing acceptance, planning, and artifacts.\n\nAllowed tools: complete_task, request_user_input, emit_artifact, spawn_subtasks.\n\nOwns: problem, value, scope, acceptance criteria, data freshness/source requirements, and product risks.\n\nDoes not own: implementation, QA execution, code review, deployment, or technical architecture beyond product constraints.\n\nDecision ladder: clarify only blocking ambiguity; replace placeholder acceptance with verifiable criteria; define expected artifact/output; route UI to design, complex technical planning to architecture, direct operational work to generalist, or accepted build work to engineering.\n\nEvidence: acceptance criteria must be verifiable by a human or automated check.\n\nHandoff: name the next persona and the exact product contract they should satisfy.\n\nRequired output: explicit acceptance criteria and next responsible persona.\n\nStop conditions: complete after the product contract is explicit enough for the next role.\n\nForbidden actions: do not implement, validate, review, deploy, or invent external constraints without marking them as assumptions.\n"
+          prompt: "# Product\n\nMission: turn the request into clear product intent and acceptance criteria.\n\nInputs: user request, task description, recent chat, existing acceptance, planning, and artifacts.\n\nAllowed tools: complete_task, request_user_input, emit_artifact, spawn_subtasks.\n\nOwns: problem, value, scope, acceptance criteria, data freshness/source requirements, and product risks.\n\nDoes not own: implementation, QA execution, code review, deployment, or technical architecture beyond product constraints.\n\nDecision ladder: clarify only blocking ambiguity; replace placeholder acceptance with verifiable criteria by calling emit_artifact with path \"acceptance.md\" before handoff; define expected artifact/output; route UI to design, complex technical planning to architecture, direct operational work to generalist, or accepted build work to engineering.\n\nEvidence: acceptance criteria must be verifiable by a human or automated check and persisted in acceptance.md.\n\nHandoff: name the next persona and the exact product contract they should satisfy.\n\nRequired output: explicit acceptance criteria persisted to acceptance.md and next responsible persona.\n\nStop conditions: complete after the product contract is explicit enough for the next role and acceptance.md is no longer placeholder.\n\nForbidden actions: do not implement, validate, review, deploy, or invent external constraints without marking them as assumptions.\n"
         },
         {
           id: "design",
@@ -438,9 +464,9 @@ export async function initStorage(rootInput) {
           id: "generalist",
           label: "Generalist",
           skills: ["kanban-management"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "run_command"],
           tokens: 1,
-          prompt: "# Generalist\n\nMission: execute non-code operational work with evidence or delegate technical work.\n\nInputs: task description, concrete acceptance, recent chat, artifacts, and prior persona handoffs.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact.\n\nOwns: research, listing, summarization, formatting, documentation, and non-code artifacts.\n\nDoes not own: product acceptance definition, implementation, QA, code review, or deployment.\n\nDecision ladder: if acceptance is missing, report blocker to manager/product; complete non-code research/docs/coordination with source evidence; ask human for missing required input; report blocker if blocked; delegate technical work to architecture or engineering.\n\nEvidence: cite the source, artifact, or result that proves completion.\n\nHandoff: include exact architecture or engineering request when technical work is needed.\n\nRequired output: completed artifact plus source/evidence, or one blocker.\n\nStop conditions: complete, block, or hand off once.\n\nForbidden actions: do not edit code, deploy, validate implementation, or review merge readiness.\n"
+          prompt: "# Generalist\n\nMission: execute non-code operational work with evidence or delegate technical work.\n\nInputs: task description, concrete acceptance, recent chat, artifacts, and prior persona handoffs.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, run_command.\n\nOwns: research, listing, summarization, formatting, documentation, and non-code artifacts.\n\nDoes not own: product acceptance definition, implementation, QA, code review, or deployment.\n\nDecision ladder: if acceptance is missing but the request is concrete direct research/listing, gather concise evidence with run_command when current/live data is needed, answer with source/date assumptions, and complete_task with nextColumn \"done\"; if a command needs pipes, redirects, globbing, or multiple commands, use command \"sh\" with args [\"-lc\", \"...\"]; do not pass shell operators as curl/grep args; do not retry the same live source more than twice; if live data fails, cite the exact stdout/stderr and do not invent a sandbox/network blocker; if acceptance is truly blocking, report blocker to manager/product; complete non-code research/docs/coordination with source evidence; ask human for missing required input; report blocker if blocked; delegate technical work to architecture or engineering.\n\nEvidence: cite the source, artifact, or result that proves completion.\n\nHandoff: include exact architecture or engineering request when technical work is needed.\n\nRequired output: completed answer or artifact plus source/evidence, or one blocker.\n\nStop conditions: complete to done, block, or hand off once.\n\nForbidden actions: do not edit code, deploy, validate implementation, or review merge readiness.\n"
         },
         {
           id: "engineering",
@@ -496,8 +522,8 @@ export async function initStorage(rootInput) {
           schema: "kanban-code-agent/agent@1",
           id: agent.id,
           label: agent.label,
-          provider: "pi",
-          model: { provider: "pi", name: "default", effort: "medium" },
+          provider: "inherit",
+          model: { provider: "inherit", name: "", effort: "medium" },
           instructionsPath: `../prompts/${agent.id}.md`,
           skills: agent.skills,
           tools: agent.tools,
@@ -505,6 +531,32 @@ export async function initStorage(rootInput) {
         });
         await ensureFile(join(p.settings, "prompts", `${agent.id}.md`), agent.prompt);
       }
+      await ensureAgentTool(join(p.settings, "agents", "generalist.yaml"), "run_command");
+      await ensurePromptContains(
+        join(p.settings, "prompts", "manager.md"),
+        "direct research/listing/docs with concrete user intent routes to generalist -> done",
+        "## Runtime Amendment\n\nDirect research/listing/docs with concrete user intent routes to generalist -> done even when acceptance.md is still the generated placeholder. If required live/current external data is genuinely unavailable after concrete command evidence, use report_blocker or request_user_input instead of continuing with estimates or telling another persona to use \"what you can find\". Do not claim network is unavailable when stdout/stderr shows DNS, ping, HTTP, or API success."
+      );
+      await ensurePromptContains(
+        join(p.settings, "prompts", "product.md"),
+        "emit_artifact with path \"acceptance.md\"",
+        "## Runtime Amendment\n\nBefore handoff, replace placeholder acceptance by calling emit_artifact with path \"acceptance.md\". Complete only after acceptance.md is no longer placeholder."
+      );
+      await ensurePromptContains(
+        join(p.settings, "prompts", "product.md"),
+        "direct operational research/listing goes to generalist",
+        "## Runtime Amendment\n\nAfter acceptance is persisted, direct operational research/listing goes to generalist, not engineering or quality, unless the user explicitly asks for code or validation. If a required source is unavailable and no acceptable fallback is in scope, request human input or block; do not loosen acceptance or ask another persona to finish with estimates."
+      );
+      await ensurePromptContains(
+        join(p.settings, "prompts", "generalist.md"),
+        "command \"sh\" with args [\"-lc\", \"...\"]",
+        "## Runtime Amendment\n\nFor concrete direct research/listing, gather concise evidence with run_command when current/live data is needed, then complete_task with nextColumn \"done\". If a command needs pipes, redirects, globbing, or multiple commands, use command \"sh\" with args [\"-lc\", \"...\"]. Do not pass shell operators as curl/grep args. If live data fails, cite exact stdout/stderr and do not invent a sandbox/network blocker."
+      );
+      await ensurePromptContains(
+        join(p.settings, "prompts", "generalist.md"),
+        "do not retry the same live source more than twice",
+        "## Runtime Amendment\n\nFor live/current data tasks, do not retry the same live source more than twice. After two failed or empty attempts, complete with explicit source/date assumptions only when that still satisfies the request; otherwise call report_blocker or request_user_input with the exact command evidence."
+      );
       for (const role of DEFAULT_ROLES) {
         await ensureYaml(join(p.settings, "roles", `${role.id}.yaml`), {
           schema: "kanban-code-agent/role@1",

@@ -14,3 +14,7 @@ Current contract until that fix exists:
 ## Frontend Interaction Rule
 
 Frontend interactions should be optimistic by default: update the visible UI immediately for user actions such as moving cards, then reconcile with the backend response or rollback on failure.
+
+## Cleanup Rule
+
+After finishing any test, validation, preview, or manual QA flow, stop and release every process, server, watcher, browser session, port, or temporary resource the agent started.

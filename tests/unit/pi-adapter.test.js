@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildKanbanTools, buildTaskAgentTools, doctorPi, loadPiSdk, runBoardAssistant, startPiSession } from "../../packages/pi-adapter/src/index.js";
+import { buildKanbanTools, buildTaskAgentTools, doctorPi, loadPiSdk, runBoardAssistant, startOpenAICompatibleSession, startPiSession } from "../../packages/pi-adapter/src/index.js";
 
 const realPiEnabled = process.env.KCA_PI_REAL_TESTS === "1";
 const realPromptSmokeEnabled = process.env.KCA_PI_PROMPT_SMOKE === "1";
@@ -77,6 +77,173 @@ test("task agent tools execute typed workflow commands and emit tool events", as
   assert.equal(commands[0].taskId, "KCA-TOOLS");
   assert.equal(commands[0].runId, "run_tools");
   assert.deepEqual(events.map((event) => event.type), ["agent.tool_call", "agent.tool_result", "agent.tool_call", "agent.tool_result"]);
+});
+
+test("run_command tool caps requested timeout", async () => {
+  let seen;
+  const tools = buildTaskAgentTools({
+    sdkExports: { defineTool: (tool) => tool },
+    taskId: "KCA-TIMEOUT",
+    runId: "run_timeout",
+    executeCommand: async (command) => {
+      seen = command;
+      return { ok: true, commandId: command.commandId, cwd: "/tmp/kca", stdout: "", stderr: "", exitCode: 0 };
+    }
+  });
+  await tools.find((tool) => tool.name === "run_command").execute("call-timeout", { command: "sleep", args: ["1"], timeoutMs: 600000 });
+  assert.equal(seen.timeoutMs, 120000);
+});
+
+test("task agent tools compact workflow results returned to model", async () => {
+  const tools = buildTaskAgentTools({
+    sdkExports: { defineTool: (tool) => tool },
+    taskId: "KCA-COMPACT",
+    runId: "run_compact",
+    role: "manager",
+    agentId: "manager",
+    executeCommand: async (command) => ({
+      ok: true,
+      commandId: command.commandId,
+      task: { id: "KCA-COMPACT", column: "done", status: "done", routing: { currentRole: "generalist", currentAgent: "generalist" } },
+      scheduler: { started: [{ taskId: "KCA-COMPACT", result: { run: { adapter: { events: ["large transcript"] } } } }], blocked: [], skipped: [] }
+    })
+  });
+  const delegate = tools.find((tool) => tool.name === "delegate_task");
+  const result = await delegate.execute("call-delegate", { toPersona: "generalist", request: "Pesquisar", wait: true });
+  assert.deepEqual(result.details.scheduler.started, ["KCA-COMPACT"]);
+  assert.equal(JSON.stringify(result).includes("large transcript"), false);
+});
+
+test("openai compatible adapter executes task tool calls", async () => {
+  const previousKey = process.env.TEST_OPENAI_KEY;
+  process.env.TEST_OPENAI_KEY = "test-key";
+  const commands = [];
+  const events = [];
+  const calls = [];
+  const fetchImpl = async (_url, init) => {
+    calls.push(JSON.parse(init.body));
+    return {
+      ok: true,
+      json: async () => ({
+        id: "chatcmpl-test",
+        model: "model-test",
+        choices: [{
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [{
+              id: "call-complete",
+              type: "function",
+              function: { name: "complete_task", arguments: JSON.stringify({ nextColumn: "done", summary: "ok" }) }
+            }]
+          }
+        }]
+      })
+    };
+  };
+  try {
+    const result = await startOpenAICompatibleSession({
+      providerConfig: { id: "test", baseUrl: "https://example.test/v1", apiKeyEnv: "TEST_OPENAI_KEY" },
+      model: "model-test",
+      task: { id: "KCA-OAI", title: "Run OpenAI compatible" },
+      agentId: "engineering",
+      runId: "run_oai",
+      cwd: "/tmp/kca",
+      prompt: "Complete",
+      fetchImpl,
+      customToolFactory: ({ sdkExports }) => buildTaskAgentTools({
+        sdkExports,
+        taskId: "KCA-OAI",
+        runId: "run_oai",
+        role: "engineering",
+        agentId: "engineering",
+        executeCommand: async (command) => {
+          commands.push(command);
+          return { ok: true, commandId: command.commandId };
+        },
+        onEvent: async (event) => events.push(event)
+      })
+    });
+    assert.equal(result.mode, "real");
+    assert.equal(result.promptSent, true);
+    assert.equal(result.terminal, true);
+    assert.equal(calls[0].tools.some((tool) => tool.function.name === "complete_task"), true);
+    assert.deepEqual(commands.map((command) => command.type), ["agent.complete_task"]);
+    assert.deepEqual(events.map((event) => event.type), ["agent.tool_call", "agent.tool_result"]);
+  } finally {
+    if (previousKey === undefined) delete process.env.TEST_OPENAI_KEY;
+    else process.env.TEST_OPENAI_KEY = previousKey;
+  }
+});
+
+test("openai compatible adapter exposes run_command output to the next turn", async () => {
+  const previousKey = process.env.TEST_OPENAI_KEY;
+  process.env.TEST_OPENAI_KEY = "test-key";
+  const calls = [];
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push(body);
+    return {
+      ok: true,
+      json: async () => calls.length === 1 ? ({
+        id: "chatcmpl-run-command",
+        model: "model-test",
+        choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "call-run", type: "function", function: { name: "run_command", arguments: JSON.stringify({ command: "printf", args: ["cold"] }) } }] } }]
+      }) : ({
+        id: "chatcmpl-complete",
+        model: "model-test",
+        choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "call-complete", type: "function", function: { name: "complete_task", arguments: JSON.stringify({ nextColumn: "done", summary: "saw cold" }) } }] } }]
+      })
+    };
+  };
+  try {
+    const result = await startOpenAICompatibleSession({
+      providerConfig: { id: "test", baseUrl: "https://example.test/v1", apiKeyEnv: "TEST_OPENAI_KEY" },
+      model: "model-test",
+      task: { id: "KCA-RUN-CMD", title: "Run command" },
+      agentId: "generalist",
+      runId: "run_cmd",
+      cwd: "/tmp/kca",
+      fetchImpl,
+      customToolFactory: ({ sdkExports }) => buildTaskAgentTools({
+        sdkExports,
+        taskId: "KCA-RUN-CMD",
+        runId: "run_cmd",
+        role: "generalist",
+        agentId: "generalist",
+        executeCommand: async (command) => command.type === "agent.run_command"
+          ? { ok: true, commandId: command.commandId, cwd: "/tmp/kca", stdout: "cold\n", stderr: "", exitCode: 0 }
+          : { ok: true, commandId: command.commandId }
+      })
+    });
+    assert.equal(result.terminal, true);
+    assert.match(calls[1].messages.at(-1).content, /stdout:\ncold/);
+  } finally {
+    if (previousKey === undefined) delete process.env.TEST_OPENAI_KEY;
+    else process.env.TEST_OPENAI_KEY = previousKey;
+  }
+});
+
+test("openai compatible adapter reports non-terminal text responses", async () => {
+  const previousKey = process.env.TEST_OPENAI_KEY;
+  process.env.TEST_OPENAI_KEY = "test-key";
+  try {
+    const result = await startOpenAICompatibleSession({
+      providerConfig: { id: "test", baseUrl: "https://example.test/v1", apiKeyEnv: "TEST_OPENAI_KEY" },
+      model: "model-test",
+      task: { id: "KCA-NONTERM", title: "Non terminal" },
+      agentId: "generalist",
+      runId: "run_nonterm",
+      cwd: "/tmp/kca",
+      fetchImpl: async () => ({ ok: true, json: async () => ({ id: "chatcmpl-text", model: "model-test", choices: [{ message: { role: "assistant", content: "only text" } }] }) }),
+      customToolFactory: ({ sdkExports }) => buildTaskAgentTools({ sdkExports, taskId: "KCA-NONTERM", runId: "run_nonterm", executeCommand: async () => ({ ok: true }) })
+    });
+    assert.equal(result.terminal, false);
+    assert.equal(result.reason, "non_terminal_response");
+  } finally {
+    if (previousKey === undefined) delete process.env.TEST_OPENAI_KEY;
+    else process.env.TEST_OPENAI_KEY = previousKey;
+  }
 });
 
 test("board assistant returns on prompt timeout", async () => {

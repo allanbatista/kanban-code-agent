@@ -29,3 +29,11 @@ The full `tests/unit/orchestrator.test.js` run failed before the new manager rou
 # [minor] Mark manager routing plan final after unrelated dirty worktree is clean
 
 The manager routing observability implementation passed focused unit tests, adapter tests, typecheck, browser validation, and the feature workflow audit while kept `IN_PROGRESS`. The plan cannot be safely marked final while many unrelated modified/untracked files remain in `git status`. Next step: mark the plan final after unrelated worktree changes are committed or cleaned.
+
+# [medium] Recover stuck KCA-441612 generalist run
+
+Task KCA-441612 was left stuck after the OpenAI-compatible adapter returned `terminal:false` without `emit_artifact`, `complete_task`, or `report_blocker`; it was hard-interrupted during the 2026-06-13 validation cleanup. Next step: decide whether to rerun it or leave it superseded by smoke task KCA-349798.
+
+# [high] Complete tool result persistence and resume rehydration
+
+The validation fix made `run_command` output visible to OpenAI-compatible model turns and added non-terminal recovery, but the full `.features/20260613-2100-tool-result-persistence/plan.md` scope is not complete. Remaining work: persist durable model-facing previews/result refs into command indexes/events, restore recent tool results on resumed prompts, and add orchestrator tests for non-terminal lease recovery and resumed prompt rehydration.

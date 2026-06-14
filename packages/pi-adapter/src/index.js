@@ -172,6 +172,33 @@ function TOptional(schema) { return { ...schema, optional: true }; }
 function TArray(items, opts = {}) { return { type: "array", items, ...opts }; }
 function TNumber(opts = {}) { return { type: "number", ...opts }; }
 
+function cleanJsonSchema(schema = {}) {
+  if (!schema || typeof schema !== "object") return schema;
+  if (schema.type === "object") {
+    const properties = Object.fromEntries(Object.entries(schema.properties || {}).map(([key, value]) => [key, cleanJsonSchema(value)]));
+    const required = Object.entries(schema.properties || {}).filter(([, value]) => !value?.optional).map(([key]) => key);
+    const { optional, ...rest } = schema;
+    return { ...rest, properties, required, additionalProperties: false };
+  }
+  if (schema.type === "array") {
+    const { optional, ...rest } = schema;
+    return { ...rest, items: cleanJsonSchema(schema.items) };
+  }
+  const { optional, ...rest } = schema;
+  return rest;
+}
+
+function toolsToOpenAI(tools) {
+  return tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description || tool.label || tool.name,
+      parameters: cleanJsonSchema(tool.parameters || TObject({}))
+    }
+  }));
+}
+
 export function buildKanbanTools(context) {
   // context = { root, createTask, moveTask, updateTask, getTask, listTasks, boardSnapshot,
   //             whyNotRunning, decomposeTask, readSettingsScope, updateSettings,
@@ -390,6 +417,50 @@ function commandIdFor(toolName, taskId) {
   return `pi-tool-${toolName}-${taskId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function compactWorkflowResult(result) {
+  if (!result || typeof result !== "object") return result;
+  return {
+    ok: result.ok ?? true,
+    commandId: result.commandId,
+    task: result.task ? {
+      id: result.task.id,
+      column: result.task.column,
+      status: result.task.status,
+      currentRole: result.task.routing?.currentRole,
+      currentAgent: result.task.routing?.currentAgent
+    } : undefined,
+    message: result.message ? {
+      persona: result.message.persona,
+      disposition: result.message.disposition,
+      text: truncate(result.message.text || "", 500)
+    } : undefined,
+    inputPath: result.inputPath,
+    artifactPath: result.path || result.artifactPath,
+    summaryRef: result.summaryRef,
+    delegation: result.delegation,
+    scheduler: result.scheduler ? {
+      started: result.scheduler.started?.map((item) => typeof item === "string" ? item : item.taskId).filter(Boolean) || [],
+      blocked: result.scheduler.blocked?.map((item) => item.taskId || item.reason || item).filter(Boolean) || [],
+      skipped: result.scheduler.skipped?.map((item) => item.taskId || item.reason || item).filter(Boolean) || []
+    } : undefined
+  };
+}
+
+function formatToolResultContent(name, command, result) {
+  if (name !== "run_command") return `${name} executed: ${command.commandId}`;
+  const stdout = truncate(result?.stdout || "", 12000);
+  const stderr = truncate(result?.stderr || "", 4000);
+  return [
+    `run_command result: ${command.commandId}`,
+    `cwd: ${result?.cwd || command.cwd || ""}`,
+    `exitCode: ${result?.exitCode ?? ""}`,
+    "stdout:",
+    stdout || "(empty)",
+    "stderr:",
+    stderr || "(empty)"
+  ].join("\n");
+}
+
 function taskTool(context, { name, label, description, parameters, toCommand }) {
   const { defineTool } = context.sdkExports;
   return defineTool({
@@ -402,8 +473,10 @@ function taskTool(context, { name, label, description, parameters, toCommand }) 
       await context.onEvent?.({ type: "agent.tool_call", tool: name, callId, command });
       try {
         const result = await context.executeCommand(command);
-        await context.onEvent?.({ type: "agent.tool_result", tool: name, callId, commandId: command.commandId, ok: result?.ok ?? true });
-        return { content: [{ type: "text", text: `${name} executed: ${command.commandId}` }], details: result };
+        const content = formatToolResultContent(name, command, result);
+        const details = compactWorkflowResult(result);
+        await context.onEvent?.({ type: "agent.tool_result", tool: name, callId, commandId: command.commandId, ok: result?.ok ?? true, content, details, resultRef: { commandId: command.commandId } });
+        return { content: [{ type: "text", text: content }], details };
       } catch (error) {
         await context.onEvent?.({ type: "agent.tool_result", tool: name, callId, commandId: command.commandId, ok: false, error: safeError(error) });
         throw error;
@@ -471,14 +544,14 @@ export function buildTaskAgentTools(context, { allowedTools } = {}) {
     taskTool(context, {
       name: "run_command",
       label: "Run command",
-      description: "Run a validation command in the task worktree and return stdout/stderr without changing task status.",
+      description: "Run a validation or evidence-gathering command in the task worktree and return stdout/stderr without changing task status.",
       parameters: TObject({
-        command: TString(),
-        args: TOptional(TArray(TString())),
+        command: TString({ description: "Executable to run. Use 'sh' with args ['-lc', '...'] when the command needs pipes, redirects, globbing, or multiple shell commands." }),
+        args: TOptional(TArray(TString({ description: "Process arguments. Do not pass shell operators like | or > here unless command is 'sh' and args starts with '-lc'." }))),
         cwd: TOptional(TString({ description: "Use 'worktree' for the task worktree or omit for worktree/default root.", default: "worktree" })),
         timeoutMs: TOptional(TNumber({ description: "Timeout in milliseconds.", default: 120000 }))
       }),
-      toCommand: (params) => base("agent.run_command", { command: params.command, args: params.args || [], cwd: params.cwd || "worktree", timeoutMs: params.timeoutMs || 120000 })
+      toCommand: (params) => base("agent.run_command", { command: params.command, args: params.args || [], cwd: params.cwd || "worktree", timeoutMs: Math.min(params.timeoutMs || 120000, 120000) })
     }),
     taskTool(context, {
       name: "wait_for_persona",
@@ -595,6 +668,88 @@ export async function runBoardAssistant({ prompt, agentId = "assistant", instruc
     unsubscribe?.();
     session.dispose?.();
   }
+}
+
+function parseToolArguments(value) {
+  if (!value) return {};
+  if (typeof value === "object") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+}
+
+function firstAssistantText(message) {
+  if (typeof message?.content === "string") return message.content;
+  if (Array.isArray(message?.content)) return contentText(message.content);
+  return "";
+}
+
+export async function startOpenAICompatibleSession({ providerConfig, model, task, agentId, runId, cwd, prompt, customToolFactory, onEvent, maxTurns = 12, fetchImpl = globalThis.fetch }) {
+  const baseUrl = providerConfig?.baseUrl?.replace(/\/$/, "");
+  const apiKey = providerConfig?.apiKeyEnv ? process.env[providerConfig.apiKeyEnv] : null;
+  if (!fetchImpl) return { mode: "failed", provider: providerConfig?.id, reason: "fetch_unavailable", sessionId: runId, cwd };
+  if (!baseUrl || !apiKey || !model) return { mode: "failed", provider: providerConfig?.id, reason: "provider_not_configured", sessionId: runId, cwd };
+
+  const sdkExports = { defineTool: (tool) => tool };
+  const customTools = await customToolFactory?.({ sdkExports }) || [];
+  const toolMap = new Map(customTools.map((tool) => [tool.name, tool]));
+  const messages = [{ role: "user", content: String(prompt || task?.title || "") }];
+  const events = [];
+  const terminalTools = new Set(["complete_task", "request_user_input", "report_blocker", "spawn_subtasks", "wait_for_persona", "wait_for_human", "delegate_task", "review_task", "deploy_task"]);
+  let promptSent = false;
+  let terminal = false;
+
+  for (let turn = 0; turn < maxTurns && !terminal; turn += 1) {
+    const headers = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` };
+    if (process.env.OPENROUTER_HTTP_REFERER) headers["HTTP-Referer"] = process.env.OPENROUTER_HTTP_REFERER;
+    if (process.env.OPENROUTER_APP_TITLE) headers["X-Title"] = process.env.OPENROUTER_APP_TITLE;
+    const response = await fetchImpl(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        messages,
+        tools: toolsToOpenAI(customTools),
+        tool_choice: customTools.length ? "auto" : undefined
+      })
+    });
+    promptSent = true;
+    if (!response.ok) {
+      return { mode: "failed", provider: providerConfig.id, reason: `http_${response.status}`, sessionId: runId, cwd, promptSent };
+    }
+    const data = await response.json();
+    const message = data?.choices?.[0]?.message || {};
+    const text = firstAssistantText(message);
+    if (text) {
+      const event = { type: "agent.transcript", category: "message", role: "assistant", text, providerEvent: { id: data.id, model: data.model } };
+      events.push(event);
+      await onEvent?.(event);
+    }
+    messages.push({ role: "assistant", content: message.content || "", tool_calls: message.tool_calls || undefined });
+    const toolCalls = message.tool_calls || [];
+    if (!toolCalls.length) {
+      return { mode: "real", provider: providerConfig.id, version: "openai-compatible", sessionId: runId, cwd, promptSent, terminal: false, reason: "non_terminal_response", events };
+    }
+    for (const toolCall of toolCalls) {
+      const toolName = toolCall.function?.name || toolCall.name;
+      const tool = toolMap.get(toolName);
+      const callId = toolCall.id || `call_${turn}_${toolName}`;
+      let content = `Unknown tool: ${toolName}`;
+      try {
+        if (!tool) throw new Error(content);
+        const result = await tool.execute(callId, parseToolArguments(toolCall.function?.arguments || toolCall.arguments));
+        content = contentText(result.content) || JSON.stringify(result.details || result || {});
+        terminal = terminal || terminalTools.has(toolName);
+      } catch (error) {
+        content = safeError(error);
+      }
+      messages.push({ role: "tool", tool_call_id: callId, content: truncate(content, 12000) });
+    }
+  }
+
+  return { mode: "real", provider: providerConfig.id, version: "openai-compatible", sessionId: runId, cwd, promptSent, terminal, reason: terminal ? undefined : "max_turns_without_terminal", events };
 }
 
 // ---------------------------------------------------------------------------

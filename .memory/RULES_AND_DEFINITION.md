@@ -48,3 +48,7 @@ Frontend interactions should be optimistic by default: immediately update the vi
 # No BlockedBy Workflow
 
 O Kanban Code Agent não deve usar `dependencies.blockedBy` como conceito ativo. Quando um agent precisar de informação humana, deve perguntar nos comentários e colocar a task `idle` em `human_wait`. Quando houver problema técnico, deve registrar comentário explicando o problema e enviar a task `queued` para `manager` triar. Comentários adicionados durante execução entram depois do run atual e reexecutam o mesmo agent.
+
+# Cleanup After Testing
+
+After finishing any test, validation, preview, or manual QA flow, always stop and release every process, server, watcher, browser session, port, or temporary resource the agent started.

@@ -331,7 +331,7 @@ export function TaskModal({ task, draftTask, open, onClose, onSave, onUploadAtta
                       <div className="task-comment-avatar">{commentInitial(message)}</div>
                       <div className="task-comment-content">
                         <div className="task-comment-meta">
-                          <span>{message.persona || message.role}</span>
+                          <span>{commentDisplayName(message)}</span>
                           <time>{message.time}</time>
                         </div>
                         <ChatMessageContent className="task-chat-bubble" text={message.text} pending={message.pending} />
@@ -390,7 +390,11 @@ function AttachmentDropzone({ files, onClick, onDrop, onRemove }: { files: Attac
 }
 
 function commentInitial(message: ChatMessage) {
-  return String(message.persona || message.agentId || message.role || "?").slice(0, 1).toUpperCase();
+  return commentDisplayName(message).slice(0, 1).toUpperCase();
+}
+
+function commentDisplayName(message: ChatMessage) {
+  return String(message.displayPersona || (message.role === "user" ? "human" : message.persona || message.agentId || message.role || "?"));
 }
 
 function TerminalLogs({ logs, loading, hasMore, emptyText = "Sem logs para esta task.", onLoadMore }: { logs: AgentLogEntry[]; loading: boolean; hasMore: boolean; emptyText?: string; onLoadMore: () => Promise<unknown> }) {

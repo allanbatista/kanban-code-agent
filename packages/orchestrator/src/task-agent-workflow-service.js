@@ -11,6 +11,7 @@ import { logStep } from "@kca/core/log";
 import { roleById } from "@kca/core/roles";
 
 const exec = promisify(execFile);
+const ROOT_TASK_ARTIFACTS = new Set(["acceptance.md"]);
 
 function roleColumn(roleId) {
   if (roleId === "done") return "done";
@@ -81,6 +82,14 @@ export async function runTaskWorkflow(command, root, whyNotRunning, executeComma
       agent: { currentRunId: run.runId, currentSessionRef: run.sessionRef, resumeMode: "continue", lastSummary: run.summaryRef }
     }, root, "agent.failed"));
     await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "agent.failed", actor: "orchestrator", taskId: command.taskId, runId: run.runId, reason });
+    await releaseSemaphoreLeases({ root, taskId: command.taskId });
+    return { ok: false, commandId: command.commandId, task, run, reason };
+  }
+  if (run.adapter?.promptSent && run.adapter?.terminal === false && ["non_terminal_response", "max_turns_without_terminal"].includes(run.adapter?.reason)) {
+    const reason = `Agent exited without a terminal tool call: ${run.adapter.reason}.`;
+    const latestBeforeRecovery = await getTask(command.taskId, root) || runnableTask;
+    const task = await routeProblemToManager(latestBeforeRecovery, root, reason, "agent.non_terminal_exit");
+    await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "agent.non_terminal_exit", actor: "orchestrator", taskId: command.taskId, runId: run.runId, reason: run.adapter.reason });
     await releaseSemaphoreLeases({ root, taskId: command.taskId });
     return { ok: false, commandId: command.commandId, task, run, reason };
   }
@@ -183,7 +192,7 @@ export async function emitArtifactWorkflow(command, root) {
   const current = await getTask(command.taskId, root);
   if (!current) throw new Error(`Task not found: ${command.taskId}`);
   assertActiveRun(current, command.runId);
-  const artifactPath = command.path.startsWith("artifacts/") ? command.path : `artifacts/${command.path}`;
+  const artifactPath = ROOT_TASK_ARTIFACTS.has(command.path) || command.path.startsWith("artifacts/") ? command.path : `artifacts/${command.path}`;
   await writeTaskFile(command.taskId, artifactPath, command.content, root);
   await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "artifact.emitted", actor: "agent", taskId: command.taskId, runId: command.runId, path: artifactPath });
   return { ok: true, commandId: command.commandId, task: TaskSchema.parse(current), artifactPath };

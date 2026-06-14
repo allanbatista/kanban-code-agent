@@ -82,26 +82,35 @@ export const RoleSettingsSchema = z.object({
     autoStart: z.boolean().default(false)
   }).passthrough(),
   model: z.object({
-    provider: z.string().min(1).default("pi"),
-    name: z.string().min(1).default("default"),
+    provider: z.string().min(1).default("inherit"),
+    name: z.string().default(""),
     effort: z.enum(["minimal", "low", "medium", "high"]).default("medium"),
     temperature: z.number().optional()
   }).passthrough().optional(),
   gate: z.string().min(1).optional()
 }).passthrough();
 
-export const ProviderId = z.enum(["pi", "openai", "openrouter", "openai_compatible", "groq", "together", "fireworks", "deepinfra", "cerebras"]);
+export const ProviderId = z.string().min(1);
 
 export const ProviderDiscoverySchema = z.object({
   schema: z.literal("kanban-code-agent/provider-discovery@1"),
+  defaultProvider: z.string().optional(),
+  defaultModel: z.string().optional(),
   providers: z.array(z.object({
     id: ProviderId,
     type: z.string().min(1),
+    label: z.string().optional(),
     configured: z.boolean(),
+    enabled: z.boolean().default(false),
+    active: z.boolean().default(false),
     requiredEnv: z.array(z.string()).default([]),
     missingEnv: z.array(z.string()).default([]),
     optionalEnv: z.array(z.string()).default([]),
-    baseUrl: z.string().nullable().optional()
+    apiKeyEnv: z.string().optional(),
+    baseUrl: z.string().nullable().optional(),
+    modelsEndpoint: z.string().nullable().optional(),
+    defaultModel: z.string().optional(),
+    contextSource: z.string().optional()
   }).passthrough())
 });
 
@@ -242,6 +251,13 @@ export const AppSettingsSchema = z.object({
   workspace: z.object({ name: z.string().min(1), language: z.string().min(1).default("pt-BR") }).passthrough(),
   persistence: z.object({ taskStateFormat: z.literal("yaml"), contextFormat: z.literal("markdown"), eventsFormat: z.literal("jsonl") }).passthrough(),
   runtime: z.object({ maxParallelTasks: z.number().int().positive(), agentTokens: z.record(z.string(), z.number().int().nonnegative()).default({}) }).passthrough(),
+  ai: z.object({
+    defaultProvider: z.string().default("openai"),
+    defaultModel: z.string().default(""),
+    defaultEffort: z.enum(["minimal", "low", "medium", "high"]).default("medium"),
+    enabledProviders: z.array(z.string()).default([]),
+    providers: z.record(z.string(), z.any()).default({})
+  }).passthrough().optional(),
   manualMove: z.object({ confirmWhenRunning: z.boolean().optional(), defaultInterruptPolicy: z.string().optional() }).passthrough(),
   ui: z.object({ theme: z.string().optional(), density: z.string().optional() }).passthrough(),
   safety: z.object({ requireApprovalForMerge: z.boolean().optional(), requireApprovalForDelete: z.boolean().optional(), allowShell: z.boolean().optional(), allowNetwork: z.boolean().optional() }).passthrough()
@@ -280,8 +296,8 @@ export const AgentSettingsSchema = z.object({
   label: z.string().optional(),
   provider: z.string().min(1),
   model: z.object({
-    provider: z.string().min(1).default("pi"),
-    name: z.string().min(1).default("default"),
+    provider: z.string().min(1).default("inherit"),
+    name: z.string().default(""),
     effort: z.enum(["minimal", "low", "medium", "high"]).default("medium"),
     temperature: z.number().optional()
   }).passthrough().optional(),
@@ -564,6 +580,7 @@ export const QuerySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("agent.logs"), taskId: z.string().min(1), limit: z.number().int().positive().max(200).default(50), cursor: z.string().optional(), agentId: z.string().optional(), runId: z.string().optional() }),
   z.object({ type: z.literal("chat.build"), taskId: z.string().min(1), persona: z.string().min(1).default("assistant") }),
   z.object({ type: z.literal("provider.discover") }),
+  z.object({ type: z.literal("provider.models"), providerId: z.string().min(1) }),
   z.object({ type: z.literal("why_not_running"), taskId: z.string().min(1) })
 ]);
 

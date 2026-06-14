@@ -14,6 +14,7 @@ test("core contracts expose canonical command, query and event names", () => {
   assert.equal(QUERY_TYPES.includes("agent.logs"), true);
   assert.equal(QUERY_TYPES.includes("chat.build"), true);
   assert.equal(QUERY_TYPES.includes("provider.discover"), true);
+  assert.equal(QUERY_TYPES.includes("provider.models"), true);
   assert.equal(QUERY_TYPES.includes("task.files"), true);
   assert.equal(QUERY_TYPES.includes("board.snapshot"), true);
   assert.equal(EVENT_TYPES.includes("task.recovered"), true);

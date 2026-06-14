@@ -176,13 +176,14 @@ function createWorkflowCommandHandlers(root) {
       taskId: command.taskId,
       role: "user",
       persona: returnRole,
+      displayPersona: "human",
       agentId: "user",
       text: command.text,
       commandId: command.commandId,
       disposition: command.replyToMessageId ? "reply" : "comment",
       replyToMessageId: command.replyToMessageId
     });
-    await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "task.comment", actor: "user", taskId: command.taskId, messageId: message.id, replyToMessageId: command.replyToMessageId || null, deferredForRunId: activeRunId, deferredForAgent: activeRunId ? current.routing?.currentAgent || null : null, deferredForRole: activeRunId ? current.routing?.currentRole || null : null });
+    await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "task.comment", actor: "user", displayPersona: "human", returnRole, taskId: command.taskId, messageId: message.id, replyToMessageId: command.replyToMessageId || null, deferredForRunId: activeRunId, deferredForAgent: activeRunId ? current.routing?.currentAgent || null : null, deferredForRole: activeRunId ? current.routing?.currentRole || null : null });
     if (current.column === "human_wait" && ["idle", "waiting_human"].includes(current.status)) {
       const task = await taskService.answerInput(command.taskId, command.text, returnRole);
       await releaseSemaphoreLeases({ root, taskId: command.taskId });
@@ -284,6 +285,7 @@ export async function handleQuery(input, root) {
       "task.comments": (query) => boardService.taskComments(query),
       "agent.logs": (query) => boardService.agentLogs(query),
       "provider.discover": () => boardService.providerDiscover(),
+      "provider.models": (query) => boardService.providerModels(query),
       "chat.build": (query) => boardService.chatBuild({ ...query, agentId: roleAgent(query.persona) }),
       "task.files": (query) => boardService.taskFiles(query.taskId),
       "task.detail": (query) => boardService.taskDetail(query.taskId),

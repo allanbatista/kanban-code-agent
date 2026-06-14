@@ -1,3 +1,5 @@
+import { DEFAULT_AI_SETTINGS } from "./providers.js";
+
 export const columns = [
   { id: "inbox", label: "Entrada", agent: "assistant", autoStart: false, wip: null },
   { id: "manager", label: "Manager", agent: "manager", role: "manager", autoStart: true, wip: 2 },
@@ -59,6 +61,7 @@ export const settings = {
   schema: "kanban-code-agent/settings@1",
   app: { boardId: "default", theme: "system", localFirst: true },
   persistence: { taskStateFormat: "yaml", contextFormat: "markdown", eventsFormat: "jsonl" },
+  ai: DEFAULT_AI_SETTINGS,
   runtime: { maxParallelTasks: 3, maxParallelMerges: 1, resumeSessions: true },
   worktrees: { createPerTask: true, subtaskFromParentFeature: true, mergeSubtaskIntoParent: true },
   projects: [{ id: "kanban-code-agent", label: "Kanban Code Agent", repo: process.cwd(), enabled: true }],

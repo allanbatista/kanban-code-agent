@@ -41,6 +41,7 @@ export type AppSettings = {
   storageRoot?: string;
   runtimeRoot?: string;
   workspace?: { name?: string; language?: string };
+  ai?: { defaultProvider?: string; defaultModel?: string; defaultEffort?: "minimal" | "low" | "medium" | "high"; enabledProviders?: string[]; providers?: Record<string, { defaultModel?: string; defaultEffort?: "minimal" | "low" | "medium" | "high" } | unknown> };
   runtime?: { maxParallelTasks?: number; agentTokens?: Record<string, number>; projectTokens?: Record<string, number> };
   ui?: { theme?: string; density?: string; showProgressOnCard?: boolean; showAgentOnCard?: boolean; showProjectTargetsOnCard?: boolean; taskTextScale?: number; taskFontFamily?: "serif" | "sans-serif" };
   safety?: { requireApprovalForMerge?: boolean; requireApprovalForDelete?: boolean; allowShell?: boolean; allowNetwork?: boolean };
@@ -60,12 +61,26 @@ export type AgentSettings = {
 
 export type ProviderStatus = {
   id: string;
+  label?: string;
   type: string;
   configured: boolean;
+  enabled?: boolean;
+  active?: boolean;
   requiredEnv: string[];
   missingEnv: string[];
   optionalEnv?: string[];
+  apiKeyEnv?: string;
   baseUrl?: string | null;
+  modelsEndpoint?: string | null;
+  defaultModel?: string;
+  contextSource?: string;
+};
+
+export type ProviderModel = {
+  id: string;
+  name?: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
 };
 
 export type BoardSnapshot = {
@@ -97,6 +112,7 @@ export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   persona?: string;
+  displayPersona?: string;
   agentId?: string;
   runId?: string;
   disposition?: string;
