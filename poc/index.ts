@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { dirname, join } from 'path';
+import { randomUUID } from 'crypto';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { basename, dirname, join, normalize, relative } from 'path';
 import {
     AuthStorage,
     createAgentSession,
@@ -19,6 +20,7 @@ type TaskEventType = 'TASK_COMPLETED';
 type ModelAlias = 'fast' | 'balanced' | 'deep';
 type EffortLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 type TaskChatRole = 'system' | 'user' | 'assistant' | 'event';
+type TaskMessageType = 'text' | 'artifact' | 'event';
 
 const MODEL_PROVIDER = 'openrouter';
 const DEFAULT_MODEL_ALIAS: ModelAlias = 'fast';
@@ -30,9 +32,9 @@ const ALLOWED_MODELS: Record<ModelAlias, { provider: string; modelId: string; de
 };
 const ALLOWED_EFFORTS: EffortLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 const DEFAULT_RUNTIME_CONFIG: Required<RuntimeConfig> = { model: DEFAULT_MODEL_ALIAS, effort: DEFAULT_EFFORT };
-const AVAILABLE_TOOLS = ['read', 'grep', 'find', 'ls', 'create_subtask'];
-const STATE_FILE = join(process.cwd(), '.swarm-state.json');
-const TASKS_DIR = join(process.cwd(), 'tasks');
+const AVAILABLE_TOOLS = ['read', 'grep', 'find', 'ls', 'create_subtask', 'create_artifact'];
+const STATE_FILE = '.swarm-state.json';
+const TASKS_DIR = 'tasks';
 const MAX_TASK_DEPTH = 4;
 const MAX_TASK_RETRIES = 2;
 
@@ -41,17 +43,31 @@ interface RuntimeConfig {
     effort?: EffortLevel;
 }
 
+interface AttachmentRef {
+    id: string;
+    originalName: string;
+    path: string;
+}
+
+interface TaskArtifact {
+    description: string;
+    file_type: string;
+    path: string;
+}
+
 interface TaskChatMessage {
     ts: string;
     role: TaskChatRole;
-    text: string;
+    type: TaskMessageType;
+    text?: string;
+    attachments?: AttachmentRef[];
+    artifacts?: TaskArtifact[];
     runtimeConfig?: RuntimeConfig;
 }
 
 interface TaskOptions {
     task_id: string;
-    name: string;
-    description: string;
+    title: string;
     assignedTo: string;
     parentId?: string;
     subtaskMode?: SubtaskMode;
@@ -62,11 +78,12 @@ interface SerializedTask {
     options: TaskOptions;
     status: TaskStatus;
     subtaskIds: string[];
-    result?: string;
+    resultMessages?: TaskChatMessage[];
     waitingForTaskIds: string[];
     processedEventIds: string[];
     piSessionFile?: string;
     chat?: TaskChatMessage[];
+    artifacts?: TaskArtifact[];
     retryCount?: number;
 }
 
@@ -75,7 +92,7 @@ interface TaskEvent {
     type: TaskEventType;
     taskId: string;
     parentId?: string;
-    result?: string;
+    messages?: TaskChatMessage[];
     processedByTaskIds: string[];
     createdAt: string;
 }
@@ -87,15 +104,13 @@ interface SwarmState {
 
 interface TaskMetadata {
     task_id: string;
-    name: string;
-    description: string;
+    title: string;
     assignedTo: string;
     parentId?: string;
     status: TaskStatus;
     depth: number;
     maxDepth: number;
     canCreateSubtasks: boolean;
-    taskDir: string;
     sessionFile: string;
     chatFile: string;
     runtimeConfig: Required<RuntimeConfig>;
@@ -104,11 +119,18 @@ interface TaskMetadata {
     retryCount: number;
     maxRetries: number;
     taskChat: TaskChatMessage[];
+    artifacts: TaskArtifact[];
+}
+
+interface AgentOutputMessage {
+    type: TaskMessageType;
+    text?: string;
+    artifacts?: TaskArtifact[];
 }
 
 interface AgentDecision {
     status: 'completed' | 'waiting' | 'retry';
-    result: string;
+    messages: AgentOutputMessage[];
     waitMode?: SubtaskMode;
     waitingForTaskIds?: string[];
     instructions?: string;
@@ -120,33 +142,45 @@ class Task {
     options: TaskOptions;
     status: TaskStatus = 'PENDING';
     subtaskIds: string[] = [];
-    result?: string;
+    resultMessages: TaskChatMessage[] = [];
     waitingForTaskIds: string[] = [];
     processedEventIds = new Set<string>();
     piSessionFile?: string;
     chat: TaskChatMessage[] = [];
+    artifacts: TaskArtifact[] = [];
     retryCount = 0;
 
-    constructor(options: TaskOptions) {
+    constructor(options: TaskOptions, seedInitialMessage = true, attachments: AttachmentRef[] = []) {
         this.options = options;
-        this.appendChat('user', `${options.name}\n\n${options.description}`, options.runtimeConfig);
+        if (seedInitialMessage) this.appendChat('user', 'text', options.title, options.runtimeConfig, attachments);
     }
 
     static fromSerialized(serialized: SerializedTask): Task {
-        const task = new Task(serialized.options);
+        const task = new Task(serialized.options, false);
         task.status = serialized.status;
         task.subtaskIds = serialized.subtaskIds;
-        task.result = serialized.result;
+        task.resultMessages = serialized.resultMessages ?? [];
         task.waitingForTaskIds = serialized.waitingForTaskIds;
         task.processedEventIds = new Set(serialized.processedEventIds);
         task.piSessionFile = serialized.piSessionFile;
         task.chat = loadTaskChat(serialized.options.task_id, serialized.chat);
+        task.artifacts = serialized.artifacts ?? [];
         task.retryCount = serialized.retryCount ?? 0;
         return task;
     }
 
-    appendChat(role: TaskChatRole, text: string, runtimeConfig?: RuntimeConfig) {
-        this.chat.push({ ts: new Date().toISOString(), role, text, runtimeConfig });
+    appendChat(role: TaskChatRole, type: TaskMessageType, text?: string, runtimeConfig?: RuntimeConfig, attachments?: AttachmentRef[], artifacts?: TaskArtifact[]): TaskChatMessage {
+        const message: TaskChatMessage = { ts: new Date().toISOString(), role, type };
+        if (text !== undefined) message.text = text;
+        if (runtimeConfig !== undefined) message.runtimeConfig = runtimeConfig;
+        if (attachments?.length) message.attachments = attachments;
+        if (artifacts?.length) message.artifacts = artifacts;
+        this.chat.push(message);
+        return message;
+    }
+
+    appendAgentMessages(messages: AgentOutputMessage[]): TaskChatMessage[] {
+        return messages.map(message => this.appendChat('assistant', message.type, message.text, undefined, undefined, message.artifacts));
     }
 
     serialize(): SerializedTask {
@@ -154,10 +188,11 @@ class Task {
             options: this.options,
             status: this.status,
             subtaskIds: this.subtaskIds,
-            result: this.result,
+            resultMessages: this.resultMessages,
             waitingForTaskIds: this.waitingForTaskIds,
             processedEventIds: [...this.processedEventIds],
             piSessionFile: this.piSessionFile,
+            artifacts: this.artifacts,
             retryCount: this.retryCount
         };
     }
@@ -211,6 +246,26 @@ function getTaskSessionFile(taskId: string): string {
 
 function getTaskChatFile(taskId: string): string {
     return join(getTaskDir(taskId), 'chat.jsonl');
+}
+
+function getTaskAttachmentsDir(taskId: string): string {
+    return join(getTaskDir(taskId), 'attachments');
+}
+
+function getTaskArtifactsDir(taskId: string): string {
+    return join(getTaskDir(taskId), 'artifacts');
+}
+
+function getTaskArtifactsFile(taskId: string): string {
+    return join(getTaskDir(taskId), 'artifacts.yaml');
+}
+
+function toTaskRelativePath(taskId: string, path: string): string {
+    return relative(getTaskDir(taskId), path) || '.';
+}
+
+function resolveTaskPath(taskId: string, path: string): string {
+    return normalize(join(getTaskDir(taskId), path));
 }
 
 function getTaskDepth(taskId: string): number {
@@ -276,20 +331,34 @@ function yamlBlock(value: string | undefined): string {
     return `|-\n${value.split('\n').map(line => `    ${line}`).join('\n')}`;
 }
 
-function serializeTaskYaml(task: Task): string {
+function serializeArtifactsYaml(artifacts: TaskArtifact[]): string {
+    if (artifacts.length === 0) return 'artifacts: []\n';
     return [
-        `task_id: ${quoteYaml(task.options.task_id)}`,
+        'artifacts:',
+        ...artifacts.flatMap(artifact => [
+            `  - description: ${quoteYaml(artifact.description)}`,
+            `    file_type: ${quoteYaml(artifact.file_type)}`,
+            `    path: ${quoteYaml(artifact.path)}`
+        ])
+    ].join('\n') + '\n';
+}
+
+function serializeTaskYaml(task: Task): string {
+    const taskId = task.options.task_id;
+    return [
+        `task_id: ${quoteYaml(taskId)}`,
         `parent_id: ${quoteYaml(task.options.parentId)}`,
         'metadata:',
-        `  depth: ${getTaskDepth(task.options.task_id)}`,
+        `  depth: ${getTaskDepth(taskId)}`,
         `  max_depth: ${MAX_TASK_DEPTH}`,
-        `  can_create_subtasks: ${getTaskDepth(task.options.task_id) < MAX_TASK_DEPTH}`,
-        `  task_dir: ${quoteYaml(getTaskDir(task.options.task_id))}`,
-        `  session_file: ${quoteYaml(task.piSessionFile ?? getTaskSessionFile(task.options.task_id))}`,
-        `  chat_file: ${quoteYaml(getTaskChatFile(task.options.task_id))}`,
+        `  can_create_subtasks: ${getTaskDepth(taskId) < MAX_TASK_DEPTH}`,
+        `  session_file: ${quoteYaml(task.piSessionFile ?? toTaskRelativePath(taskId, getTaskSessionFile(taskId)))}`,
+        `  chat_file: ${quoteYaml(toTaskRelativePath(taskId, getTaskChatFile(taskId)))}`,
+        `  attachments_dir: ${quoteYaml(toTaskRelativePath(taskId, getTaskAttachmentsDir(taskId)))}`,
+        `  artifacts_dir: ${quoteYaml(toTaskRelativePath(taskId, getTaskArtifactsDir(taskId)))}`,
+        `  artifacts_file: ${quoteYaml(toTaskRelativePath(taskId, getTaskArtifactsFile(taskId)))}`,
         'scope:',
-        `  name: ${quoteYaml(task.options.name)}`,
-        `  description: ${yamlBlock(task.options.description)}`,
+        `  title: ${quoteYaml(task.options.title)}`,
         `  assigned_to: ${quoteYaml(task.options.assignedTo)}`,
         'runtime:',
         `  model: ${quoteYaml(task.options.runtimeConfig?.model)}`,
@@ -302,9 +371,7 @@ function serializeTaskYaml(task: Task): string {
         yamlStringList('subtask_ids', task.subtaskIds),
         yamlStringList('waiting_for_task_ids', task.waitingForTaskIds),
         yamlStringList('processed_event_ids', [...task.processedEventIds]),
-        `  session_file: ${quoteYaml(task.piSessionFile)}`,
-        `  chat_file: ${quoteYaml(getTaskChatFile(task.options.task_id))}`,
-        `  result: ${yamlBlock(task.result)}`
+        `  result_messages: ${yamlBlock(task.resultMessages.map(message => `${message.role}/${message.type}: ${message.text ?? ''}`).join('\n'))}`
     ].join('\n') + '\n';
 }
 
@@ -312,10 +379,89 @@ function ensureTaskArtifacts(task: Task) {
     const taskDir = getTaskDir(task.options.task_id);
     const sessionFile = getTaskSessionFile(task.options.task_id);
     mkdirSync(taskDir, { recursive: true });
+    mkdirSync(getTaskAttachmentsDir(task.options.task_id), { recursive: true });
+    mkdirSync(getTaskArtifactsDir(task.options.task_id), { recursive: true });
     if (!existsSync(sessionFile)) writeFileSync(sessionFile, '');
-    task.piSessionFile ??= sessionFile;
+    task.piSessionFile ??= toTaskRelativePath(task.options.task_id, sessionFile);
     writeTaskChat(task);
     writeFileSync(join(taskDir, 'task.yml'), serializeTaskYaml(task));
+    writeFileSync(getTaskArtifactsFile(task.options.task_id), serializeArtifactsYaml(task.artifacts));
+}
+
+function copyTaskAttachments(taskId: string, attachmentPaths: string[]): AttachmentRef[] {
+    if (attachmentPaths.length === 0) return [];
+    const attachmentsDir = getTaskAttachmentsDir(taskId);
+    mkdirSync(attachmentsDir, { recursive: true });
+
+    return attachmentPaths.map(sourcePath => {
+        if (!existsSync(sourcePath)) throw new Error(`Attachment nao encontrado: ${sourcePath}`);
+        const originalName = basename(sourcePath);
+        const id = randomUUID();
+        const path = join(attachmentsDir, `${id}-${originalName}`);
+        copyFileSync(sourcePath, path);
+        return { id, originalName, path: toTaskRelativePath(taskId, path) };
+    });
+}
+
+function assertInsideDir(baseDir: string, targetPath: string) {
+    const normalizedBase = normalize(baseDir);
+    const normalizedTarget = normalize(targetPath);
+    const rel = relative(normalizedBase, normalizedTarget);
+    if (rel.startsWith('..') || rel === '' || rel.includes(`..${'/'}`) || rel.includes(`..\\`)) {
+        throw new Error(`Caminho invalido fora do diretorio permitido: ${targetPath}`);
+    }
+}
+
+function createTaskArtifact(task: Task, fileName: string, content: string, description: string, fileType: string): TaskArtifact {
+    const artifactsDir = getTaskArtifactsDir(task.options.task_id);
+    const path = join(artifactsDir, fileName);
+    assertInsideDir(artifactsDir, path);
+    if (existsSync(path)) throw new Error(`Artefato ja existe: ${path}`);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, content);
+
+    const artifact: TaskArtifact = { description, file_type: fileType, path: toTaskRelativePath(task.options.task_id, path) };
+    task.artifacts.push(artifact);
+    task.appendChat('assistant', 'artifact', description, undefined, undefined, [artifact]);
+    writeFileSync(getTaskArtifactsFile(task.options.task_id), serializeArtifactsYaml(task.artifacts));
+    writeTaskChat(task);
+    return artifact;
+}
+
+function formatChatMessage(message: TaskChatMessage): string {
+    const attachments = message.attachments?.length
+        ? ` attachments=${message.attachments.map(attachment => attachment.path).join(',')}`
+        : '';
+    const artifacts = message.artifacts?.length
+        ? ` artifacts=${message.artifacts.map(artifact => artifact.path).join(',')}`
+        : '';
+    return `- ${message.ts} ${message.role}/${message.type}: ${message.text ?? ''}${attachments}${artifacts}`;
+}
+
+function formatMessages(messages: TaskChatMessage[]): string {
+    return messages.map(message => `${message.role}/${message.type}: ${message.text ?? ''}`).join(' | ');
+}
+
+function normalizeAgentMessages(messages: unknown): AgentOutputMessage[] {
+    if (!Array.isArray(messages)) return [];
+    const normalized = messages
+        .map(message => {
+            if (!message || typeof message !== 'object') return undefined;
+            const candidate = message as Partial<AgentOutputMessage>;
+            if (candidate.type !== 'text' && candidate.type !== 'artifact' && candidate.type !== 'event') return undefined;
+            const output: AgentOutputMessage = { type: candidate.type };
+            if (typeof candidate.text === 'string') output.text = candidate.text;
+            if (Array.isArray(candidate.artifacts)) output.artifacts = candidate.artifacts.filter(isTaskArtifact);
+            return output;
+        })
+        .filter((message): message is AgentOutputMessage => Boolean(message));
+    return normalized.length ? normalized : [{ type: 'text', text: '' }];
+}
+
+function isTaskArtifact(value: unknown): value is TaskArtifact {
+    if (!value || typeof value !== 'object') return false;
+    const artifact = value as TaskArtifact;
+    return typeof artifact.description === 'string' && typeof artifact.file_type === 'string' && typeof artifact.path === 'string';
 }
 
 class PiAgentClient {
@@ -346,7 +492,10 @@ class PiAgentClient {
         await resourceLoader.reload();
         ensureTaskArtifacts(task);
 
-        const sessionManager = SessionManager.open(task.piSessionFile ?? getTaskSessionFile(task.options.task_id));
+        const sessionManager = SessionManager.open(resolveTaskPath(
+            task.options.task_id,
+            task.piSessionFile ?? toTaskRelativePath(task.options.task_id, getTaskSessionFile(task.options.task_id))
+        ));
 
         const { session } = await createAgentSession({
             cwd: this.cwd,
@@ -360,7 +509,7 @@ class PiAgentClient {
             settingsManager: this.settingsManager
         });
 
-        task.piSessionFile = session.sessionFile;
+        task.piSessionFile = toTaskRelativePath(task.options.task_id, session.sessionFile ?? getTaskSessionFile(task.options.task_id));
         orquestrator.persist();
 
         let output = '';
@@ -403,16 +552,17 @@ Use create_subtask apenas quando a tarefa realmente precisar de delegacao.
 Nunca crie subtasks quando task_metadata.canCreateSubtasks for false.
 Voce pode escolher model/effort para subtasks usando apenas os aliases e efforts permitidos em task_metadata.
 Se a propria task nao atingiu o objetivo, retorne status retry com novas instrucoes e opcionalmente model/effort.
+Quando precisar produzir arquivo, use create_artifact. Nunca escreva artefatos por outro caminho.
 Depois de criar subtasks, retorne JSON aguardando as task_ids criadas.
 Se ja houver subtasks listadas para o mesmo pedido, nao crie outra; use os resultados existentes.
 Para WAIT_ALL, aguarde todas antes de processar. Para ON_DEMAND, processe cada conclusao quando ela chegar.
 Responda sempre somente JSON no formato:
-{"status":"completed","result":"resultado final"}
+{"status":"completed","messages":[{"type":"text","text":"resultado final"}]}
 ou
-{"status":"waiting","waitMode":"WAIT_ALL|ON_DEMAND","waitingForTaskIds":["id"],"result":"motivo curto"}
+{"status":"waiting","waitMode":"WAIT_ALL|ON_DEMAND","waitingForTaskIds":["id"],"messages":[{"type":"text","text":"motivo curto"}]}
 ou
-{"status":"retry","instructions":"novas instrucoes objetivas","model":"fast|balanced|deep","effort":"off|minimal|low|medium|high|xhigh","result":"motivo curto"}
-Quando status for completed, result deve conter apenas a resposta final ao usuario, sem explicar o workflow.`,
+{"status":"retry","instructions":"novas instrucoes objetivas","model":"fast|balanced|deep","effort":"off|minimal|low|medium|high|xhigh","messages":[{"type":"text","text":"motivo curto"}]}
+Mensagens devem usar type text, artifact ou event. Quando status for completed, messages deve conter apenas a resposta final ao usuario, sem explicar o workflow.`,
             extensionFactories: [
                 (pi: ExtensionAPI) => {
                     pi.registerTool(defineTool({
@@ -426,8 +576,8 @@ Quando status for completed, result deve conter apenas a resposta final ao usuar
                                     type: 'string',
                                     description: `Agente destino. Disponiveis: ${orquestrator.getAgentNames().join(', ')}`
                                 },
-                                name: { type: 'string', description: 'Nome curto da subtask' },
-                                description: { type: 'string', description: 'Descricao objetiva da subtask' },
+                                title: { type: 'string', description: 'Titulo curto da subtask' },
+                                message: { type: 'string', description: 'Mensagem inicial objetiva da subtask' },
                                 model: {
                                     type: 'string',
                                     enum: Object.keys(ALLOWED_MODELS),
@@ -439,35 +589,65 @@ Quando status for completed, result deve conter apenas a resposta final ao usuar
                                     description: 'Effort opcional para a subtask.'
                                 }
                             },
-                            required: ['assignedTo', 'name', 'description'],
+                            required: ['assignedTo', 'title', 'message'],
                             additionalProperties: false
                         },
                         async execute(_toolCallId, params: Record<string, unknown>) {
                             const assignedTo = requireStringParam(params, 'assignedTo');
-                            const name = requireStringParam(params, 'name');
-                            const description = requireStringParam(params, 'description');
+                            const title = requireStringParam(params, 'title');
+                            const message = requireStringParam(params, 'message');
                             const runtimeConfig = normalizeRuntimeConfig({
                                 model: params.model === undefined ? undefined : parseModelAlias(String(params.model)),
                                 effort: params.effort === undefined ? undefined : parseEffortLevel(String(params.effort))
                             });
                             const existingSubtask = orquestrator.getSubtasks(task).find(subtask =>
                                 subtask.options.assignedTo === assignedTo &&
-                                subtask.options.name === name &&
-                                subtask.options.description === description &&
+                                subtask.options.title === title &&
+                                subtask.chat.some(chatMessage => chatMessage.role === 'user' && chatMessage.text === message) &&
                                 JSON.stringify(subtask.options.runtimeConfig ?? {}) === JSON.stringify(runtimeConfig ?? {})
                             );
 
                             const subtask = existingSubtask ?? orquestrator.spawnSubtask(
                                 task,
                                 assignedTo,
-                                name,
-                                description,
+                                title,
+                                message,
                                 runtimeConfig
                             );
 
                             return {
                                 content: [{ type: 'text', text: JSON.stringify(orquestrator.toMetadata(subtask)) }],
                                 details: orquestrator.toMetadata(subtask)
+                            };
+                        }
+                    }));
+                    pi.registerTool(defineTool({
+                        name: 'create_artifact',
+                        label: 'Create Artifact',
+                        description: 'Cria um arquivo em artifacts da task atual e registra no artifacts.yaml.',
+                        parameters: {
+                            type: 'object',
+                            properties: {
+                                fileName: { type: 'string', description: 'Nome do arquivo relativo ao diretorio artifacts da task.' },
+                                content: { type: 'string', description: 'Conteudo textual completo do artefato.' },
+                                description: { type: 'string', description: 'Descricao breve do artefato.' },
+                                file_type: { type: 'string', description: 'Tipo do arquivo, por exemplo markdown, json, text.' }
+                            },
+                            required: ['fileName', 'content', 'description', 'file_type'],
+                            additionalProperties: false
+                        },
+                        async execute(_toolCallId, params: Record<string, unknown>) {
+                            const artifact = createTaskArtifact(
+                                task,
+                                requireStringParam(params, 'fileName'),
+                                requireStringParam(params, 'content'),
+                                requireStringParam(params, 'description'),
+                                requireStringParam(params, 'file_type')
+                            );
+                            orquestrator.persist();
+                            return {
+                                content: [{ type: 'text', text: JSON.stringify(artifact) }],
+                                details: artifact
                             };
                         }
                     }));
@@ -478,22 +658,21 @@ Quando status for completed, result deve conter apenas a resposta final ao usuar
 
     private buildPrompt(task: Task, orquestrator: Orquestrator, triggerEvents: TaskEvent[]): string {
         for (const event of triggerEvents) {
-            task.appendChat('event', `task ${event.taskId} concluida: ${event.result ?? ''}`);
+            task.appendChat('event', 'event', `task ${event.taskId} concluida`, undefined, undefined, event.messages?.flatMap(message => message.artifacts ?? []));
         }
 
         const subtaskResults = orquestrator.getSubtasks(task)
-            .map(subtask => `- ${subtask.options.task_id} ${subtask.options.name} (${subtask.options.assignedTo}) [${subtask.status}]: ${subtask.result ?? 'sem resultado'}`)
+            .map(subtask => `- ${subtask.options.task_id} ${subtask.options.title} (${subtask.options.assignedTo}) [${subtask.status}]: ${formatMessages(subtask.resultMessages) || 'sem mensagens'}`)
             .join('\n');
         const eventSummary = triggerEvents.length
-            ? triggerEvents.map(event => `- ${event.event_id}: task ${event.taskId} concluida com resultado: ${event.result ?? ''}`).join('\n')
+            ? triggerEvents.map(event => `- ${event.event_id}: task ${event.taskId} concluida com mensagens: ${formatMessages(event.messages ?? [])}`).join('\n')
             : 'inicio ou retomada sem novo evento.';
 
         return [
-            `Tarefa: ${task.options.name}`,
-            `Descrição: ${task.options.description}`,
+            `Tarefa: ${task.options.title}`,
             `Eventos recebidos:\n${eventSummary}`,
             subtaskResults ? `Subtasks:\n${subtaskResults}` : 'Sem subtasks.',
-            `Task chat:\n${task.chat.map(message => `- ${message.ts} ${message.role}: ${message.text}`).join('\n')}`,
+            `Task chat:\n${task.chat.map(formatChatMessage).join('\n')}`,
             task.piSessionFile ? `Sessao Pi persistida: ${task.piSessionFile}` : 'Sem sessao Pi persistida.',
             'Continue a partir do historico anterior da sessao, decida o proximo passo e retorne somente o JSON estruturado.'
         ].join('\n\n');
@@ -521,14 +700,15 @@ class Orquestrator extends EventEmitter {
         this.loadState();
     }
 
-    addTask(name: string, description: string, agentName: string, runtimeConfig?: RuntimeConfig): Task {
+    addTask(title: string, agentName: string, runtimeConfig?: RuntimeConfig, attachmentPaths: string[] = []): Task {
+        const taskId = this.createTaskId();
+        const attachments = copyTaskAttachments(taskId, attachmentPaths);
         const task = new Task({
-            task_id: this.createTaskId(),
-            name,
-            description,
+            task_id: taskId,
+            title,
             assignedTo: agentName,
             runtimeConfig: normalizeRuntimeConfig(runtimeConfig)
-        });
+        }, true, attachments);
         this.tasks.set(task.options.task_id, task);
         this.rootTaskIds.push(task.options.task_id);
         this.persist();
@@ -536,7 +716,7 @@ class Orquestrator extends EventEmitter {
         return task;
     }
 
-    spawnSubtask(parentTask: Task, agentName: string, name: string, description: string, runtimeConfig?: RuntimeConfig): Task {
+    spawnSubtask(parentTask: Task, agentName: string, title: string, message: string, runtimeConfig?: RuntimeConfig): Task {
         if (!this.agents.has(agentName)) throw new Error(`Agente ${agentName} não encontrado`);
         if (getTaskDepth(parentTask.options.task_id) >= MAX_TASK_DEPTH) {
             throw new Error(`Depth maximo ${MAX_TASK_DEPTH} atingido para task ${parentTask.options.task_id}`);
@@ -544,17 +724,17 @@ class Orquestrator extends EventEmitter {
 
         const subtask = new Task({
             task_id: this.createSubtaskId(parentTask),
-            name,
-            description,
+            title,
             assignedTo: agentName,
             parentId: parentTask.options.task_id,
             runtimeConfig: normalizeRuntimeConfig(runtimeConfig)
-        });
+        }, true);
+        subtask.chat[0].text = message;
 
         parentTask.subtaskIds.push(subtask.options.task_id);
         this.tasks.set(subtask.options.task_id, subtask);
         this.persist();
-        console.log(`   ↳ [SUBTASK CRIADA] "${name}" designada para [${agentName}]`);
+        console.log(`   ↳ [SUBTASK CRIADA] "${title}" designada para [${agentName}]`);
         this.scheduleTask(subtask.options.task_id);
         return subtask;
     }
@@ -592,7 +772,7 @@ class Orquestrator extends EventEmitter {
         this.runningTaskIds.add(taskId);
         task.status = 'RUNNING';
         this.persist();
-        console.log(`\n🧡 [${agent.name}] Processando: "${task.options.name}" (Status: RUNNING)`);
+        console.log(`\n[${agent.name}] Processando: "${task.options.title}" (Status: RUNNING)`);
 
         try {
             const output = await this.pi.run(agent, task, this, triggerEvents);
@@ -600,24 +780,23 @@ class Orquestrator extends EventEmitter {
 
             if (decision.status === 'retry') {
                 if (task.retryCount >= MAX_TASK_RETRIES) {
-                    task.result = decision.result || `Retry maximo atingido: ${decision.instructions ?? ''}`;
+                    task.resultMessages = task.appendAgentMessages(decision.messages.length ? decision.messages : [{ type: 'text', text: `Retry maximo atingido: ${decision.instructions ?? ''}` }]);
                     task.status = 'FAILED';
                     this.markEventsProcessed(task, triggerEvents);
                     this.persist();
-                    console.log(`[${agent.name}] Falhou apos ${task.retryCount} retries: "${task.options.name}"`);
+                    console.log(`[${agent.name}] Falhou apos ${task.retryCount} retries: "${task.options.title}"`);
                     return;
                 }
 
                 const runtimeConfig = normalizeRuntimeConfig({ model: decision.model, effort: decision.effort });
                 task.retryCount += 1;
                 task.status = 'PENDING';
-                task.result = decision.result;
                 task.options.runtimeConfig = { ...(task.options.runtimeConfig ?? {}), ...(runtimeConfig ?? {}) };
-                task.appendChat('assistant', decision.result || 'retry solicitado');
-                task.appendChat('user', decision.instructions ?? 'Reexecute a task com a configuracao atualizada.', runtimeConfig);
+                task.resultMessages = task.appendAgentMessages(decision.messages);
+                task.appendChat('user', 'text', decision.instructions ?? 'Reexecute a task com a configuracao atualizada.', runtimeConfig);
                 this.markEventsProcessed(task, triggerEvents);
                 this.persist();
-                console.log(`[${agent.name}] Retry ${task.retryCount}/${MAX_TASK_RETRIES}: "${task.options.name}"`);
+                console.log(`[${agent.name}] Retry ${task.retryCount}/${MAX_TASK_RETRIES}: "${task.options.title}"`);
                 this.scheduleTask(task.options.task_id);
                 return;
             }
@@ -627,8 +806,7 @@ class Orquestrator extends EventEmitter {
                 task.waitingForTaskIds = decision.waitingForTaskIds?.length
                     ? decision.waitingForTaskIds
                     : this.getSubtasks(task).filter(st => st.status !== 'COMPLETED').map(st => st.options.task_id);
-                task.result = decision.result;
-                task.appendChat('assistant', decision.result);
+                task.resultMessages = task.appendAgentMessages(decision.messages);
                 task.status = 'WAITING';
                 this.markEventsProcessed(task, triggerEvents);
                 this.persist();
@@ -636,13 +814,12 @@ class Orquestrator extends EventEmitter {
                 return;
             }
 
-            task.result = decision.result;
-            task.appendChat('assistant', decision.result);
+            task.resultMessages = task.appendAgentMessages(decision.messages);
             task.status = 'COMPLETED';
             this.markEventsProcessed(task, triggerEvents);
             this.recordCompletionEvent(task);
             this.persist();
-            console.log(`✅ [${agent.name}] Concluiu: "${task.options.name}" (Status: COMPLETED)`);
+            console.log(`[${agent.name}] Concluiu: "${task.options.title}" (Status: COMPLETED)`);
         } finally {
             this.runningTaskIds.delete(taskId);
             this.emit('state:changed');
@@ -668,23 +845,22 @@ class Orquestrator extends EventEmitter {
         const agent = this.agents.get(task.options.assignedTo);
         return {
             task_id: task.options.task_id,
-            name: task.options.name,
-            description: task.options.description,
+            title: task.options.title,
             assignedTo: task.options.assignedTo,
             parentId: task.options.parentId,
             status: task.status,
             depth: getTaskDepth(task.options.task_id),
             maxDepth: MAX_TASK_DEPTH,
             canCreateSubtasks: getTaskDepth(task.options.task_id) < MAX_TASK_DEPTH,
-            taskDir: getTaskDir(task.options.task_id),
-            sessionFile: task.piSessionFile ?? getTaskSessionFile(task.options.task_id),
-            chatFile: getTaskChatFile(task.options.task_id),
+            sessionFile: task.piSessionFile ?? toTaskRelativePath(task.options.task_id, getTaskSessionFile(task.options.task_id)),
+            chatFile: toTaskRelativePath(task.options.task_id, getTaskChatFile(task.options.task_id)),
             runtimeConfig: this.resolveRuntimeConfig(task, agent),
             allowedModels: ALLOWED_MODELS,
             allowedEfforts: ALLOWED_EFFORTS,
             retryCount: task.retryCount,
             maxRetries: MAX_TASK_RETRIES,
-            taskChat: task.chat
+            taskChat: task.chat,
+            artifacts: task.artifacts
         };
     }
 
@@ -760,7 +936,7 @@ class Orquestrator extends EventEmitter {
             type: 'TASK_COMPLETED',
             taskId: task.options.task_id,
             parentId: task.options.parentId,
-            result: task.result,
+            messages: task.resultMessages,
             processedByTaskIds: [],
             createdAt: new Date().toISOString()
         };
@@ -789,7 +965,7 @@ class Orquestrator extends EventEmitter {
 
     private parseDecision(output: string): AgentDecision {
         const jsonMatch = output.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) return { status: 'completed', result: output };
+        if (!jsonMatch) return { status: 'completed', messages: [{ type: 'text', text: output }] };
 
         try {
             const parsed = JSON.parse(jsonMatch[0]) as Partial<AgentDecision>;
@@ -798,7 +974,7 @@ class Orquestrator extends EventEmitter {
                 if (parsed.effort !== undefined && !isEffortLevel(parsed.effort)) throw new Error(`Effort invalido: ${parsed.effort}`);
                 return {
                     status: 'retry',
-                    result: parsed.result ?? '',
+                    messages: normalizeAgentMessages(parsed.messages),
                     instructions: parsed.instructions ?? '',
                     model: isModelAlias(parsed.model) ? parsed.model : undefined,
                     effort: isEffortLevel(parsed.effort) ? parsed.effort : undefined
@@ -807,14 +983,14 @@ class Orquestrator extends EventEmitter {
             if (parsed.status === 'waiting') {
                 return {
                     status: 'waiting',
-                    result: parsed.result ?? '',
+                    messages: normalizeAgentMessages(parsed.messages),
                     waitMode: parsed.waitMode === 'ON_DEMAND' ? 'ON_DEMAND' : 'WAIT_ALL',
                     waitingForTaskIds: parsed.waitingForTaskIds ?? []
                 };
             }
-            return { status: 'completed', result: parsed.result ?? output };
+            return { status: 'completed', messages: normalizeAgentMessages(parsed.messages) };
         } catch {
-            return { status: 'completed', result: output };
+            return { status: 'completed', messages: [{ type: 'text', text: output }] };
         }
     }
 
@@ -832,17 +1008,17 @@ function createAgents(): Agent[] {
     ];
 }
 
-async function runNormal(requestedTask: string, runtimeConfig?: RuntimeConfig) {
+async function runNormal(requestedTask: string, runtimeConfig?: RuntimeConfig, attachmentPaths: string[] = []) {
     const orquestrator = new Orquestrator(createAgents(), { resetState: true });
-    const mainTask = orquestrator.addTask(requestedTask, requestedTask, 'Manager', runtimeConfig);
+    const mainTask = orquestrator.addTask(requestedTask, 'Manager', runtimeConfig, attachmentPaths);
     await orquestrator.waitUntilSettled(mainTask);
     return mainTask;
 }
 
-async function runRestartSimulation(requestedTask: string, runtimeConfig?: RuntimeConfig) {
+async function runRestartSimulation(requestedTask: string, runtimeConfig?: RuntimeConfig, attachmentPaths: string[] = []) {
     console.log('[SIM] Fase 1: executando ate suspender e persistir estado.');
     const firstRun = new Orquestrator(createAgents(), { resetState: true, stopWhenWaiting: true });
-    const firstTask = firstRun.addTask(requestedTask, requestedTask, 'Manager', runtimeConfig);
+    const firstTask = firstRun.addTask(requestedTask, 'Manager', runtimeConfig, attachmentPaths);
     await firstRun.waitUntilSettled(firstTask);
     console.log(`[SIM] Crash simulado. Estado persistido em ${STATE_FILE}`);
 
@@ -855,8 +1031,9 @@ async function runRestartSimulation(requestedTask: string, runtimeConfig?: Runti
     return resumedTask;
 }
 
-function parseCliArgs(args: string[]): { requestedTask: string; simulateRestart: boolean; runtimeConfig?: RuntimeConfig } {
+function parseCliArgs(args: string[]): { requestedTask: string; simulateRestart: boolean; runtimeConfig?: RuntimeConfig; attachmentPaths: string[] } {
     const taskParts: string[] = [];
+    const attachmentPaths: string[] = [];
     const runtimeConfig: RuntimeConfig = {};
     let simulateRestart = false;
 
@@ -882,13 +1059,24 @@ function parseCliArgs(args: string[]): { requestedTask: string; simulateRestart:
             runtimeConfig.effort = parseEffortLevel(arg.slice('--effort='.length));
             continue;
         }
+        if (arg === '--attach') {
+            const attachmentPath = args[++index];
+            if (!attachmentPath) throw new Error('--attach exige um caminho');
+            attachmentPaths.push(attachmentPath);
+            continue;
+        }
+        if (arg.startsWith('--attach=')) {
+            attachmentPaths.push(arg.slice('--attach='.length));
+            continue;
+        }
         taskParts.push(arg);
     }
 
     return {
         requestedTask: taskParts.join(' ') || 'execute em subtasks diferentes no agent genérico. como se fala "oi" em japones, coreano, frances e ingles',
         simulateRestart,
-        runtimeConfig: normalizeRuntimeConfig(runtimeConfig)
+        runtimeConfig: normalizeRuntimeConfig(runtimeConfig),
+        attachmentPaths
     };
 }
 
@@ -909,7 +1097,7 @@ function requireStringParam(params: Record<string, unknown>, key: string): strin
 }
 
 async function main() {
-    const { requestedTask, simulateRestart, runtimeConfig } = parseCliArgs(process.argv.slice(2));
+    const { requestedTask, simulateRestart, runtimeConfig, attachmentPaths } = parseCliArgs(process.argv.slice(2));
     const effectiveRootConfig = mergeRuntimeConfig(createAgents().find(agent => agent.name === 'Manager')?.runtimeConfig, runtimeConfig);
     const rootModel = ALLOWED_MODELS[effectiveRootConfig.model];
 
@@ -918,13 +1106,13 @@ async function main() {
     console.log(`State: ${STATE_FILE}`);
 
     const mainTask = simulateRestart
-        ? await runRestartSimulation(requestedTask, runtimeConfig)
-        : await runNormal(requestedTask, runtimeConfig);
+        ? await runRestartSimulation(requestedTask, runtimeConfig, attachmentPaths)
+        : await runNormal(requestedTask, runtimeConfig, attachmentPaths);
 
     console.log('\n================== SWARM FINISHED =================');
     console.log('Status Final da Task Principal:', mainTask.status);
     console.log('Sessao Pi da Task Principal:', mainTask.piSessionFile);
-    console.log('Resultado Final:', mainTask.result);
+    console.log('Mensagens Finais:', formatMessages(mainTask.resultMessages));
 }
 
 main();
