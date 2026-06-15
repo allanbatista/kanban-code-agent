@@ -5,7 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.js",
-    "./scheduler": "./src/scheduler.js"
+    "./reconciler": "./src/reconciler.js"
   },
   "dependencies": {
     "@kca/agent-runtime": "workspace:*",

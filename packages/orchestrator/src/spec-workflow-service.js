@@ -137,15 +137,19 @@ function approvedAcceptance(summary) {
   ].join("\n");
 }
 
-function specHasReadyShape(spec) {
+function specHasReadyShape(spec, { approved: gateApproved = false } = {}) {
   const text = String(spec || "");
+  const normalized = text.replace(/\*\*/g, "");
+  const approved = gateApproved || /^status:\s*approved\b/im.test(normalized);
+  const noBlockingQuestions = /(open questions?|blocking questions?|quest(?:ões|oes) de bloqueio|bloqueio|d[uú]vidas?|perguntas?)[\s\S]{0,160}(none|nenhum|nenhuma|resolved|resolvid)/i.test(text);
+  const hasPlaceholder = /(^|\n)\s*- \[ \].*(\bTBD\b|\bTODO\b|a definir)|\bTBD\b|\bTODO\b|\?\?/i.test(text);
   return text.length >= 80
     && /(acceptance|crit[eé]rios?|criterios?|AC-?\d)/i.test(text)
-    && /(scope|escopo)/i.test(text)
-    && /(depend[eê]nc|dependenc)/i.test(text)
-    && /(decision|decis|decis[aã]o|decisões|decisoes)/i.test(text)
-    && !/(^|\n)\s*(- \[ \].*(TBD|TODO|a definir)|TBD|TODO|\?\?)/i.test(text)
-    && /(open questions?|blocking questions?|d[uú]vidas?|perguntas?).*(none|nenhum|nenhuma|resolved|resolvid)/i.test(text);
+    && /(scope|escopo|deliverables?|entreg[aá]veis?|objective|objetivo|problem statement)/i.test(text)
+    && /(depend[eê]nc|dependenc|constraints?|restri[cç][oõ]es?)/i.test(text)
+    && (approved || /(decision|decis|decis[aã]o|decisões|decisoes)/i.test(text))
+    && !hasPlaceholder
+    && (approved || noBlockingQuestions);
 }
 
 function validationCriteriaLines(criteria = [], evidence = []) {
@@ -160,9 +164,9 @@ function validationCriteriaLines(criteria = [], evidence = []) {
 export async function createTaskSpecWorkflow(command, current, root) {
   await writeTaskFile(command.taskId, ARTIFACTS.taskSpec, command.content, root);
   let workflow = normalizeWorkflow(current);
-  workflow = withGate(workflow, "spec", gate("pending", `${command.kind} spec created; awaiting Product approval.`, [ARTIFACTS.taskSpec], "product"));
-  const task = TaskSchema.parse(await updateTask(command.taskId, routePatch(current, "product", {
-    workflow: { ...workflow, phase: "spec", currentRole: "product", boardColumn: "product" }
+  workflow = withGate(workflow, "spec", gate("pending", `${command.kind} spec created; awaiting Manager approval.`, [ARTIFACTS.taskSpec], "product"));
+  const task = TaskSchema.parse(await updateTask(command.taskId, routePatch(current, "manager", {
+    workflow: { ...workflow, phase: "spec", currentRole: "manager", boardColumn: "manager" }
   }), root, "workflow.spec.created"));
   await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "workflow.spec.created", actor: "product", taskId: command.taskId, runId: command.runId, kind: command.kind, artifact: ARTIFACTS.taskSpec });
   return { ok: true, commandId: command.commandId, task, artifactPath: ARTIFACTS.taskSpec };
@@ -172,8 +176,8 @@ export async function updateTaskSpecWorkflow(command, current, root) {
   await writeTaskFile(command.taskId, ARTIFACTS.taskSpec, command.content, root);
   let workflow = normalizeWorkflow(current);
   workflow = withGate(workflow, "spec", gate("pending", command.reason || "Spec updated; approval required.", [ARTIFACTS.taskSpec], "product"));
-  const task = TaskSchema.parse(await updateTask(command.taskId, routePatch(current, "product", {
-    workflow: { ...workflow, phase: "spec", currentRole: "product", boardColumn: "product" }
+  const task = TaskSchema.parse(await updateTask(command.taskId, routePatch(current, "manager", {
+    workflow: { ...workflow, phase: "spec", currentRole: "manager", boardColumn: "manager" }
   }), root, "workflow.spec.updated"));
   await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "workflow.spec.updated", actor: "product", taskId: command.taskId, runId: command.runId, reason: command.reason || "", artifact: ARTIFACTS.taskSpec });
   return { ok: true, commandId: command.commandId, task, artifactPath: ARTIFACTS.taskSpec };
@@ -182,6 +186,9 @@ export async function updateTaskSpecWorkflow(command, current, root) {
 export async function approveTaskSpecWorkflow(command, current, root) {
   let workflow = normalizeWorkflow(current);
   workflow = withGate(workflow, "spec", gate("passed", command.summary, [ARTIFACTS.taskSpec], command.approvedByRole));
+  if (workflow.gates.definitionOfReady.status !== "passed") {
+    workflow = withGate(workflow, "definitionOfReady", gate("pending", "Spec approved; DoR must be rerun.", [ARTIFACTS.taskSpec], command.approvedByRole));
+  }
   await writeTaskFile(command.taskId, ARTIFACTS.acceptance, approvedAcceptance(command.summary), root);
   const task = TaskSchema.parse(await updateTask(command.taskId, routePatch(current, "manager", {
     workflow: { ...workflow, phase: "planning", currentRole: "manager", boardColumn: "manager" }
@@ -352,15 +359,16 @@ export async function runDefinitionOfReadyGateWorkflow(command, current, root) {
   const workflow = normalizeWorkflow(current);
   const files = await taskFilesSet(root, command.taskId);
   const missing = [];
-  if (workflow.gates.spec.status !== "passed" || !specHasReadyShape(spec)) missing.push("approved ready task-spec.md");
+  if (workflow.gates.spec.status !== "passed" || !specHasReadyShape(spec, { approved: workflow.gates.spec.status === "passed" })) missing.push("approved ready task-spec.md");
   if (requiresTechnicalPlan(current) && !files.has(ARTIFACTS.technicalPlan)) missing.push("technical-plan.md");
   const passed = missing.length === 0;
   const reason = passed
     ? "Approved spec and required planning evidence are ready for execution."
     : `DoR missing: ${missing.join(", ")}.`;
   const next = withGate(workflow, "definitionOfReady", gate(passed ? "passed" : "failed", reason, [ARTIFACTS.taskSpec, ARTIFACTS.technicalPlan], "manager"));
-  const task = TaskSchema.parse(await updateTask(command.taskId, routePatch(current, passed ? "engineering" : "product", {
-    workflow: { ...next, phase: passed ? "execution" : "spec", currentRole: passed ? "engineering" : "product", boardColumn: passed ? "engineering" : "product" }
+  const passedRole = current.kind === "master" ? "manager" : "engineering";
+  const task = TaskSchema.parse(await updateTask(command.taskId, routePatch(current, passed ? passedRole : "product", {
+    workflow: { ...next, phase: passed ? phaseForRole(passedRole) : "spec", currentRole: passed ? passedRole : "product", boardColumn: passed ? roleColumn(passedRole) : "product" }
   }), root, passed ? "gate.passed" : "gate.failed"));
   await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "workflow.dor_checked", actor: "manager", taskId: command.taskId, runId: command.runId, gate: "definitionOfReady", status: passed ? "passed" : "failed", reason });
   return { ok: passed, commandId: command.commandId, task, gate: task.workflow.gates.definitionOfReady };

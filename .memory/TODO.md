@@ -53,3 +53,23 @@ The agent usage model implementation passed focused typecheck, syntax, adapter u
 # [medium] Complete final workflow P2 production hardening
 
 P1 workflow settings, operational UI panels, formal planning/delivery artifacts, and stricter gates are implemented. Remaining P2 hardening from `final-workflow-definition.output.md`: real per-task sandbox enforcement, complete retry/timeout resume rehydration, current-state validation with browser/API/logs, formal Documentation Agent, adversarial review for high-risk tasks, operational docs, and throughput/failure/blocked/DoD metrics. Next step: split these into implementation plans and start with real sandbox enforcement.
+
+# [high] Align implementation with recursive swarm workflow
+
+`agent-workflow.md` defines Task/Subtask as one recursive entity with manager/assignee ownership, waiting review/response states, recursive approval unwinding, and hard max-depth control. Current implementation only partially supports this through `worktree.parentTaskId`, `subtasks.yaml`, queued/running/waiting/done statuses, and scheduler semaphores. Missing work: first-class parent/depth fields, Waiting Review/Waiting Response semantics, per-subtask manager approval/rejection, recursive review unwinding, and hard max-depth/fan-out enforcement. Next step: design schema/status migration and gate changes before implementation.
+
+# [high] Complete real DeepSeek recursive swarm validation
+
+Implementation and deterministic orchestration validation passed, but the real DeepSeek execution using provider `deepseek`, model `deepseek-v4-flash`, and minimal effort did not return from the first scheduler tick within the required 5 minute validation window. Next step: inspect the OpenAI-compatible request/stream timeout path for DeepSeek, add a hard per-agent prompt timeout, then rerun the exact 4-subtask validation task end to end.
+
+# [medium] Re-run broad orchestrator pattern validation
+
+Focused recursive swarm unit tests passed individually, but the broad `rtk pnpm exec node --test --test-name-pattern "decompose|subtask|comment|interrupt|pause|cancel|review" tests/unit/orchestrator.test.js` run was canceled after hanging at the file runner level. Next step: split or mark slow tests, then rerun the broad command required by the feature plan.
+
+# [high] Finish DeepSeek recursive swarm review loop
+
+Real DeepSeek validation with provider `deepseek`, model `deepseek-v4-flash`, and minimal effort reached Product/spec creation and four child subtasks in `waiting_review`, but the parent entered a Manager/Product confirmation loop and the run hit the 310s external timeout before reviewing children and completing the parent. Next step: stop recursive scheduler drains from re-entering Product/Manager loops during active tool execution or add a hard end-to-end validation driver, then rerun the exact 4-subtask validation within 5 minutes.
+
+# [medium] Triage current full orchestrator suite failures
+
+`rtk pnpm exec node --test tests/unit/orchestrator.test.js` finished with 62 passing and 11 failing after the recursive swarm fixes. Focused tests for the touched paths pass, but full-suite regression coverage remains blocked by assistant-model expectation failures: generated title mismatch, assistant chat action shape/routing mismatches, file-lock blocker text mismatch, invalid DAG reroute expectation, fast research artifact missing, persona handoff route mismatch, and auto-compact evidence missing. Next step: triage those assistant workflow tests separately and rerun the full orchestrator suite.

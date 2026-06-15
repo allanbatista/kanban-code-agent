@@ -2,11 +2,10 @@ import { logStep } from "@kca/core/log";
 import { parseCommand } from "@kca/schemas";
 
 export class CommandBus {
-  constructor({ handlers = {}, resultStore, eventBus, schedulerDrain } = {}) {
+  constructor({ handlers = {}, resultStore, eventBus } = {}) {
     this.handlers = new Map(Object.entries(handlers));
     this.resultStore = resultStore;
     this.eventBus = eventBus;
-    this.schedulerDrain = schedulerDrain;
   }
 
   register(type, handler) {
@@ -24,10 +23,10 @@ export class CommandBus {
     }
     const handler = this.handlers.get(command.type);
     if (!handler) throw new Error(`Unsupported command: ${command.type}`);
-    let result = await handler(command, context);
-    await this.eventBus?.publish?.({ type: "CommandExecuted", commandType: command.type, commandId: command.commandId, result });
-    if (result && typeof this.schedulerDrain === "function") result = await this.schedulerDrain(command, result, context);
+    const result = await handler(command, context);
     logStep("command-bus", "command.done", { type: command.type, commandId: command.commandId, ok: result?.ok ?? true });
-    return this.resultStore?.put ? this.resultStore.put(command.commandId, result) : result;
+    const stored = this.resultStore?.put ? await this.resultStore.put(command.commandId, result) : result;
+    await this.eventBus?.publish?.({ type: "command.executed", commandType: command.type, commandId: command.commandId, result: stored });
+    return stored;
   }
 }

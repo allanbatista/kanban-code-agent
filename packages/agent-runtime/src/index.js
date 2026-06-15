@@ -1,8 +1,8 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { appendJsonl, paths, readAgent, readSettings, readSkill, writeAtomic } from "@kca/fsdb";
-import { compactTaskPersonaChat, readChatHistory } from "@kca/fsdb/chat-store";
+import { appendJsonl, listTasks, paths, readAgent, readSettings, readSkill, writeAtomic } from "@kca/fsdb";
+import { compactTaskPersonaChat, readChatHistory, readTaskComments } from "@kca/fsdb/chat-store";
 import { buildTaskAgentTools, startOpenAICompatibleSession, startPiSession } from "@kca/pi-adapter";
 import { logStep } from "@kca/core/log";
 import { AGENT_RESPONSE_POLICY } from "@kca/core/agent-response-policy";
@@ -16,7 +16,7 @@ export function createRunId(taskId, agentId) {
 function toolsForAgent(agentConfig) {
   const tools = agentConfig?.tools;
   const resolved = Array.isArray(tools) ? tools : [...(tools?.builtin || []), ...(tools?.custom || [])];
-  const required = ["wait_for_persona", "delegate_task", "spawn_subtasks"];
+  const required = ["wait_for_persona", "spawn_subtasks", "review_subtask", "answer_subtask_question"];
   return [...new Set([...resolved, ...required])];
 }
 
@@ -67,6 +67,10 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
     validationReport = await readFile(join(p.tasks, task.id, "validation-report.md"), "utf8");
   } catch {}
   const messages = await readChatHistory(root, { scope: "task", taskId: task.id, persona, limit: 200 });
+  const visibleMessages = await readTaskComments(root, { taskId: task.id, limit: 200 }).catch(() => messages);
+  const directSubtasks = (await listTasks(root))
+    .filter((item) => (item.parentTaskId || item.worktree?.parentTaskId) === task.id)
+    .map((item) => ({ id: item.id, title: item.title, status: item.status, column: item.column, role: item.routing?.currentRole || item.routing?.currentAgent || null }));
   const tools = toolsForAgent(agentConfig).map((name) => ({ name }));
   const settings = await readSettings(root);
   const resolvedModel = resolveProviderModel({ settings, agentConfig, role, provider, model, effort });
@@ -95,9 +99,13 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
       `title: ${task.title}`,
       `column: ${task.column}`,
       `status: ${task.status}`,
+      `parentTaskId: ${task.parentTaskId || task.worktree?.parentTaskId || ""}`,
+      `rootTaskId: ${task.rootTaskId || task.worktree?.mainTaskId || task.id}`,
+      `depth: ${Number.isInteger(task.depth) ? task.depth : task.parentTaskId || task.worktree?.parentTaskId ? 1 : 0}`,
       `persona: ${persona}`,
       `agent: ${agentId}`,
       `run: ${task.agent?.currentRunId || ""}`,
+      "recursive_rule: if this task has parentTaskId, never ask the human directly; call request_user_input only to raise the question to the parent manager, and wait for answer_subtask_question to resume.",
       "allowed_filesystem_scope: task worktree only",
       "description:",
       description,
@@ -107,6 +115,8 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
       planning,
       "workflow:",
       JSON.stringify(task.workflow || {}),
+      "direct_subtasks:",
+      JSON.stringify(directSubtasks),
       "task-spec:",
       taskSpec,
       "validation-report:",
@@ -118,7 +128,7 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
   };
   const toolcalls = messages.flatMap((message) => [...(message.toolCalls || []), ...(message.toolResults || [])]);
   const sourceRefs = [`tasks/${task.id}/task.yaml`, `tasks/${task.id}/description.md`, `tasks/${task.id}/task-spec.md`, `tasks/${task.id}/acceptance.md`, `tasks/${task.id}/validation-report.md`, `tasks/${task.id}/planning.yaml`, `tasks/${task.id}/chats/${persona}/active.jsonl`];
-  const hashInput = JSON.stringify({ system, taskContext, messages, toolcalls, tools, providerId, modelName, modelEffort });
+  const hashInput = JSON.stringify({ system, taskContext, messages, visibleMessages, directSubtasks, toolcalls, tools, providerId, modelName, modelEffort });
   const result = {
     schema: "kanban-code-agent/agent-chat-build@1",
     chatKind: "task_execution",
@@ -132,6 +142,8 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
     system,
     task: taskContext,
     messages,
+    visibleMessages,
+    directSubtasks,
     toolcalls,
     tools,
     sourceRefs,
@@ -210,7 +222,7 @@ export async function startRun(task, root, agentId = task.routing?.currentAgent 
     chatBuild.system.content,
     chatBuild.task.content,
     chatBuild.tools?.length ? `# Allowed Tools\n\n${chatBuild.tools.map((tool) => `- ${tool.name}`).join("\n")}` : "",
-    formatChatMessages(chatBuild.messages),
+    formatChatMessages(chatBuild.visibleMessages?.length ? chatBuild.visibleMessages : chatBuild.messages),
     previousSummary ? `# Previous Session Summary\n\n${previousSummary}` : ""
   ].filter(Boolean).join("\n\n");
   const promptHash = createHash("sha256").update(prompt).digest("hex");

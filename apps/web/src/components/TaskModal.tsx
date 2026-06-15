@@ -27,7 +27,7 @@ type Props = {
   draftTask?: Task | null;
   open: boolean;
   onClose: () => void;
-  onSave: (input: { id?: string; title: string; description?: string; projectTargets: string[] }, options?: { execute?: boolean }) => Promise<Task | void>;
+  onSave: (input: { id?: string; title: string; description?: string; projectTargets: string[] }, options?: { draft?: boolean; execute?: boolean }) => Promise<Task | void>;
   onUploadAttachment: (input: { id?: string; title: string; description?: string; projectTargets: string[] }, file: File) => Promise<{ task: Task; path: string }>;
   onSendComment: (text: string, taskId: string) => Promise<string> | string;
   messages: ChatMessage[];
@@ -38,10 +38,11 @@ type Props = {
   allTasks: Task[];
   files?: TaskFiles;
   onSaveFile: (taskId: string, path: "acceptance.md" | "description.md", content: string) => Promise<void> | void;
-  onAction: (task: Task, action: "run" | "interrupt" | "complete" | "decompose") => Promise<void> | void;
+  onAction: (task: Task, action: "run" | "interrupt" | "complete" | "decompose" | "pause-chain" | "resume-chain" | "cancel-task" | "cancel-chain") => Promise<void> | void;
+  onCommand: (command: Record<string, unknown>) => Promise<void> | void;
 };
 
-export function TaskModal({ task, draftTask, open, onClose, onSave, onUploadAttachment, onSendComment, messages, logs, logsHasMore, logsLoading, onLoadMoreLogs, allTasks, files, onSaveFile, onAction }: Props) {
+export function TaskModal({ task, draftTask, open, onClose, onSave, onUploadAttachment, onSendComment, messages, logs, logsHasMore, logsLoading, onLoadMoreLogs, allTasks, files, onSaveFile, onAction, onCommand }: Props) {
   const [activeTab, setActiveTab] = useState("resumo");
   const [chat, setChat] = useState("");
   const [projectQuery, setProjectQuery] = useState("");
@@ -54,7 +55,7 @@ export function TaskModal({ task, draftTask, open, onClose, onSave, onUploadAtta
   const chatFileInputRef = useRef<HTMLInputElement | null>(null);
   const isDraftMode = !task;
   const currentDraft = draftTask || null;
-  const subtasks = task ? allTasks.filter((item) => item.worktree?.parentTaskId === task.id) : [];
+  const subtasks = task ? allTasks.filter((item) => (item.parentTaskId || item.worktree?.parentTaskId) === task.id) : [];
   const projectOptions = useMemo(() => Array.from(new Set([
     ...allTasks.flatMap((item) => item.projectTargets || []),
     ...(task?.projectTargets || []),
@@ -296,7 +297,10 @@ export function TaskModal({ task, draftTask, open, onClose, onSave, onUploadAtta
                     {task ? <div className="mt-4 flex flex-wrap gap-2">
                       <button type="button" className="button-secondary" onClick={() => onAction(task, "run")}><Play size={15} />Rodar</button>
                       <button type="button" className="button-secondary" onClick={() => onAction(task, "interrupt")}><Pause size={15} />Pausar</button>
-                      <button type="button" className="button-secondary" onClick={() => onAction(task, "decompose")}><Split size={15} />Decompor</button>
+                      <button type="button" className="button-secondary" disabled={(task.depth ?? 0) >= 4} title={(task.depth ?? 0) >= 4 ? "MAX_DEPTH 4" : undefined} onClick={() => onAction(task, "decompose")}><Split size={15} />Decompor</button>
+                      <button type="button" className="button-secondary" onClick={() => onAction(task, "pause-chain")}><Pause size={15} />Pausar cadeia</button>
+                      <button type="button" className="button-secondary" onClick={() => onAction(task, "resume-chain")}><Play size={15} />Retomar cadeia</button>
+                      <button type="button" className="button-secondary" onClick={() => onAction(task, "cancel-chain")}><X size={15} />Cancelar cadeia</button>
                       <button type="button" className="button-primary" onClick={() => onAction(task, "complete")}><CheckCircle size={15} />Solicitar conclusão</button>
                     </div> : null}
                   </Tabs.Content>
@@ -319,10 +323,10 @@ export function TaskModal({ task, draftTask, open, onClose, onSave, onUploadAtta
                   <Tabs.Content value="logs" className="task-logs-tab">
                     <TerminalLogs logs={logs} loading={logsLoading} hasMore={logsHasMore} emptyText={task?.id ? undefined : "Salve a task para iniciar logs."} onLoadMore={() => task?.id ? onLoadMoreLogs(task.id) : Promise.resolve()} />
                   </Tabs.Content>
-                  <Tabs.Content value="worktree"><Panel title="Worktree da task" lines={[`branch: ${task?.worktree?.branch || "a definir"}`, `path: ${task?.worktree?.path || "nao criado"}`, `merge target: ${task?.worktree?.mergeTarget || "main"}`]} /></Tabs.Content>
+                  <Tabs.Content value="worktree"><Panel title="Worktree da task" lines={[`branch: ${task?.worktree?.branch || "a definir"}`, `path: ${task?.worktree?.path || "nao criado"}`, `merge target: ${task?.worktree?.mergeTarget || "main"}`, `parent: ${task?.parentTaskId || task?.worktree?.parentTaskId || "-"}`, `root: ${task?.rootTaskId || task?.worktree?.mainTaskId || task?.id || "-"}`, `depth: ${task?.depth ?? 0}/4`]} /></Tabs.Content>
                   <Tabs.Content value="dependencias"><Panel title="Contratos da task" lines={[`needs -> ${(task?.dependencies?.needs || []).join(", ") || "nenhum"}`, `${task?.id || "task"} -> provides`, (task?.dependencies?.provides || []).join(", ") || "nenhum"]} /></Tabs.Content>
                   <Tabs.Content value="subtasks">
-                    <Panel title="Subtasks paralelas" lines={subtasks.length ? subtasks.map((item) => `${item.id} [${item.status}] ${item.routing?.currentRole || item.routing?.currentAgent || "sem role"} · parent ${item.worktree?.parentTaskId || "-"} · main ${item.worktree?.mainTaskId || item.worktree?.parentTaskId || item.id} · ${item.agent && typeof item.agent === "object" && item.agent.lastSummary ? item.agent.lastSummary : item.title}`) : ["Use decompor para criar subtasks com needs/provides e agents sugeridos."]} />
+                    <SubtaskList subtasks={subtasks} onCommand={onCommand} />
                   </Tabs.Content>
                   <Tabs.Content value="hooks"><Panel title="Hooks da task" lines={task?.hooks?.active?.length ? task.hooks.active : ["nenhum hook ativo"]} /></Tabs.Content>
                   <Tabs.Content value="eventos"><Panel title="Timeline" lines={(files?.events?.length ? files.events.slice(-8).map((event) => `${event.type || "event"} · ${event.ts || ""}`) : [`updated: ${task?.updatedAt || "nao persistida"}`])} /></Tabs.Content>
@@ -722,6 +726,45 @@ function workflowEvidenceLines(task?: Task | null, files?: TaskFiles) {
   const gateEvidence = Object.entries(task?.workflow?.gates || {}).flatMap(([key, gate]) => (gate?.evidence || []).map((item) => `${key}: ${typeof item === "string" ? item : JSON.stringify(item)}`));
   const validation = (files?.events || []).filter((event) => event.type === "workflow.validation_recorded").flatMap((event) => Array.isArray(event.evidence) ? event.evidence.map((item) => `validation: ${String(item)}`) : []);
   return [...gateEvidence, ...validation].length ? [...gateEvidence, ...validation].slice(-10) : ["nenhuma evidência registrada"];
+}
+
+function SubtaskList({ subtasks, onCommand }: { subtasks: Task[]; onCommand: (command: Record<string, unknown>) => Promise<void> | void }) {
+  if (!subtasks.length) return <Panel title="Subtasks paralelas" lines={["Use decompor para criar subtasks com needs/provides e agents sugeridos."]} />;
+  const terminal = new Set(["done", "canceled"]);
+  return (
+    <section className="subtask-list">
+      <h3 className="text-sm font-semibold">Subtasks paralelas</h3>
+      {subtasks.map((item) => (
+        <article className="subtask-row" key={item.id}>
+          <div>
+            <strong>{item.id} [{item.status}]</strong>
+            <span>{item.title}</span>
+            <small>{item.routing?.currentRole || item.routing?.currentAgent || "sem role"} · parent {item.parentTaskId || item.worktree?.parentTaskId || "-"} · main {item.rootTaskId || item.worktree?.mainTaskId || item.parentTaskId || item.id} · depth {item.depth ?? 1}/4</small>
+          </div>
+          <div className="subtask-actions">
+            {item.status === "waiting_review" ? (
+              <>
+                <button type="button" className="button-secondary" onClick={() => onCommand({ type: "subtask.review", taskId: item.id, decision: "approve" })}>Aprovar</button>
+                <button type="button" className="button-secondary" onClick={() => {
+                  const feedback = window.prompt("Feedback para rejeição") || "";
+                  void onCommand({ type: "subtask.review", taskId: item.id, decision: "reject", feedback });
+                }}>Rejeitar</button>
+              </>
+            ) : null}
+            {item.status === "waiting_response" ? (
+              <button type="button" className="button-secondary" onClick={() => {
+                const answer = window.prompt("Resposta para a subtask") || "";
+                if (answer) void onCommand({ type: "subtask.answer_question", taskId: item.id, answer });
+              }}>Responder</button>
+            ) : null}
+            {item.status === "paused" ? <button type="button" className="button-secondary" onClick={() => onCommand({ type: "task.resume", taskId: item.id, scope: "task" })}>Retomar</button> : null}
+            {!terminal.has(item.status) && item.status !== "paused" ? <button type="button" className="button-secondary" onClick={() => onCommand({ type: "task.pause", taskId: item.id, scope: "task" })}>Pausar</button> : null}
+            {!terminal.has(item.status) ? <button type="button" className="button-secondary" onClick={() => onCommand({ type: "task.cancel", taskId: item.id, scope: "task" })}>Cancelar</button> : null}
+          </div>
+        </article>
+      ))}
+    </section>
+  );
 }
 
 function Panel({ title, lines }: { title: string; lines: string[] }) {

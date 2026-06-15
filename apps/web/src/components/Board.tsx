@@ -30,6 +30,9 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
     { id: "running", label: "Rodando" },
     { id: "queued", label: "Fila" },
     { id: "failed", label: "Falhas" },
+    { id: "waiting_review", label: "Review" },
+    { id: "waiting_response", label: "Resposta" },
+    { id: "paused", label: "Pausadas" },
     { id: "merge_pending", label: "Merge" },
     { id: "done", label: "Concluídas" }
   ];
@@ -39,11 +42,15 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
     running: "Rodando",
     failed: "Falhou",
     waiting: "Aguardando",
+    waiting_review: "Review",
+    waiting_response: "Resposta",
+    paused: "Pausada",
+    canceled: "Cancelada",
     done: "Concluída",
     merge_pending: "Merge",
     validating: "Validando"
   };
-  const progressByStatus: Record<string, number> = { idle: 0, queued: 8, running: 50, blocked: 18, failed: 18, merge_pending: 92, validating: 80, done: 100 };
+  const progressByStatus: Record<string, number> = { idle: 0, queued: 8, running: 50, blocked: 18, failed: 18, paused: 18, canceled: 100, waiting_response: 35, waiting_review: 75, merge_pending: 92, validating: 80, done: 100 };
   const columnById = new Map(columns.map((column) => [column.id, column]));
   const primaryColumns = PRIMARY_COLUMN_IDS.map((id) => columnById.get(id)).filter((column): column is Column => Boolean(column));
   const pairedColumnIds = new Set(AGENT_COLUMN_PAIRS.flat());
@@ -110,6 +117,7 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                   {task.failure?.reason ? <p className="task-failure">Falha: {task.failure.reason}</p> : null}
                   <div className="task-tags">
                     {!isInboxIdle ? <span className={clsx("pill", task.status)}>{statusLabels[task.status] || task.status}</span> : null}
+                    {Number.isInteger(task.depth) ? <span className="pill soft">depth {task.depth}/4</span> : null}
                     {task.workflow?.phase ? <span className="pill soft">phase {task.workflow.phase}</span> : null}
                     {task.workflow?.currentRole ? <span className="pill soft">role {task.workflow.currentRole}</span> : null}
                     {workflowGateSummary(task) ? <span className="pill soft">gate {workflowGateSummary(task)}</span> : null}
@@ -131,7 +139,7 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                         ))}
                       </span>
                     ) : null}
-                    {task.subtasksSummary ? <span className="pill soft">sub {task.subtasksSummary.done}/{task.subtasksSummary.total} · {task.subtasksSummary.running} run</span> : null}
+                    {task.subtasksSummary ? <span className="pill soft">sub {task.subtasksSummary.done}/{task.subtasksSummary.total} · {task.subtasksSummary.running} run{task.subtasksSummary.waitingReview ? ` · ${task.subtasksSummary.waitingReview} review` : ""}{task.subtasksSummary.waitingResponse ? ` · ${task.subtasksSummary.waitingResponse} resp` : ""}</span> : null}
                     {(task.projectTargets || []).map((project) => <span className="pill" key={project}>{project}</span>)}
                   </div>
                   <div className="progress" aria-label={`Progresso ${progress}%`}><span style={{ width: `${progress}%` }} /></div>
@@ -189,7 +197,7 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
 }
 
 function relationTaskIds(task: Task) {
-  return [...new Set([task.worktree?.mainTaskId, task.worktree?.parentTaskId].filter((id): id is string => Boolean(id && id !== task.id)))];
+  return [...new Set([task.rootTaskId || task.worktree?.mainTaskId, task.parentTaskId || task.worktree?.parentTaskId].filter((id): id is string => Boolean(id && id !== task.id)))];
 }
 
 function workflowGateSummary(task: Task) {

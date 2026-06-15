@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const TaskStatus = z.enum(["draft", "idle", "queued", "running", "interrupting", "validating", "waiting", "waiting_human", "blocked", "merge_pending", "done", "failed", "canceled", "paused"]);
+export const TaskStatus = z.enum(["draft", "idle", "queued", "running", "interrupting", "validating", "waiting", "waiting_human", "waiting_review", "waiting_response", "orchestrating", "blocked", "merge_pending", "done", "failed", "canceled", "paused"]);
 export const TaskKind = z.enum(["task", "master", "subtask", "spike", "bug", "chore"]);
 export const WorkflowPhase = z.enum(["intake", "spec", "planning", "execution", "validation", "review", "delivery", "done", "blocked", "cancelled"]);
 export const WorkflowRole = z.enum(["manager", "product", "design", "architecture", "engineering", "qa", "quality", "review", "deployment", "documentation", "generalist", "none"]);
@@ -62,12 +62,18 @@ export const EventType = z.enum([
   "delegation.result",
   "subtask.result_reported",
   "subtask.parent_requeued",
+  "subtask.review_requested",
+  "subtask.review_approved",
+  "subtask.review_rejected",
+  "subtask.question_raised",
+  "subtask.question_answered",
+  "subtask.depth_blocked",
   "provider.missing_env",
   "artifact.emitted",
   "hook.started",
   "hook.completed",
   "hook.failed",
-  "scheduler.tick",
+  "orchestrator.reconciled",
   "worktree.created",
   "worktree.updated",
   "worktree.removed",
@@ -79,7 +85,10 @@ export const EventType = z.enum([
   "merge.completed",
   "merge.conflict",
   "settings.updated",
-  "task.recovered"
+  "task.recovered",
+  "task.paused",
+  "task.resumed",
+  "task.canceled"
 ]);
 
 export const SemaphoreSchema = z.union([
@@ -413,6 +422,9 @@ export const TaskSchema = z.object({
   updatedAt: z.string(),
   createdBy: z.string(),
   projectTargets: z.array(z.string()),
+  parentTaskId: z.string().nullable().optional(),
+  rootTaskId: z.string().nullable().optional(),
+  depth: z.number().int().nonnegative().optional(),
   routing: z.object({
     currentAgent: z.string().nullable().optional(),
     currentRole: z.string().nullable().optional(),
@@ -692,20 +704,45 @@ export const CommandSchema = z.discriminatedUnion("type", [
     mode: z.enum(["soft", "hard"]).default("soft")
   }),
   commandBase.extend({
+    type: z.literal("task.pause"),
+    taskId: z.string().min(1),
+    scope: z.enum(["task", "chain"]).default("task"),
+    mode: z.enum(["soft", "hard"]).default("soft"),
+    reason: z.string().optional()
+  }),
+  commandBase.extend({
+    type: z.literal("task.resume"),
+    taskId: z.string().min(1),
+    scope: z.enum(["task", "chain"]).default("task")
+  }),
+  commandBase.extend({
+    type: z.literal("task.cancel"),
+    taskId: z.string().min(1),
+    scope: z.enum(["task", "chain"]).default("task"),
+    reason: z.string().optional()
+  }),
+  commandBase.extend({
     type: z.literal("task.decompose"),
     taskId: z.string().min(1),
     runId: z.string().optional(),
-    subtasks: z.array(DecomposeSubtaskCommandSchema).min(1)
+    subtasks: z.array(DecomposeSubtaskCommandSchema).min(1).optional()
+  }),
+  commandBase.extend({
+    type: z.literal("subtask.review"),
+    taskId: z.string().min(1),
+    decision: z.enum(["approve", "reject"]),
+    feedback: z.string().optional()
+  }),
+  commandBase.extend({
+    type: z.literal("subtask.answer_question"),
+    taskId: z.string().min(1),
+    answer: z.string().min(1)
   }),
   commandBase.extend({
     type: z.literal("task.merge"),
     taskId: z.string().min(1),
     parentPath: z.string().min(1).optional(),
     subtaskBranch: z.string().min(1).optional()
-  }),
-  commandBase.extend({
-    type: z.literal("scheduler.tick"),
-    maxStarts: z.number().int().positive().optional()
   }),
   commandBase.extend({
     type: z.literal("agent.complete_task"),
@@ -741,7 +778,7 @@ export const CommandSchema = z.discriminatedUnion("type", [
     command: z.string().min(1),
     args: z.array(z.string()).default([]),
     cwd: z.string().default("worktree"),
-    timeoutMs: z.number().int().positive().default(120000)
+    timeoutMs: z.number().int().positive().optional()
   }),
   commandBase.extend({
     type: z.literal("agent.chat"),

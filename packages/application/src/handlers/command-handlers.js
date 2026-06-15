@@ -8,7 +8,6 @@ export const publicCommandTypes = [
   "task.interrupt",
   "task.decompose",
   "task.merge",
-  "scheduler.tick",
   "agent.complete_task",
   "agent.report_blocker",
   "agent.request_user_input",

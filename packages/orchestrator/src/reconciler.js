@@ -52,10 +52,10 @@ export function semaphoreRequestsForTask(task, settings = {}) {
   ].filter((request, index, list) => list.findIndex((item) => item.name === request.name) === index && agentSchedulingEnabled(agentSettings, runtime, agentId));
 }
 
-export async function schedulerTick(root, { whyNotRunning, runTask, maxStarts } = {}) {
-  if (typeof whyNotRunning !== "function") throw new Error("schedulerTick requires whyNotRunning");
-  if (typeof runTask !== "function") throw new Error("schedulerTick requires runTask");
-  logStep("scheduler", "tick.start", { maxStarts: maxStarts ?? null });
+export async function reconcileOrchestrator(root, { whyNotRunning, runTask, maxStarts, source = "event" } = {}) {
+  if (typeof whyNotRunning !== "function") throw new Error("reconcileOrchestrator requires whyNotRunning");
+  if (typeof runTask !== "function") throw new Error("reconcileOrchestrator requires runTask");
+  logStep("reconciler", "reconcile.start", { source, maxStarts: maxStarts ?? null });
   const snapshot = await boardSnapshot(root);
   const settings = await readSettings(root);
   const autoQueued = await normalizeAutoStartTasks(root, snapshot);
@@ -80,7 +80,7 @@ export async function schedulerTick(root, { whyNotRunning, runTask, maxStarts } 
     const leases = await acquireSemaphoreLeases(semaphoreRequestsForTask(task, { ...settings, agentSettings }), {
       root,
       taskId: task.id,
-      runId: `scheduler-${task.id}`,
+      runId: `reconciler-${task.id}`,
       role: agentId
     });
     if (!leases.ok) {
@@ -101,16 +101,62 @@ export async function schedulerTick(root, { whyNotRunning, runTask, maxStarts } 
   }
   const event = {
     ts: new Date().toISOString(),
-    type: "scheduler.tick",
+    type: "orchestrator.reconciled",
     actor: "orchestrator",
+    source,
     autoQueued,
     started: started.map((item) => item.taskId),
     skipped,
     blocked
   };
   await appendJsonl(`${paths(root).runtime}/logs/events.jsonl`, event);
-  logStep("scheduler", "tick.done", { autoQueued, started: started.map((item) => item.taskId), blocked: blocked.length, skipped: skipped.length });
-  return { ok: true, event, autoQueued, started, skipped, blocked };
+  logStep("reconciler", "reconcile.done", { source, autoQueued, started: started.map((item) => item.taskId), blocked: blocked.length, skipped: skipped.length });
+  return { ok: true, event, source, autoQueued, started, skipped, blocked };
+}
+
+export function createReconcilerQueue({ root, eventBus, whyNotRunning, runTask, onResult, onError } = {}) {
+  if (!eventBus) throw new Error("createReconcilerQueue requires eventBus");
+  let running = false;
+  let queued = false;
+  let latestSource = "event";
+
+  async function drain() {
+    if (running) return;
+    running = true;
+    try {
+      while (queued) {
+        const source = latestSource;
+        queued = false;
+        try {
+          const result = await reconcileOrchestrator(root, { whyNotRunning, runTask, source });
+          await onResult?.(result);
+        } catch (error) {
+          await onError?.(error, source);
+        }
+      }
+    } finally {
+      running = false;
+      if (queued) void drain();
+    }
+  }
+
+  function enqueue(source = "event") {
+    latestSource = source;
+    queued = true;
+    void drain();
+  }
+
+  const unsubscribers = [
+    eventBus.subscribe("command.executed", (event) => enqueue(event.commandType || "command.executed")),
+    eventBus.subscribe("fsdb.changed", () => enqueue("fsdb.changed"))
+  ];
+
+  return {
+    enqueue,
+    stop() {
+      for (const unsubscribe of unsubscribers) unsubscribe();
+    }
+  };
 }
 
 async function sessionHasPromptNotSent(root, task) {
@@ -132,16 +178,16 @@ async function sessionHasPromptNotSent(root, task) {
 }
 
 export async function recoverStaleRuns(root) {
-  logStep("scheduler", "recoverStaleRuns.start");
+  logStep("reconciler", "recoverStaleRuns.start");
   const recovered = [];
   for (const task of (await listTasks(root)).filter((item) => item.status === "running")) {
     if (!(await sessionHasPromptNotSent(root, task))) continue;
     const reason = "prompt_not_sent";
     const updated = await updateTask(task.id, { status: "failed" }, root, "agent.failed");
-    await appendJsonl(`${paths(root).tasks}/${task.id}/events.jsonl`, { ts: new Date().toISOString(), type: "agent.failed", actor: "scheduler", taskId: task.id, runId: task.agent?.currentRunId, reason });
+    await appendJsonl(`${paths(root).tasks}/${task.id}/events.jsonl`, { ts: new Date().toISOString(), type: "agent.failed", actor: "reconciler", taskId: task.id, runId: task.agent?.currentRunId, reason });
     await releaseSemaphoreLeases({ root, taskId: task.id });
     recovered.push({ taskId: task.id, reason, task: updated });
   }
-  logStep("scheduler", "recoverStaleRuns.done", { recovered: recovered.length });
+  logStep("reconciler", "recoverStaleRuns.done", { recovered: recovered.length });
   return { ok: true, recovered };
 }

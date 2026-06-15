@@ -460,6 +460,12 @@ a { color: inherit; text-decoration: none; }
 .task-comment-card .task-chat-bubble { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 10px 38px 10px 12px; box-shadow: var(--shadow-soft); }
 .task-comment-card.user .task-chat-bubble { background: color-mix(in srgb, var(--surface-soft) 72%, var(--surface)); }
 .task-comment-branch { display: inline-flex; align-items: center; gap: 6px; width: max-content; max-width: 100%; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.subtask-list { display: grid; gap: 10px; }
+.subtask-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 10px; }
+.subtask-row div:first-child { min-width: 0; display: grid; gap: 3px; }
+.subtask-row strong, .subtask-row span, .subtask-row small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subtask-row small { color: var(--muted); }
+.subtask-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .task-chat-composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 8px; border-top: 1px solid var(--border); padding: 16px; }
 .task-chat-composer textarea { min-height: 74px; height: 100%; resize: none; }
 .task-chat-actions { display: grid; grid-template-rows: 1fr 1fr; gap: 8px; }

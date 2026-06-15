@@ -50,6 +50,45 @@ function numericPositive(...values) {
   return undefined;
 }
 
+function providerRequestTimeoutMs(providerConfig = {}) {
+  return numericPositive(
+    providerConfig.requestTimeoutMs,
+    providerConfig.timeoutMs,
+    process.env.KCA_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_MS,
+    process.env.KCA_PROVIDER_REQUEST_TIMEOUT_MS,
+    60000
+  );
+}
+
+async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
+  if (!timeoutMs || timeoutMs <= 0) return fetchImpl(url, init);
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      controller?.abort();
+      const error = new Error(`request_timeout:${timeoutMs}`);
+      error.code = "request_timeout";
+      reject(error);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      fetchImpl(url, { ...init, ...(controller ? { signal: controller.signal } : {}) }),
+      timeout
+    ]);
+  } catch (error) {
+    if (error?.code === "request_timeout" || error?.name === "AbortError" || controller?.signal?.aborted) {
+      const timeoutError = new Error(`request_timeout:${timeoutMs}`);
+      timeoutError.code = "request_timeout";
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 function modelContextWindow(providerConfig = {}, model) {
   const direct = numericPositive(
     providerConfig.contextWindow,
@@ -511,6 +550,13 @@ function compactWorkflowResult(result) {
       currentRole: result.task.routing?.currentRole,
       currentAgent: result.task.routing?.currentAgent
     } : undefined,
+    parentTask: result.parentTask ? {
+      id: result.parentTask.id,
+      column: result.parentTask.column,
+      status: result.parentTask.status,
+      currentRole: result.parentTask.routing?.currentRole,
+      currentAgent: result.parentTask.routing?.currentAgent
+    } : undefined,
     message: result.message ? {
       persona: result.message.persona,
       disposition: result.message.disposition,
@@ -519,12 +565,7 @@ function compactWorkflowResult(result) {
     inputPath: result.inputPath,
     artifactPath: result.path || result.artifactPath,
     summaryRef: result.summaryRef,
-    delegation: result.delegation,
-    scheduler: result.scheduler ? {
-      started: result.scheduler.started?.map((item) => typeof item === "string" ? item : item.taskId).filter(Boolean) || [],
-      blocked: result.scheduler.blocked?.map((item) => item.taskId || item.reason || item).filter(Boolean) || [],
-      skipped: result.scheduler.skipped?.map((item) => item.taskId || item.reason || item).filter(Boolean) || []
-    } : undefined
+    delegation: result.delegation
   };
 }
 
@@ -743,6 +784,38 @@ export function buildTaskAgentTools(context, { allowedTools } = {}) {
       toCommand: (params) => base("task.decompose", { subtasks: params.subtasks })
     }),
     taskTool(context, {
+      name: "review_subtask",
+      label: "Review subtask",
+      description: "Approve or reject a child subtask that is waiting_review.",
+      parameters: TObject({
+        taskId: TString({ description: "Child subtask ID to review." }),
+        decision: TString({ description: "approve or reject" }),
+        feedback: TOptional(TString({ description: "Feedback for rejection or approval note." }))
+      }),
+      toCommand: (params) => ({
+        type: "subtask.review",
+        commandId: commandIdFor("subtask.review", params.taskId || context.taskId),
+        taskId: params.taskId,
+        decision: params.decision === "reject" ? "reject" : "approve",
+        feedback: params.feedback || ""
+      })
+    }),
+    taskTool(context, {
+      name: "answer_subtask_question",
+      label: "Answer subtask question",
+      description: "Send an answer from the parent manager to a child subtask waiting_response.",
+      parameters: TObject({
+        taskId: TString({ description: "Child subtask ID waiting for response." }),
+        answer: TString({ description: "Answer that should resume the subtask." })
+      }),
+      toCommand: (params) => ({
+        type: "subtask.answer_question",
+        commandId: commandIdFor("subtask.answer_question", params.taskId || context.taskId),
+        taskId: params.taskId,
+        answer: params.answer || ""
+      })
+    }),
+    taskTool(context, {
       name: "run_command",
       label: "Run command",
       description: "Run a validation or evidence-gathering command in the task worktree and return stdout/stderr without changing task status.",
@@ -752,7 +825,12 @@ export function buildTaskAgentTools(context, { allowedTools } = {}) {
         cwd: TOptional(TString({ description: "Use 'worktree' for the task worktree or omit for worktree/default root.", default: "worktree" })),
         timeoutMs: TOptional(TNumber({ description: "Timeout in milliseconds.", default: 120000 }))
       }),
-      toCommand: (params) => base("agent.run_command", { command: params.command, args: params.args || [], cwd: params.cwd || "worktree", timeoutMs: Math.min(params.timeoutMs || 120000, 120000) })
+      toCommand: (params) => base("agent.run_command", {
+        command: params.command,
+        args: params.args || [],
+        cwd: params.cwd || "worktree",
+        ...(params.timeoutMs === undefined ? {} : { timeoutMs: Math.min(params.timeoutMs, 120000) })
+      })
     }),
     taskTool(context, {
       name: "wait_for_persona",
@@ -901,26 +979,33 @@ export async function startOpenAICompatibleSession({ providerConfig, model, task
   const toolMap = new Map(customTools.map((tool) => [tool.name, tool]));
   const messages = [{ role: "user", content: String(prompt || task?.title || "") }];
   const events = [];
-  const terminalTools = new Set(["complete_task", "request_user_input", "report_blocker", "spawn_subtasks", "wait_for_persona", "wait_for_human", "delegate_task", "review_task", "deploy_task", "create_task_spec", "approve_task_spec", "record_handoff", "record_decision", "record_validation", "record_technical_plan", "record_implementation_tasks", "record_review_report", "record_deployment_report", "record_summary", "run_definition_of_ready_gate", "run_definition_of_done_gate"]);
+  const terminalTools = new Set(["complete_task", "request_user_input", "report_blocker", "spawn_subtasks", "wait_for_persona", "wait_for_human", "delegate_task", "review_task", "review_subtask", "answer_subtask_question", "deploy_task", "create_task_spec", "approve_task_spec", "record_handoff", "record_decision", "record_validation", "record_technical_plan", "record_implementation_tasks", "record_review_report", "record_deployment_report", "record_summary", "run_definition_of_ready_gate", "run_definition_of_done_gate"]);
   let promptSent = false;
   let terminal = false;
   const contextWindow = modelContextWindow(providerConfig, model);
+  const requestTimeoutMs = providerRequestTimeoutMs(providerConfig);
 
   for (let turn = 0; turn < maxTurns && !terminal; turn += 1) {
     const headers = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` };
     if (process.env.OPENROUTER_HTTP_REFERER) headers["HTTP-Referer"] = process.env.OPENROUTER_HTTP_REFERER;
     if (process.env.OPENROUTER_APP_TITLE) headers["X-Title"] = process.env.OPENROUTER_APP_TITLE;
-    const response = await fetchImpl(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        model,
-        messages,
-        tools: toolsToOpenAI(customTools),
-        tool_choice: customTools.length ? "auto" : undefined
-      })
-    });
     promptSent = true;
+    let response;
+    try {
+      response = await fetchWithTimeout(fetchImpl, `${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model,
+          messages,
+          tools: toolsToOpenAI(customTools),
+          tool_choice: customTools.length ? "auto" : undefined
+        })
+      }, requestTimeoutMs);
+    } catch (error) {
+      const reason = error?.code === "request_timeout" ? "request_timeout" : `request_error:${safeError(error)}`;
+      return { mode: "failed", provider: providerConfig.id, reason, sessionId: runId, cwd, promptSent, timeoutMs: requestTimeoutMs };
+    }
     if (!response.ok) {
       return { mode: "failed", provider: providerConfig.id, reason: `http_${response.status}`, sessionId: runId, cwd, promptSent };
     }

@@ -7,7 +7,7 @@ test("core contracts expose canonical command, query and event names", () => {
   assert.equal(COMMAND_TYPES.includes("task.create"), true);
   assert.equal(COMMAND_TYPES.includes("task.file.write"), true);
   assert.equal(COMMAND_TYPES.includes("task.comment"), true);
-  assert.equal(COMMAND_TYPES.includes("scheduler.tick"), true);
+  assert.equal(COMMAND_TYPES.includes("scheduler.tick"), false);
   assert.equal(COMMAND_TYPES.includes("chat.reset_board"), true);
   assert.equal(QUERY_TYPES.includes("chat.history"), true);
   assert.equal(QUERY_TYPES.includes("task.comments"), true);
@@ -20,6 +20,7 @@ test("core contracts expose canonical command, query and event names", () => {
   assert.equal(EVENT_TYPES.includes("task.recovered"), true);
   assert.equal(EVENT_TYPES.includes("task.comment"), true);
   assert.equal(EVENT_TYPES.includes("agent.transcript"), true);
+  assert.equal(EVENT_TYPES.includes("orchestrator.reconciled"), true);
   assert.equal(EVENT_TYPES.includes("role.handoff"), true);
   assert.equal(EVENT_TYPES.includes("human.input_requested"), true);
   assert.equal(ROLE_IDS.includes("deployment"), true);

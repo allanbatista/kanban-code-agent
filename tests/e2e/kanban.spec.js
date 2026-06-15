@@ -79,8 +79,8 @@ test("starts from a clean daemon storage without fixture tasks", async ({ page, 
   await expect(page.getByText("Nenhuma task").first()).toBeVisible();
 });
 
-test("creates a task through React UI and persists it in FSDB", async ({ page, request }) => {
-  const marker = `Draft UI ${Date.now()}`;
+test("creates a task through React UI and shows it in Entrada", async ({ page, request }) => {
+  const marker = `Entrada UI ${Date.now()}`;
   await page.goto("/");
   await page.locator('[data-column-id="inbox"]').getByRole("button", { name: /Nova task em Entrada/ }).click();
   await page.locator(".cm-content").fill(`Persistir via daemon ${marker}.`);
@@ -103,7 +103,8 @@ test("creates a task through React UI and persists it in FSDB", async ({ page, r
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
     return (await state.json()).tasks.some((task) => task.title.includes(marker));
-  }).toBe(false);
+  }).toBe(true);
+  await expect(page.locator('[data-column-id="inbox"] article.task').filter({ hasText: marker })).toHaveCount(1);
   await expect.poll(async () => {
     const ids = await readdir(resolve(storageRoot, "tasks")).catch(() => []);
     for (const id of ids) {
@@ -116,9 +117,9 @@ test("creates a task through React UI and persists it in FSDB", async ({ page, r
   await page.getByRole("button", { name: "Salvar e executar" }).click();
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
-    const task = (await state.json()).tasks.find((item) => item.title.includes(marker));
-    return { column: task?.column, active: ["queued", "running"].includes(task?.status) };
-  }, { timeout: 7000 }).toEqual({ column: "manager", active: true });
+    const matches = (await state.json()).tasks.filter((item) => item.title.includes(marker));
+    return { count: matches.length, column: matches[0]?.column, active: ["queued", "running"].includes(matches[0]?.status) };
+  }, { timeout: 7000 }).toEqual({ count: 1, column: "manager", active: true });
 });
 
 test("refreshes the board when FSDB task files change externally", async ({ page, request }) => {
@@ -362,7 +363,7 @@ test("shows real token usage on task card timing and modal", async ({ page, requ
   await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("125");
 });
 
-test("daemon scheduler starts tasks from persona events", async ({ request }) => {
+test("daemon reconciler starts tasks from persona events", async ({ request }) => {
   await request.post(`${daemonUrl}/api/settings.update`, {
     data: { scope: "app", patch: { runtime: { maxParallelTasks: 10, agentTokens: { product: 10 }, projectTokens: { "kanban-code-agent": 10 } } } }
   });
@@ -371,7 +372,6 @@ test("daemon scheduler starts tasks from persona events", async ({ request }) =>
     data: { taskId: task.id, toColumn: "product" }
   });
   await expect(moved).toBeOK();
-  expect((await moved.json()).scheduler.started.map((item) => item.taskId)).toContain(task.id);
 
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
@@ -380,7 +380,7 @@ test("daemon scheduler starts tasks from persona events", async ({ request }) =>
 
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
-    return (await state.json()).events.some((event) => event.type === "scheduler.tick" && event.started?.includes(task.id));
+    return (await state.json()).events.some((event) => event.type === "orchestrator.reconciled" && event.started?.includes(task.id));
   }).toBe(true);
 });
 
@@ -405,10 +405,10 @@ test("saving and executing a new task sends it to manager workflow", async ({ pa
 
 test("task comments answer agent questions and logs are paginated", async ({ page, request }) => {
   await request.post(`${daemonUrl}/api/settings.update`, {
-    data: { scope: "app", patch: { runtime: { maxParallelTasks: 10, agentTokens: { engineering: 10 }, projectTokens: { "kanban-code-agent": 10 } } } }
+    data: { scope: "app", patch: { runtime: { maxParallelTasks: 100, agentTokens: { engineering: 100 }, projectTokens: { "kanban-code-agent": 100 } } } }
   });
   const initialState = await request.get(`${daemonUrl}/api/state`);
-  const columns = (await initialState.json()).columns.map((column) => column.id === "engineering" ? { ...column, wip: 20, wipLimit: 20 } : column);
+  const columns = (await initialState.json()).columns.map((column) => column.id === "engineering" ? { ...column, wip: 100, wipLimit: 100 } : column);
   await request.post(`${daemonUrl}/api/settings.update`, {
     data: { scope: "columns", patch: { columns } }
   });
@@ -442,7 +442,7 @@ test("task comments answer agent questions and logs are paginated", async ({ pag
   }).toBe("engineering");
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
-    return (await state.json()).events.some((event) => event.type === "scheduler.tick" && event.started?.includes(task.id));
+    return (await state.json()).events.some((event) => event.type === "orchestrator.reconciled" && event.started?.includes(task.id));
   }).toBe(true);
   await page.getByRole("tab", { name: "logs" }).click();
   await expect(page.getByRole("region", { name: "Logs dos agents" })).toBeVisible();

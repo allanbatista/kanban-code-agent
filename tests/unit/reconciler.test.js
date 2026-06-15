@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { handleCommand, handleQuery, whyNotRunning } from "../../packages/orchestrator/src/index.js";
-import { recoverStaleRuns, schedulerTick, semaphoreRequestsForTask } from "../../packages/orchestrator/src/scheduler.js";
+import { recoverStaleRuns, reconcileOrchestrator, semaphoreRequestsForTask } from "../../packages/orchestrator/src/reconciler.js";
 import { transitionTask } from "../../packages/orchestrator/src/state-machine.js";
 import { acquireSemaphoreLeases, readSemaphoreState, releaseSemaphoreLeases } from "../../packages/fsdb/src/runtime-store.js";
 
@@ -46,7 +46,7 @@ test("runtime semaphore acquire is atomic under concurrent attempts", async () =
   assert.equal((await readSemaphoreState(root)).leases.filter((lease) => lease.name === "resource:race").length, 1);
 });
 
-test("scheduler tick starts queued runnable tasks and records leases", async () => {
+test("reconciler starts queued runnable tasks and records leases", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-scheduler-"));
   await handleCommand({
     type: "settings.update",
@@ -71,18 +71,18 @@ test("scheduler tick starts queued runnable tasks and records leases", async () 
   assert.equal(defaultRequests.find((request) => request.name === "agent:engineering").capacity, 50);
   assert.equal(semaphoreRequestsForTask(firstQueued.task, { runtime: { agentTokens: { engineering: 2 } } }).find((request) => request.name === "agent:engineering").capacity, 2);
   assert.equal(semaphoreRequestsForTask(firstQueued.task, { runtime: { agentTokens: { engineering: 2 } }, agentSettings: { limits: { maxParallelTasks: 7 } } }).find((request) => request.name === "agent:engineering").capacity, 7);
-  const tick = await schedulerTick(root, {
+  const reconciled = await reconcileOrchestrator(root, {
     whyNotRunning,
     maxStarts: 2,
     runTask: (task) => handleCommand({ type: "task.update", commandId: `scheduler-test-run-${task.id}`, taskId: task.id, patch: { status: "running" } }, root)
   });
-  assert.deepEqual(tick.started.map((item) => item.taskId).sort(), [firstQueued.task.id, secondQueued.task.id].sort());
+  assert.deepEqual(reconciled.started.map((item) => item.taskId).sort(), [firstQueued.task.id, secondQueued.task.id].sort());
   assert.equal((await handleQuery({ type: "task.detail", taskId: firstQueued.task.id }, root)).status, "running");
   assert.equal((await handleQuery({ type: "task.detail", taskId: secondQueued.task.id }, root)).status, "running");
   assert.equal((await readSemaphoreState(root)).leases.some((lease) => lease.taskId === firstQueued.task.id), true);
 });
 
-test("scheduler tick auto-queues eligible idle autoStart tasks only", async () => {
+test("reconciler auto-queues eligible idle autoStart tasks only", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-scheduler-autostart-"));
   await handleCommand({
     type: "settings.update",
@@ -124,15 +124,16 @@ test("scheduler tick auto-queues eligible idle autoStart tasks only", async () =
     excluded.push({ id: created.task.id, status, patch });
   }
 
-  const tick = await schedulerTick(root, {
+  const reconciled = await reconcileOrchestrator(root, {
     whyNotRunning,
     maxStarts: 10,
     runTask: (task) => handleCommand({ type: "task.update", commandId: `scheduler-autostart-run-${task.id}`, taskId: task.id, patch: { status: "running" } }, root)
   });
 
-  assert.deepEqual(tick.autoQueued, [eligible.task.id]);
-  assert.deepEqual(tick.event.autoQueued, [eligible.task.id]);
-  assert.deepEqual(tick.started.map((item) => item.taskId), [eligible.task.id]);
+  assert.deepEqual(reconciled.autoQueued, [eligible.task.id]);
+  assert.deepEqual(reconciled.event.autoQueued, [eligible.task.id]);
+  assert.equal(reconciled.event.type, "orchestrator.reconciled");
+  assert.deepEqual(reconciled.started.map((item) => item.taskId), [eligible.task.id]);
   assert.equal((await handleQuery({ type: "task.detail", taskId: eligible.task.id }, root)).status, "running");
   for (const item of excluded) {
     const detail = await handleQuery({ type: "task.detail", taskId: item.id }, root);
@@ -179,7 +180,7 @@ test("queued tasks in same WIP column do not deadlock each other", async () => {
   assert.equal(why.reasons.some((reason) => reason.includes("WIP da coluna generalist")), false);
 });
 
-test("scheduler recovery fails running tasks whose prompt was not sent", async () => {
+test("reconciler recovery fails running tasks whose prompt was not sent", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-recover-prompt-"));
   const created = await handleCommand({
     type: "task.create",
@@ -202,7 +203,7 @@ test("scheduler recovery fails running tasks whose prompt was not sent", async (
   assert.equal(detail.failure.reason, "prompt_not_sent");
 });
 
-test("scheduler tick blocks dependent subtasks until contracts are provided", async () => {
+test("reconciler blocks dependent subtasks until contracts are provided", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-scheduler-dag-"));
   await handleCommand({
     type: "settings.update",
@@ -220,11 +221,11 @@ test("scheduler tick blocks dependent subtasks until contracts are provided", as
     commandId: "scheduler-dag-b",
     input: { title: "Dependent", column: "inbox", projectTargets: ["kanban-code-agent"], routing: { currentAgent: "engineering", manualOverride: { active: false } }, status: "queued", dependencies: { needs: ["contract:ready"], provides: ["contract:done"], blockedBy: [], fileLocks: [], semaphores: [] } }
   }, root);
-  const tick = await schedulerTick(root, {
+  const reconciled = await reconcileOrchestrator(root, {
     whyNotRunning,
     maxStarts: 3,
     runTask: (task) => handleCommand({ type: "task.run", commandId: `scheduler-dag-run-${task.id}`, taskId: task.id, agentId: "engineering" }, root)
   });
-  assert.deepEqual(tick.started.map((item) => item.taskId), [first.task.id]);
-  assert.equal(tick.skipped.some((item) => item.taskId === second.task.id && item.reasons.join(" ").includes("contract:ready")), true);
+  assert.deepEqual(reconciled.started.map((item) => item.taskId), [first.task.id]);
+  assert.equal(reconciled.skipped.some((item) => item.taskId === second.task.id && item.reasons.join(" ").includes("contract:ready")), true);
 });

@@ -72,18 +72,24 @@ test("task agent tools execute typed workflow commands and emit tool events", as
   const complete = tools.find((tool) => tool.name === "complete_task");
   const artifact = tools.find((tool) => tool.name === "emit_artifact");
   const spawn = tools.find((tool) => tool.name === "spawn_subtasks");
+  const reviewSubtask = tools.find((tool) => tool.name === "review_subtask");
+  const answerSubtask = tools.find((tool) => tool.name === "answer_subtask_question");
   assert.equal(tools.some((tool) => tool.name === "record_technical_plan"), true);
   assert.equal(tools.some((tool) => tool.name === "record_summary"), true);
+  assert.equal(Boolean(reviewSubtask), true);
+  assert.equal(Boolean(answerSubtask), true);
   assert.equal(spawn.parameters.properties.subtasks.minItems, 1);
   assert.equal(spawn.parameters.properties.subtasks.items.required.includes("role"), true);
   assert.match(artifact.description, /medium or longer/);
   assert.match(artifact.description, /respond directly in chat/);
   await complete.execute("call-complete", { nextColumn: "validate", summary: "done" });
   await artifact.execute("call-artifact", { path: "evidence.md", content: "ok" });
-  assert.deepEqual(commands.map((command) => command.type), ["agent.complete_task", "agent.emit_artifact"]);
+  await reviewSubtask.execute("call-review-subtask", { taskId: "KCA-CHILD", decision: "reject", feedback: "fix" });
+  await answerSubtask.execute("call-answer-subtask", { taskId: "KCA-CHILD", answer: "ok" });
+  assert.deepEqual(commands.map((command) => command.type), ["agent.complete_task", "agent.emit_artifact", "subtask.review", "subtask.answer_question"]);
   assert.equal(commands[0].taskId, "KCA-TOOLS");
   assert.equal(commands[0].runId, "run_tools");
-  assert.deepEqual(events.map((event) => event.type), ["agent.tool_call", "agent.tool_result", "agent.tool_call", "agent.tool_result"]);
+  assert.deepEqual(events.map((event) => event.type), ["agent.tool_call", "agent.tool_result", "agent.tool_call", "agent.tool_result", "agent.tool_call", "agent.tool_result", "agent.tool_call", "agent.tool_result"]);
 });
 
 test("run_command tool caps requested timeout", async () => {
@@ -101,6 +107,21 @@ test("run_command tool caps requested timeout", async () => {
   assert.equal(seen.timeoutMs, 120000);
 });
 
+test("run_command tool omits timeout when not requested", async () => {
+  let seen;
+  const tools = buildTaskAgentTools({
+    sdkExports: { defineTool: (tool) => tool },
+    taskId: "KCA-TIMEOUT-DEFAULT",
+    runId: "run_timeout_default",
+    executeCommand: async (command) => {
+      seen = command;
+      return { ok: true, commandId: command.commandId, cwd: "/tmp/kca", stdout: "", stderr: "", exitCode: 0 };
+    }
+  });
+  await tools.find((tool) => tool.name === "run_command").execute("call-timeout-default", { command: "true" });
+  assert.equal(seen.timeoutMs, undefined);
+});
+
 test("task agent tools compact workflow results returned to model", async () => {
   const tools = buildTaskAgentTools({
     sdkExports: { defineTool: (tool) => tool },
@@ -112,12 +133,12 @@ test("task agent tools compact workflow results returned to model", async () => 
       ok: true,
       commandId: command.commandId,
       task: { id: "KCA-COMPACT", column: "done", status: "done", routing: { currentRole: "generalist", currentAgent: "generalist" } },
-      scheduler: { started: [{ taskId: "KCA-COMPACT", result: { run: { adapter: { events: ["large transcript"] } } } }], blocked: [], skipped: [] }
+      run: { adapter: { events: ["large transcript"] } }
     })
   });
   const delegate = tools.find((tool) => tool.name === "delegate_task");
   const result = await delegate.execute("call-delegate", { toPersona: "generalist", request: "Pesquisar", wait: true });
-  assert.deepEqual(result.details.scheduler.started, ["KCA-COMPACT"]);
+  assert.equal(result.details.task.id, "KCA-COMPACT");
   assert.equal(JSON.stringify(result).includes("large transcript"), false);
 });
 
@@ -179,6 +200,47 @@ test("openai compatible adapter executes task tool calls", async () => {
     assert.deepEqual(commands.map((command) => command.type), ["agent.complete_task"]);
     assert.equal(commands[0].finalText, "Resposta final visível.");
     assert.deepEqual(events.map((event) => event.type), ["agent.tool_call", "agent.tool_result"]);
+  } finally {
+    if (previousKey === undefined) delete process.env.TEST_OPENAI_KEY;
+    else process.env.TEST_OPENAI_KEY = previousKey;
+  }
+});
+
+test("openai compatible adapter treats subtask review as terminal", async () => {
+  const previousKey = process.env.TEST_OPENAI_KEY;
+  process.env.TEST_OPENAI_KEY = "test-key";
+  const commands = [];
+  try {
+    const result = await startOpenAICompatibleSession({
+      providerConfig: { id: "test", baseUrl: "https://example.test/v1", apiKeyEnv: "TEST_OPENAI_KEY" },
+      model: "model-test",
+      task: { id: "KCA-PARENT", title: "Review child" },
+      agentId: "manager",
+      runId: "run_review_child",
+      cwd: "/tmp/kca",
+      prompt: "Review child",
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({
+          id: "chatcmpl-review",
+          model: "model-test",
+          choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "call-review", type: "function", function: { name: "review_subtask", arguments: JSON.stringify({ taskId: "KCA-CHILD", decision: "approve" }) } }] } }]
+        })
+      }),
+      customToolFactory: ({ sdkExports }) => buildTaskAgentTools({
+        sdkExports,
+        taskId: "KCA-PARENT",
+        runId: "run_review_child",
+        role: "manager",
+        agentId: "manager",
+        executeCommand: async (command) => {
+          commands.push(command);
+          return { ok: true, commandId: command.commandId };
+        }
+      })
+    });
+    assert.equal(result.terminal, true);
+    assert.deepEqual(commands.map((command) => command.type), ["subtask.review"]);
   } finally {
     if (previousKey === undefined) delete process.env.TEST_OPENAI_KEY;
     else process.env.TEST_OPENAI_KEY = previousKey;
@@ -249,6 +311,42 @@ test("openai compatible adapter reports non-terminal text responses", async () =
     });
     assert.equal(result.terminal, false);
     assert.equal(result.reason, "non_terminal_response");
+  } finally {
+    if (previousKey === undefined) delete process.env.TEST_OPENAI_KEY;
+    else process.env.TEST_OPENAI_KEY = previousKey;
+  }
+});
+
+test("openai compatible adapter times out provider requests", async () => {
+  const previousKey = process.env.TEST_OPENAI_KEY;
+  process.env.TEST_OPENAI_KEY = "test-key";
+  let aborted = false;
+  try {
+    const startedAt = Date.now();
+    const result = await startOpenAICompatibleSession({
+      providerConfig: { id: "test", baseUrl: "https://example.test/v1", apiKeyEnv: "TEST_OPENAI_KEY", requestTimeoutMs: 25 },
+      model: "model-test",
+      task: { id: "KCA-TIMEOUT", title: "Timeout" },
+      agentId: "generalist",
+      runId: "run_timeout",
+      cwd: "/tmp/kca",
+      fetchImpl: async (_url, init = {}) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve({ ok: true, json: async () => ({ choices: [{ message: { content: "late" } }] }) }), 1000);
+        init.signal?.addEventListener("abort", () => {
+          aborted = true;
+          clearTimeout(timer);
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        });
+      }),
+      customToolFactory: ({ sdkExports }) => buildTaskAgentTools({ sdkExports, taskId: "KCA-TIMEOUT", runId: "run_timeout", executeCommand: async () => ({ ok: true }) })
+    });
+    assert.equal(result.mode, "failed");
+    assert.equal(result.reason, "request_timeout");
+    assert.equal(result.promptSent, true);
+    assert.equal(aborted, true);
+    assert.equal(Date.now() - startedAt < 500, true);
   } finally {
     if (previousKey === undefined) delete process.env.TEST_OPENAI_KEY;
     else process.env.TEST_OPENAI_KEY = previousKey;

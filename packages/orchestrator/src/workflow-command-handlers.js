@@ -13,7 +13,6 @@ import { runHooks } from "./hook-service.js";
 import { mergeTaskWorkflow } from "./merge-workflow-service.js";
 import { delegateTaskWorkflow, waitForHumanWorkflow, waitForPersonaWorkflow } from "./persona-workflow-service.js";
 import { createRunnabilityService } from "./runnability-service.js";
-import { schedulerTick } from "./scheduler.js";
 import {
   approveTaskSpecWorkflow,
   createTaskSpecWorkflow,
@@ -31,7 +30,7 @@ import {
   updateTaskSpecWorkflow
 } from "./spec-workflow-service.js";
 import { agentChatWorkflow } from "./agent-chat-workflow-service.js";
-import { completeTaskWorkflow, emitArtifactWorkflow, interruptTaskWorkflow, reportBlockerWorkflow, requestUserInputWorkflow, runCommandWorkflow, runTaskWorkflow, stepWorkflow } from "./task-agent-workflow-service.js";
+import { answerSubtaskQuestionWorkflow, cancelTaskWorkflow, completeTaskWorkflow, emitArtifactWorkflow, interruptTaskWorkflow, pauseTaskWorkflow, reportBlockerWorkflow, requestUserInputWorkflow, resumeTaskWorkflow, reviewSubtaskWorkflow, runCommandWorkflow, runTaskWorkflow, stepWorkflow } from "./task-agent-workflow-service.js";
 import { decomposeTaskWorkflow } from "./task-decomposition-service.js";
 
 const roots = new Map();
@@ -49,68 +48,12 @@ function services(root) {
   return roots.get(key);
 }
 
-function roleAgent(roleId) {
-  return roleById(roleId)?.agentId || roleId;
-}
-
 export async function whyNotRunning(task, root) {
   return services(root).runnabilityService.explain(task);
 }
 
-export function shouldDrainSchedulerAfterCommand(command) {
-  return [
-    "task.create",
-    "task.move",
-    "task.decompose",
-    "task.answer_input",
-    "task.comment",
-    "task.merge",
-    "agent.complete_task",
-    "agent.report_blocker",
-    "agent.request_user_input",
-    "agent.wait_for_persona",
-    "agent.wait_for_human",
-    "agent.delegate_task",
-    "agent.review_task",
-    "agent.deploy_task",
-    "workflow.create_task_spec",
-    "workflow.update_task_spec",
-    "workflow.approve_task_spec",
-    "workflow.record_handoff",
-    "workflow.record_decision",
-    "workflow.record_validation",
-    "workflow.record_technical_plan",
-    "workflow.record_implementation_tasks",
-    "workflow.record_review_report",
-    "workflow.record_deployment_report",
-    "workflow.record_summary",
-    "workflow.run_definition_of_ready_gate",
-    "workflow.run_definition_of_done_gate",
-    "role.route_task",
-    "settings.update"
-  ].includes(command.type);
-}
-
-async function drainScheduler(root, source, maxStarts) {
-  logStep("orchestrator", "scheduler.drain", { source });
-  const result = await schedulerTick(root, {
-    maxStarts,
-    whyNotRunning,
-    runTask: (task) => handleCommand({
-      type: "task.run",
-      commandId: `scheduler-run-${task.id}-${Date.now()}`,
-      taskId: task.id,
-      agentId: task.routing?.currentAgent || roleAgent(task.routing?.currentRole) || task.agent?.currentAgent || task.agent || undefined
-    }, root)
-  });
-  result.commandId = `scheduler-${source}-${Date.now()}`;
-  return result;
-}
-
-async function shouldDrainCreateResult(result, root) {
-  if (result?.task?.status !== "queued") return false;
-  const snapshot = await services(root).boardService.snapshot();
-  return Boolean(snapshot.columns.find((column) => column.id === result.task.column)?.autoStart);
+function roleAgent(roleId) {
+  return roleById(roleId)?.agentId || roleId;
 }
 
 async function requiredTask(taskId, root) {
@@ -119,7 +62,7 @@ async function requiredTask(taskId, root) {
   return current;
 }
 
-function createWorkflowCommandHandlers(root) {
+function createWorkflowCommandHandlers(root, options = {}) {
   const { taskService } = services(root);
   return {
     "task.create": async (command) => {
@@ -152,15 +95,25 @@ function createWorkflowCommandHandlers(root) {
     return { ok: true, commandId: command.commandId, task, hooks, noop: Boolean(noop) };
     },
 
-    "task.run": (command) => runTaskWorkflow(command, root, whyNotRunning, handleCommand),
+    "task.run": (command) => runTaskWorkflow(command, root, whyNotRunning, handleCommand, options),
 
     "task.interrupt": (command) => interruptTaskWorkflow(command, root),
+
+    "task.pause": (command) => pauseTaskWorkflow(command, root),
+
+    "task.resume": (command) => resumeTaskWorkflow(command, root),
+
+    "task.cancel": (command) => cancelTaskWorkflow(command, root),
 
     "agent.complete_task": (command) => completeTaskWorkflow(command, root),
 
     "agent.report_blocker": (command) => reportBlockerWorkflow(command, root),
 
     "agent.request_user_input": (command) => requestUserInputWorkflow(command, root),
+
+    "subtask.review": (command) => reviewSubtaskWorkflow(command, root),
+
+    "subtask.answer_question": (command) => answerSubtaskQuestionWorkflow(command, root),
 
     "agent.message": async (command) => {
     logStep("orchestrator", "agent.message", { commandId: command.commandId, taskId: command.message.taskId || null });
@@ -298,13 +251,6 @@ function createWorkflowCommandHandlers(root) {
     return mergeTaskWorkflow(command, await requiredTask(command.taskId, root), await listTasks(root), root);
     },
 
-    "scheduler.tick": async (command) => {
-    logStep("orchestrator", "scheduler.tick", { commandId: command.commandId, maxStarts: command.maxStarts });
-    const result = await drainScheduler(root, command.commandId, command.maxStarts);
-    result.commandId = command.commandId;
-    return result;
-    },
-
     "settings.update": async (command) => {
     logStep("orchestrator", "settings.update", { commandId: command.commandId, scope: command.scope });
     const settings = await updateSettings(command.scope, command.patch, root);
@@ -313,23 +259,16 @@ function createWorkflowCommandHandlers(root) {
   };
 }
 
-export async function handleCommand(input, root) {
+export async function handleCommand(input, root, options = {}) {
   const bus = new CommandBus({
-    handlers: createWorkflowCommandHandlers(root),
+    handlers: createWorkflowCommandHandlers(root, options),
     resultStore: {
       get: (commandId) => readCommandResult(commandId, root),
       put: (commandId, result) => recordCommandResult(commandId, result, root)
     },
-    schedulerDrain: async (command, result) => {
-      if (!result || command.type === "scheduler.tick" || !shouldDrainSchedulerAfterCommand(command)) return result;
-      if (command.type === "task.create" && !(await shouldDrainCreateResult(result, root))) return result;
-      if (command.type === "task.move" && result.noop) return result;
-      if (command.type === "task.comment" && result.deferred) return result;
-      if (command.type === "task.merge" && result.merge?.reason === "parent_merge_busy") return result;
-      return { ...result, scheduler: await drainScheduler(root, command.type) };
-    }
+    eventBus: options.eventBus
   });
-  return bus.execute(input, { root });
+  return bus.execute(input, { root, ...options });
 }
 
 export async function handleQuery(input, root) {

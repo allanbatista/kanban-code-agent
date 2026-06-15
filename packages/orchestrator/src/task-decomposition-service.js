@@ -5,6 +5,8 @@ import { TaskSchema } from "@kca/schemas";
 import { logStep } from "@kca/core/log";
 import { roleById } from "@kca/core/roles";
 
+export const MAX_DEPTH = 4;
+
 const LEGACY_ROLE_ALIASES = {
   architect: "architecture",
   engineer: "engineering",
@@ -54,7 +56,24 @@ export async function decomposeTaskWorkflow(command, parent, root) {
     await appendJsonl(`${paths(root).tasks}/${parent.id}/events.jsonl`, { ts: new Date().toISOString(), type: "task.decompose.failed", actor: "orchestrator", taskId: parent.id, reason, errors });
     return { ok: false, commandId: command.commandId, task, subtasks: [], errors };
   };
-  const existingDirectSubtasks = (await listTasks(root)).filter((task) => task.worktree?.parentTaskId === parent.id);
+  const parentDepth = Number.isInteger(parent.depth) ? parent.depth : parent.parentTaskId || parent.worktree?.parentTaskId ? 1 : 0;
+  if (parentDepth >= MAX_DEPTH) {
+    const reason = `MAX_DEPTH ${MAX_DEPTH} reached for ${parent.id}; no new subtasks can be created.`;
+    await appendChatMessage(root, {
+      scope: "task",
+      taskId: parent.id,
+      role: "assistant",
+      persona: "orchestrator",
+      agentId: "orchestrator",
+      disposition: "subtask.depth_blocked",
+      text: reason,
+      visibility: "both"
+    });
+    const task = TaskSchema.parse(await updateTask(parent.id, { status: "blocked", column: parent.column, routing: parent.routing }, root, "subtask.depth_blocked"));
+    await appendJsonl(`${paths(root).tasks}/${parent.id}/events.jsonl`, { ts: new Date().toISOString(), type: "subtask.depth_blocked", actor: "orchestrator", taskId: parent.id, depth: parentDepth, maxDepth: MAX_DEPTH });
+    return { ok: false, commandId: command.commandId, task, subtasks: [], errors: [{ type: "max_depth", depth: parentDepth, maxDepth: MAX_DEPTH }] };
+  }
+  const existingDirectSubtasks = (await listTasks(root)).filter((task) => (task.parentTaskId || task.worktree?.parentTaskId) === parent.id);
   if (existingDirectSubtasks.length) {
     const pending = existingDirectSubtasks.filter((task) => task.status !== "done");
     const status = pending.length ? "waiting" : "done";
@@ -75,7 +94,10 @@ export async function decomposeTaskWorkflow(command, parent, root) {
     const task = TaskSchema.parse(await updateTask(parent.id, { status, column }, root, "subtasks.existing"));
     return { ok: true, commandId: command.commandId, task, subtasks: existingDirectSubtasks };
   }
-  const subtasks = command.subtasks || [];
+  const subtasks = command.subtasks || [
+    { title: `${parent.title}: execução`, role: parent.routing?.currentRole || parent.routing?.currentAgent || "engineering", needs: [], provides: [`subtask:${parent.id}:execution`] },
+    { title: `${parent.title}: validação`, role: "quality", needs: [], provides: [`subtask:${parent.id}:validation`] }
+  ];
   if (!subtasks.length) {
     return failDecomposition("task.decompose requires at least one agent-provided subtask.", [{ type: "empty_subtasks" }]);
   }
@@ -100,7 +122,8 @@ export async function decomposeTaskWorkflow(command, parent, root) {
     return failDecomposition(reason, plannedDag.errors);
   }
   const created = [];
-  const mainTaskId = parent.worktree?.mainTaskId || parent.worktree?.parentTaskId || parent.id;
+  const mainTaskId = parent.rootTaskId || parent.worktree?.mainTaskId || parent.worktree?.parentTaskId || parent.id;
+  const childDepth = parentDepth + 1;
   for (const [index, subtask] of subtasks.entries()) {
     const role = canonicalRole(subtask.role || subtask.agentId || subtask.agent);
     const createdTask = TaskSchema.parse(await createTask({
@@ -112,6 +135,9 @@ export async function decomposeTaskWorkflow(command, parent, root) {
       projectTargets: parent.projectTargets,
       agent: role,
       role,
+      parentTaskId: parent.id,
+      rootTaskId: mainTaskId,
+      depth: childDepth,
       description: subtaskDescription(parent, subtask, role, mainTaskId),
       worktree: { enabled: true, kind: "subtask", branch: `kca/${parent.id}-${index + 1}`, pathRef: "worktree.yaml", parentTaskId: parent.id, mainTaskId, mergeTarget: parent.worktree?.branch || "main" },
       dependencies: { needs: subtask.needs || [], provides: subtask.provides || [], blockedBy: [], fileLocks: subtask.fileLocks || [], semaphores: subtask.semaphores || [] }
@@ -134,7 +160,9 @@ export async function decomposeTaskWorkflow(command, parent, root) {
     branch: task.worktree?.branch,
     mergeTarget: task.worktree?.mergeTarget,
     parentTaskId: parent.id,
-    mainTaskId
+    mainTaskId,
+    rootTaskId: mainTaskId,
+    depth: childDepth
   }));
   await writeYaml(`${paths(root).tasks}/${parent.id}/subtasks.yaml`, {
     schema: "kanban-code-agent/subtasks@2",

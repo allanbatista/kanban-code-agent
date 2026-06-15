@@ -1,4 +1,5 @@
-import { appendJsonl, boardSnapshot, normalizeColumnId, paths, updateTask, writeTaskFile } from "@kca/fsdb";
+import { appendJsonl, boardSnapshot, getTask, normalizeColumnId, paths, updateTask, writeTaskFile } from "@kca/fsdb";
+import { appendChatMessage } from "@kca/fsdb/chat-store";
 import { releaseSemaphoreLeases } from "@kca/fsdb/runtime-store";
 import { roleById } from "@kca/core/roles";
 import { TaskSchema } from "@kca/schemas";
@@ -16,11 +17,42 @@ function assertActiveRun(current, runId) {
   if (current.routing?.manualOverride?.active && current.routing.manualOverride.invalidatesRunId === runId) throw new Error("manual_override_active");
 }
 
+const TERMINAL_STATUSES = new Set(["done", "canceled"]);
+
+function parentIdForTask(task) {
+  return task?.parentTaskId || task?.worktree?.parentTaskId || null;
+}
+
+async function requeueParentForSubtaskDecision(child, root, disposition, text) {
+  const parentTaskId = parentIdForTask(child);
+  if (!parentTaskId) return null;
+  const parent = await getTask(parentTaskId, root);
+  if (!parent) return null;
+  await appendChatMessage(root, { scope: "task", taskId: parentTaskId, role: "assistant", persona: "orchestrator", agentId: "orchestrator", disposition, text, visibility: "both" });
+  await appendJsonl(`${paths(root).tasks}/${parentTaskId}/events.jsonl`, { ts: new Date().toISOString(), type: disposition, actor: "orchestrator", taskId: parentTaskId, subtaskId: child.id });
+  if (TERMINAL_STATUSES.has(parent.status) || parent.status === "queued") return parent;
+  return TaskSchema.parse(await updateTask(parentTaskId, { status: "queued", column: parent.column, routing: parent.routing }, root, disposition));
+}
+
 export async function reviewTaskGate(command, current, root) {
   assertActiveRun(current, command.runId);
   const review = evaluateReview({ findings: command.findings, evidence: command.evidence });
   await writeTaskFile(command.taskId, `artifacts/review-${Date.now()}.json`, JSON.stringify(review, null, 2), root);
   if (review.mergeReady) {
+    if (parentIdForTask(current)) {
+      const text = `Subtask aguardando review: ${command.taskId}. Review aprovado com evidencia: ${(command.evidence || []).join("; ") || "sem evidencia informada"}.`;
+      const task = TaskSchema.parse(await updateTask(command.taskId, {
+        status: "waiting_review",
+        column: current.column,
+        routing: current.routing,
+        workflow: normalizeWorkflow(current)
+      }, root, "subtask.review_requested"));
+      await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: current.routing?.currentRole || current.routing?.currentAgent || "review", agentId: current.routing?.currentAgent || "review", runId: command.runId, disposition: "subtask.review_requested", text, visibility: "both" });
+      await appendReviewEvent(command, root, review, "passed");
+      const parentTask = await requeueParentForSubtaskDecision(task, root, "subtask.review_requested", text);
+      await releaseSemaphoreLeases({ root, taskId: command.taskId });
+      return { ok: true, commandId: command.commandId, task, review, parentTask, reviewPending: true };
+    }
     const requested = normalizeColumnId(command.passColumn);
     const column = requested === "done" ? "deployment" : requested;
     const target = (await boardSnapshot(root)).columns.find((item) => item.id === column);

@@ -836,9 +836,9 @@ export async function initStorage(rootInput) {
           id: "manager",
           label: "Manager",
           skills: ["kanban-management"],
-          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "wait_for_persona", "delegate_task", "spawn_subtasks", "record_handoff", "record_decision", "record_summary", "run_definition_of_ready_gate", "run_definition_of_done_gate"],
+          tools: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "wait_for_persona", "delegate_task", "spawn_subtasks", "review_subtask", "answer_subtask_question", "approve_task_spec", "record_handoff", "record_decision", "record_summary", "run_definition_of_ready_gate", "run_definition_of_done_gate"],
           maxParallelTasks: 50,
-          prompt: "# Manager\n\nMission: choose exactly one simplest next operational action for the task.\n\nInputs: task metadata, workflow state, task-spec, acceptance, planning, recent task chat, artifacts, blockers, and tool results.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, wait_for_persona, delegate_task, spawn_subtasks, record_handoff, record_decision, record_summary, run_definition_of_ready_gate, run_definition_of_done_gate.\n\nOwns: triage, routing, unblocking, contract review, DoR/DoD gates, execution planning after product approval, final summary, and deciding the next responsible persona.\n\nDoes not own: product contract, UX spec, system architecture, implementation, QA, code review, or deployment.\n\nSuggestions: use product when product intent is missing; use architecture for complex technical planning; use design for UI/UX; use engineering for implementation; use quality/review/deployment for validation, review, and release evidence; use generalist for non-code operational work; create parallel subtasks when work is independent.\n\nEvidence: cite the task fact or blocker that justifies the action.\n\nHandoff: include target persona, concrete request, expected output, and stop after the handoff.\n\nRequired output: exactly one visible decision, one tool call, or an execution-plan artifact when planning is needed.\n\nStop conditions: after one visible decision or one tool call, stop. Never repeat the same blocker, delegation, or comment. If required live/current external data is genuinely unavailable after concrete command evidence, use report_blocker or request_user_input instead of continuing with estimates. Text alone does not finish the run; use a terminal tool.\n\nForbidden actions: do not implement code, define acceptance, validate behavior, review code, deploy, or move directly to Done.\n"
+          prompt: "# Manager\n\nMission: choose exactly one simplest next operational action for the task.\n\nInputs: task metadata, workflow state, task-spec, acceptance, planning, recent task chat, artifacts, blockers, and tool results.\n\nAllowed tools: complete_task, request_user_input, report_blocker, emit_artifact, wait_for_persona, delegate_task, spawn_subtasks, review_subtask, answer_subtask_question, approve_task_spec, record_handoff, record_decision, record_summary, run_definition_of_ready_gate, run_definition_of_done_gate.\n\nOwns: triage, routing, unblocking, contract review/spec approval, DoR/DoD gates, execution planning after product approval, subtask review/answers, final summary, and deciding the next responsible persona.\n\nDoes not own: product contract, UX spec, system architecture, implementation, QA, code review, or deployment.\n\nSuggestions: use product when product intent is missing; approve ready product specs with approve_task_spec; use architecture for complex technical planning; use design for UI/UX; use engineering for implementation; use quality/review/deployment for validation, review, and release evidence; use generalist for non-code operational work; create parallel subtasks when work is independent; approve or reject waiting_review subtasks and answer waiting_response subtasks.\n\nEvidence: cite the task fact or blocker that justifies the action.\n\nHandoff: include target persona, concrete request, expected output, and stop after the handoff.\n\nRequired output: exactly one visible decision, one tool call, or an execution-plan artifact when planning is needed.\n\nStop conditions: after one visible decision or one tool call, stop. Never repeat the same blocker, delegation, or comment. If required live/current external data is genuinely unavailable after concrete command evidence, use report_blocker or request_user_input instead of continuing with estimates. Text alone does not finish the run; use a terminal tool.\n\nForbidden actions: do not implement code, define acceptance, validate behavior, review code, deploy, or move directly to Done.\n"
         },
         {
           id: "product",
@@ -938,7 +938,7 @@ export async function initStorage(rootInput) {
       }
       await ensureAgentTool(join(p.settings, "agents", "generalist.yaml"), "run_command");
       for (const agent of defaultAgents) {
-        for (const tool of ["wait_for_persona", "delegate_task", "spawn_subtasks"]) {
+        for (const tool of ["wait_for_persona", "delegate_task", "spawn_subtasks", "review_subtask", "answer_subtask_question"]) {
           await ensureAgentTool(join(p.settings, "agents", `${agent.id}.yaml`), tool);
         }
       }
@@ -1037,6 +1037,11 @@ export async function createTask(input, rootInput) {
   const needsHumanIntake = !input.draft && normalizeColumnId(requestedColumn) === "manager" && !taskHasActionableIntent(input);
   const column = needsHumanIntake ? "human_wait" : await resolveStoredColumnId(requestedColumn, p);
   const title = needsHumanIntake ? UNCLEAR_TASK_TITLE : fallbackTaskTitle(input);
+  const requestedWorktree = input.worktree || { enabled: true, kind: input.kind || "task", branch: input.branch || `kca/${id}`, pathRef: "worktree.yaml", parentTaskId: null, mergeTarget: "main" };
+  const parentTaskId = input.parentTaskId ?? requestedWorktree.parentTaskId ?? null;
+  const rootTaskId = input.rootTaskId ?? requestedWorktree.mainTaskId ?? (parentTaskId ? parentTaskId : id);
+  const depth = Number.isInteger(input.depth) ? input.depth : parentTaskId ? 1 : 0;
+  const worktree = { ...requestedWorktree, parentTaskId, mainTaskId: rootTaskId };
   const task = {
     schema: "kanban-code-agent/task@1",
     id,
@@ -1049,10 +1054,13 @@ export async function createTask(input, rootInput) {
     updatedAt: now,
     createdBy: "user",
     projectTargets: input.projectTargets || [],
+    parentTaskId,
+    rootTaskId,
+    depth,
     routing: needsHumanIntake
       ? { currentAgent: null, currentRole: null, lastAgent: input.agent || "manager", lastRole: input.role || input.agent || "manager", manualOverride: { active: false } }
       : input.routing || { currentAgent: input.agent || "manager", currentRole: input.role || input.agent || "manager", manualOverride: { active: false } },
-    worktree: input.worktree || { enabled: true, kind: input.kind || "task", branch: input.branch || `kca/${id}`, pathRef: "worktree.yaml", parentTaskId: null, mergeTarget: "main" },
+    worktree,
     dependencies: input.dependencies || { needs: [], provides: [], blockedBy: [], fileLocks: [], semaphores: [] },
     workflow: normalizeWorkflow({
       column: await resolveStoredColumnId(requestedColumn, p),
@@ -1087,7 +1095,7 @@ export async function createTask(input, rootInput) {
   });
   await writeYaml(join(taskDir, "dependencies.yaml"), { schema: "kanban-code-agent/dependencies@1", ...task.dependencies });
   await writeYaml(join(taskDir, "subtasks.yaml"), { schema: "kanban-code-agent/subtasks@2", taskId: id, parentTaskId: id, strategy: "dag", mergePolicy: "sequential-into-parent-feature", nodes: [], subtasks: [], edges: [] });
-  await writeYaml(join(taskDir, "worktree.yaml"), { schema: "kanban-code-agent/worktree@1", taskId: id, branch: task.worktree.branch });
+  await writeYaml(join(taskDir, "worktree.yaml"), { schema: "kanban-code-agent/worktree@1", taskId: id, branch: task.worktree.branch, parentTaskId, mainTaskId: rootTaskId });
   await appendJsonl(join(taskDir, "comments.jsonl"), { ts: now, type: "comment.system", actor: needsHumanIntake ? "manager" : "system", taskId: id, body: needsHumanIntake ? "Preciso de mais informações para criar a task: informe o objetivo e o que deve ser feito." : "Task criada." });
   await appendJsonl(join(taskDir, "events.jsonl"), { ts: now, type: "task.created", actor: "user", taskId: id, task });
   if (needsHumanIntake) await appendJsonl(join(taskDir, "events.jsonl"), { ts: now, type: "human.input_requested", actor: "manager", taskId: id, reason: "missing_actionable_task_intent" });
@@ -1123,16 +1131,25 @@ export async function getTask(taskId, rootInput) {
 async function readTaskWithRuntime(taskId, p) {
   const task = await readYaml(join(p.tasks, taskId, "task.yaml"));
   if (!task) return null;
+  const normalizedTreeTask = normalizeTaskTreeFields(task);
   const workflow = normalizeWorkflow(task);
   if (!task.workflow || WORKFLOW_GATE_KEYS.some((key) => !task.workflow?.gates?.[key]) || !task.workflow?.artifacts) {
     const taskPath = join(p.tasks, taskId, "task.yaml");
-    await writeYaml(taskPath, { ...task, workflow });
-    await ensureWorkflowArtifacts(join(p.tasks, taskId), { ...task, workflow });
+    await writeYaml(taskPath, { ...normalizedTreeTask, workflow });
+    await ensureWorkflowArtifacts(join(p.tasks, taskId), { ...normalizedTreeTask, workflow });
   }
-  task.workflow = workflow;
+  normalizedTreeTask.workflow = workflow;
   const events = await readJsonl(join(p.tasks, taskId, "events.jsonl"));
   const failure = latestFailure(events);
-  return failure ? { ...task, failure } : task;
+  return failure ? { ...normalizedTreeTask, failure } : normalizedTreeTask;
+}
+
+function normalizeTaskTreeFields(task) {
+  const parentTaskId = task.parentTaskId ?? task.worktree?.parentTaskId ?? null;
+  const rootTaskId = task.rootTaskId ?? task.worktree?.mainTaskId ?? (parentTaskId ? parentTaskId : task.id);
+  const depth = Number.isInteger(task.depth) ? task.depth : parentTaskId ? 1 : 0;
+  const worktree = task.worktree ? { ...task.worktree, parentTaskId, mainTaskId: rootTaskId } : task.worktree;
+  return { ...task, parentTaskId, rootTaskId, depth, ...(worktree ? { worktree } : {}) };
 }
 
 function latestFailure(events = []) {
@@ -1363,7 +1380,7 @@ function normalizeAgentSettings(agent) {
   };
   const normalized = { ...agent, limits };
   if (agent.id !== "manager") return normalized;
-  const required = ["wait_for_persona", "delegate_task", "spawn_subtasks"];
+  const required = ["wait_for_persona", "spawn_subtasks", "review_subtask", "answer_subtask_question", "approve_task_spec"];
   if (Array.isArray(normalized.tools)) return { ...normalized, tools: [...new Set([...normalized.tools, ...required])] };
   return { ...normalized, tools: { ...(normalized.tools || {}), custom: [...new Set([...(normalized.tools?.custom || []), ...required])] } };
 }
@@ -1520,7 +1537,7 @@ export async function boardSnapshot(rootInput) {
   const storedTasks = (await listTasks(rootInput)).filter((task) => task.status !== "draft");
   const directChildrenByParent = new Map();
   for (const task of storedTasks) {
-    const parentTaskId = task.worktree?.parentTaskId;
+    const parentTaskId = task.parentTaskId || task.worktree?.parentTaskId;
     if (!parentTaskId) continue;
     const children = directChildrenByParent.get(parentTaskId) || [];
     children.push(task);
@@ -1532,7 +1549,11 @@ export async function boardSnapshot(rootInput) {
     const subtasksSummary = children.length ? {
       total: children.length,
       running: children.filter((child) => ["queued", "running", "waiting", "validating"].includes(child.status)).length,
-      done: children.filter((child) => child.status === "done").length
+      done: children.filter((child) => child.status === "done").length,
+      waitingReview: children.filter((child) => child.status === "waiting_review").length,
+      waitingResponse: children.filter((child) => child.status === "waiting_response").length,
+      paused: children.filter((child) => child.status === "paused").length,
+      canceled: children.filter((child) => child.status === "canceled").length
     } : undefined;
     return { ...task, ...(usage ? { usage } : {}), ...(subtasksSummary ? { subtasksSummary } : {}) };
   }));

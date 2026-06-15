@@ -6,8 +6,8 @@ import { WebSocketServer } from "ws";
 import { createEventBus } from "@kca/application/event-bus";
 import { createBoardService } from "@kca/board-service";
 import { createTask, initStorage, listTasks, refreshOpenRouterModelCache, resolveTaskFilePath, taskFileContentType, taskFileKind } from "@kca/fsdb";
-import { handleCommand, handleQuery } from "@kca/orchestrator";
-import { recoverStaleRuns } from "@kca/orchestrator/scheduler";
+import { handleCommand, handleQuery, whyNotRunning } from "@kca/orchestrator";
+import { createReconcilerQueue, recoverStaleRuns } from "@kca/orchestrator/reconciler";
 import { initialState } from "@kca/core";
 import { logStep } from "@kca/core/log";
 
@@ -20,7 +20,7 @@ const fsdbPollMs = Number(process.env.KCA_FSDB_POLL_MS || 1000);
 const clients = new Set();
 const sockets = new Set();
 const eventBus = createEventBus();
-let schedulerTickRunning = false;
+let reconcilerQueue;
 let readyPromise;
 let boardService;
 let eventBusConfigured = false;
@@ -79,13 +79,37 @@ function broadcast(event) {
 function configureEventBus() {
   if (eventBusConfigured) return;
   eventBusConfigured = true;
+  reconcilerQueue = createReconcilerQueue({
+    root,
+    eventBus,
+    whyNotRunning,
+    runTask: (task) => handleCommand({
+      type: "task.run",
+      commandId: `reconcile-run-${task.id}-${Date.now()}`,
+      taskId: task.id,
+      agentId: task.routing?.currentAgent || task.routing?.currentRole || task.agent?.currentAgent || task.agent || undefined
+    }, root, { eventBus }),
+    onResult: async (result) => {
+      if (result.autoQueued?.length || result.started?.length || result.blocked?.length || result.skipped?.length) {
+        logStep("daemon", "reconcile.result", { source: result.source, autoQueued: result.autoQueued || [], started: result.started?.map((item) => item.taskId) || [], blocked: result.blocked?.length || 0, skipped: result.skipped?.length || 0 });
+      }
+      await eventBus.publish({ type: "orchestrator.reconciled", result });
+    },
+    onError: async (error, source) => {
+      await eventBus.publish({ type: "orchestrator.reconcile_error", ts: new Date().toISOString(), source, message: error.message });
+      logStep("daemon", "reconcile.error", { source, message: error.message });
+    }
+  });
+  eventBus.subscribe("command.executed", (event) => {
+    boardService?.invalidate?.("command.executed");
+    broadcast({ type: "command.executed", commandType: event.commandType, commandId: event.commandId, ok: event.result?.ok ?? true });
+  });
   eventBus.subscribe("command.result", (event) => {
     boardService?.invalidate?.("command.result");
     broadcast({ type: "command.result", result: event.result });
-    if (event.result?.scheduler) broadcast({ type: "scheduler.tick", result: event.result.scheduler });
   });
-  eventBus.subscribe("scheduler.tick", (event) => broadcast({ type: "scheduler.tick", result: event.result }));
-  eventBus.subscribe("scheduler.error", (event) => broadcast({ type: "scheduler.error", ts: event.ts, message: event.message }));
+  eventBus.subscribe("orchestrator.reconciled", (event) => broadcast({ type: "orchestrator.reconciled", result: event.result }));
+  eventBus.subscribe("orchestrator.reconcile_error", (event) => broadcast({ type: "orchestrator.reconcile_error", ts: event.ts, source: event.source, message: event.message }));
   eventBus.subscribe("fsdb.changed", (event) => {
     boardService?.invalidate?.("external-fsdb-change");
     broadcast({ type: "fsdb.changed", ts: event.ts });
@@ -103,7 +127,7 @@ async function executeRpcMessage(message) {
     return { id: message.id, type: "query.result", ok: true, data: await handleQuery(message.query, root) };
   }
   if (message.type === "command") {
-    const result = await handleCommand(message.command, root);
+    const result = await handleCommand(message.command, root, { eventBus });
     await broadcastCommandResult(result);
     return { id: message.id, type: "command.result", ok: true, result };
   }
@@ -209,31 +233,11 @@ async function startFsdbPoller() {
   timer.unref?.();
 }
 
-async function runSchedulerTick(source = "startup") {
-  if (schedulerTickRunning) return null;
-  schedulerTickRunning = true;
-  try {
-    logStep("daemon", "schedulerTick.start", { source });
-    await ensureReady();
-    const result = await handleCommand({ type: "scheduler.tick", commandId: `scheduler-${source}-${Date.now()}` }, root);
-    if (result.autoQueued?.length || result.started?.length || result.blocked?.length || result.skipped?.length) {
-      logStep("daemon", "schedulerTick.result", { source, autoQueued: result.autoQueued || [], started: result.started?.map((item) => item.taskId) || [], blocked: result.blocked?.length || 0, skipped: result.skipped?.length || 0 });
-    }
-    await eventBus.publish({ type: "scheduler.tick", result });
-    return result;
-  } catch (error) {
-    await eventBus.publish({ type: "scheduler.error", ts: new Date().toISOString(), message: error.message });
-    logStep("daemon", "schedulerTick.error", { source, message: error.message });
-    return { ok: false, error: error.message };
-  } finally {
-    schedulerTickRunning = false;
-  }
-}
-
-async function startSchedulerRecovery() {
-  logStep("daemon", "schedulerRecovery.start");
+async function startOrchestratorRecovery() {
+  logStep("daemon", "orchestratorRecovery.start");
+  await ensureReady();
   await recoverStaleRuns(root);
-  await runSchedulerTick("startup");
+  reconcilerQueue?.enqueue("startup");
 }
 
 const server = createServer(async (req, res) => {
@@ -241,7 +245,7 @@ const server = createServer(async (req, res) => {
     const storage = await ensureReady();
     logStep("daemon", "http.request", { method: req.method, url: req.url });
     if (req.method === "OPTIONS") return json(res, 204, {});
-    if (req.url === "/health") return json(res, 200, { ok: true, storageRoot: storage.root, seededFixtures: seedFixtures, schedulerMode: "event-driven", schedulerPollMs: 0 });
+    if (req.url === "/health") return json(res, 200, { ok: true, storageRoot: storage.root, seededFixtures: seedFixtures, orchestratorMode: "event-driven" });
     if (req.url === "/api/state" && req.method === "GET") return json(res, 200, await boardService.snapshot());
     if (req.url?.startsWith("/api/task-file") && req.method === "GET") return sendTaskFile(req, res);
     if (req.url === "/api/query" && req.method === "POST") return json(res, 200, await handleQuery(await body(req), root));
@@ -259,21 +263,21 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.url === "/api/command" && req.method === "POST") {
-      const result = await handleCommand(await body(req), root);
+      const result = await handleCommand(await body(req), root, { eventBus });
       await broadcastCommandResult(result);
       return json(res, 200, result);
     }
 
     if (req.url === "/api/task.move" && req.method === "POST") {
       const input = await body(req);
-      const result = await handleCommand({ type: "task.move", taskId: input.taskId, toColumn: input.toColumn, mode: input.mode, commandId: input.commandId || `cmd-${Date.now()}` }, root);
+      const result = await handleCommand({ type: "task.move", taskId: input.taskId, toColumn: input.toColumn, mode: input.mode, commandId: input.commandId || `cmd-${Date.now()}` }, root, { eventBus });
       await broadcastCommandResult(result);
       return json(res, 200, result);
     }
 
     if (req.url === "/api/settings.update" && req.method === "POST") {
       const input = await body(req);
-      const result = await handleCommand({ type: "settings.update", scope: input.scope || "app", patch: input.patch || {}, commandId: input.commandId || `cmd-${Date.now()}` }, root);
+      const result = await handleCommand({ type: "settings.update", scope: input.scope || "app", patch: input.patch || {}, commandId: input.commandId || `cmd-${Date.now()}` }, root, { eventBus });
       await broadcastCommandResult(result);
       return json(res, 200, result);
     }
@@ -315,5 +319,5 @@ server.listen(port, "127.0.0.1", () => {
   logStep("daemon", "listen", { url: `http://127.0.0.1:${port}` });
   startWebSocketServer();
   void startFsdbPoller();
-  void startSchedulerRecovery();
+  void startOrchestratorRecovery();
 });

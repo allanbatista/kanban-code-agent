@@ -50,7 +50,8 @@ export async function delegateTaskWorkflow(command, current, root) {
   const targetRole = command.toPersona;
   const targetColumn = roleColumn(targetRole);
   const agentId = roleAgent(targetRole);
-  const mainTaskId = current.worktree?.mainTaskId || current.worktree?.parentTaskId || current.id;
+  const mainTaskId = current.rootTaskId || current.worktree?.mainTaskId || current.worktree?.parentTaskId || current.id;
+  const childDepth = (Number.isInteger(current.depth) ? current.depth : current.parentTaskId || current.worktree?.parentTaskId ? 1 : 0) + 1;
   const childId = `${current.id}-${Date.now().toString(36)}`;
   await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "delegation.requested", actor: command.fromPersona, taskId: command.taskId, fromPersona: command.fromPersona, toPersona: command.toPersona, wait: command.wait, request: command.request, expectedOutput: command.expectedOutput });
   const child = TaskSchema.parse(await createTask({
@@ -62,6 +63,9 @@ export async function delegateTaskWorkflow(command, current, root) {
     projectTargets: current.projectTargets,
     agent: agentId,
     role: targetRole,
+    parentTaskId: current.id,
+    rootTaskId: mainTaskId,
+    depth: childDepth,
     description: [
       `Delegated request: ${command.request}`,
       `Expected output: ${command.expectedOutput || "Report result to parent task."}`,
@@ -75,7 +79,7 @@ export async function delegateTaskWorkflow(command, current, root) {
   await writeTaskFile(child.id, "acceptance.md", `# Critérios de aceite\n\n- [ ] Request atendido: ${command.request}\n- [ ] Expected output entregue: ${command.expectedOutput || "result summary"}\n- [ ] Parent task id: ${current.id}\n- [ ] Main task id: ${mainTaskId}\n- [ ] Target persona: ${targetRole}\n`, root);
   const subtasksPath = `${paths(root).tasks}/${current.id}/subtasks.yaml`;
   const existing = await readYaml(subtasksPath, { schema: "kanban-code-agent/subtasks@2", taskId: current.id, parentTaskId: current.id, strategy: "dag", mergePolicy: "sequential-into-parent-feature", nodes: [], subtasks: [], edges: [] });
-  const node = { id: child.id, title: child.title, status: child.status, column: child.column, role: targetRole, agent: agentId, needs: [], provides: child.dependencies?.provides || [], fileLocks: [], semaphores: [], parentTaskId: current.id, mainTaskId };
+  const node = { id: child.id, title: child.title, status: child.status, column: child.column, role: targetRole, agent: agentId, needs: [], provides: child.dependencies?.provides || [], fileLocks: [], semaphores: [], parentTaskId: current.id, mainTaskId, rootTaskId: mainTaskId, depth: childDepth };
   const nodes = [...(existing.nodes || existing.subtasks || []), node];
   await writeYaml(subtasksPath, { ...existing, nodes, subtasks: nodes, edges: existing.edges || [] });
   await appendJsonl(`${paths(root).tasks}/${current.id}/events.jsonl`, { ts: new Date().toISOString(), type: "delegation.subtask_created", actor: command.fromPersona, taskId: current.id, subtaskId: child.id, toPersona: targetRole, wait: command.wait });

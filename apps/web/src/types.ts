@@ -17,6 +17,9 @@ export type Task = {
   status: string;
   priority: string;
   projectTargets: string[];
+  parentTaskId?: string | null;
+  rootTaskId?: string | null;
+  depth?: number;
   routing?: { currentAgent?: string | null; currentRole?: string | null; lastAgent?: string | null; lastRole?: string | null; nextSuggestedColumn?: string | null; manualOverride?: { active?: boolean } };
   workflow?: {
     phase?: string;
@@ -26,7 +29,7 @@ export type Task = {
     artifacts?: Record<string, string>;
   };
   worktree?: { branch?: string; path?: string; parentTaskId?: string | null; mainTaskId?: string | null; mergeTarget?: string };
-  subtasksSummary?: { total: number; running: number; done: number };
+  subtasksSummary?: { total: number; running: number; done: number; waitingReview?: number; waitingResponse?: number; paused?: number; canceled?: number };
   dependencies?: { needs?: string[]; provides?: string[]; blockedBy?: string[]; fileLocks?: string[]; semaphores?: unknown[] };
   failure?: { type?: string; reason?: string; ts?: string; actor?: string; runId?: string };
   hooks?: { active?: string[] };

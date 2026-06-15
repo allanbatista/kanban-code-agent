@@ -62,6 +62,8 @@ test("schemas parse generated FSDB settings, task files and events", async () =>
 
   const parsedTask = TaskSchema.parse(await readYamlFile(join(root, "tasks", task.id, "task.yaml")));
   assert.equal(parsedTask.id, task.id);
+  assert.equal(parsedTask.rootTaskId, task.id);
+  assert.equal(parsedTask.depth, 0);
   assert.equal(TaskWorkflowSchema.parse(parsedTask.workflow).gates.definitionOfReady.status, "pending");
   assert.equal(TaskWorkflowSchema.parse(parsedTask.workflow).artifacts.technicalPlan, "technical-plan.md");
   assert.match(await readFile(join(root, "tasks", task.id, "task-spec.md"), "utf8"), /# Task Spec/);
@@ -78,6 +80,7 @@ test("schemas parse generated FSDB settings, task files and events", async () =>
 });
 
 test("task.decompose command requires explicit agent-owned subtasks", () => {
+  assert.throws(() => parseCommand({ type: "scheduler.tick", commandId: "cmd-old-scheduler" }));
   assert.throws(() => parseCommand({
     type: "task.decompose",
     commandId: "cmd-empty-decompose",
@@ -90,6 +93,11 @@ test("task.decompose command requires explicit agent-owned subtasks", () => {
     taskId: "KCA-SCHEMA",
     subtasks: [{ title: "Roleless" }]
   }));
+  assert.equal(parseCommand({
+    type: "task.decompose",
+    commandId: "cmd-default-decompose",
+    taskId: "KCA-SCHEMA"
+  }).subtasks, undefined);
   const parsed = parseCommand({
     type: "task.decompose",
     commandId: "cmd-valid-decompose",
@@ -97,4 +105,9 @@ test("task.decompose command requires explicit agent-owned subtasks", () => {
     subtasks: [{ title: "Implement", role: "engineering" }]
   });
   assert.equal(parsed.subtasks[0].role, "engineering");
+  assert.equal(parseCommand({ type: "task.pause", commandId: "cmd-pause", taskId: "KCA-SCHEMA", scope: "chain" }).scope, "chain");
+  assert.equal(parseCommand({ type: "task.resume", commandId: "cmd-resume", taskId: "KCA-SCHEMA" }).scope, "task");
+  assert.equal(parseCommand({ type: "task.cancel", commandId: "cmd-cancel", taskId: "KCA-SCHEMA", reason: "stop" }).scope, "task");
+  assert.equal(parseCommand({ type: "subtask.review", commandId: "cmd-review", taskId: "KCA-CHILD", decision: "approve" }).decision, "approve");
+  assert.equal(parseCommand({ type: "subtask.answer_question", commandId: "cmd-answer", taskId: "KCA-CHILD", answer: "ok" }).answer, "ok");
 });

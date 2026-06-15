@@ -120,7 +120,7 @@ function AppShell() {
       socket = new WebSocket(daemonWebSocketUrl());
       socket.onopen = () => {
         attempts = 0;
-        socket?.send(JSON.stringify({ type: "subscribe", id: commandId("ws-subscribe"), topics: ["commands", "fsdb", "scheduler"] }));
+        socket?.send(JSON.stringify({ type: "subscribe", id: commandId("ws-subscribe"), topics: ["commands", "fsdb", "orchestrator"] }));
         invalidateRealtimeQueries(queryClient);
       };
       socket.onmessage = (message) => {
@@ -210,17 +210,13 @@ function AppShell() {
   }
 
   async function sendTaskComment(text: string, taskId: string) {
-    const result = await commandDaemon<{ resumed?: boolean; task?: Task; scheduler?: { started?: Array<{ taskId?: string }>; skipped?: Array<{ taskId?: string; reason?: string; reasons?: string[] }>; blocked?: Array<{ taskId?: string; error?: string }> } }>({ type: "task.comment", commandId: commandId("task-comment"), taskId, text });
+    const result = await commandDaemon<{ resumed?: boolean; task?: Task }>({ type: "task.comment", commandId: commandId("task-comment"), taskId, text });
     await queryClient.invalidateQueries({ queryKey: ["state"] });
     await queryClient.invalidateQueries({ queryKey: ["orchestrator"] });
     await queryClient.invalidateQueries({ queryKey: ["comments", "task", taskId] });
     await queryClient.invalidateQueries({ queryKey: ["agent-logs", taskId] });
     if (!result.resumed) return "Comentario registrado.";
-    if (result.scheduler?.started?.some((item) => item.taskId === taskId)) return "Resposta registrada. Task retomada automaticamente.";
-    const skipped = result.scheduler?.skipped?.find((item) => item.taskId === taskId);
-    const blocked = result.scheduler?.blocked?.find((item) => item.taskId === taskId);
-    const reason = skipped?.reasons?.join(" ") || skipped?.reason || blocked?.error;
-    return reason ? `Resposta registrada. Task voltou para ${result.task?.column || "fila"}; aguardando scheduler: ${reason}` : "Resposta registrada. Task voltou para a fila.";
+    return `Resposta registrada. Task voltou para ${result.task?.column || "fila"}.`;
   }
 
   async function loadMoreTaskLogs(taskId: string) {
@@ -263,7 +259,7 @@ function AppShell() {
     });
   }
 
-  async function saveTask(input: { id?: string; title: string; description?: string; projectTargets: string[] }, options: { execute?: boolean } = {}) {
+  async function saveTask(input: { id?: string; title: string; description?: string; projectTargets: string[] }, options: { draft?: boolean; execute?: boolean } = {}) {
     const title = fallbackTitle(input);
     let task: Task;
     if (input.id) {
@@ -273,6 +269,7 @@ function AppShell() {
         taskId: input.id,
         patch: {
           title,
+          ...(options.draft ? {} : { column: "inbox", status: "idle" }),
           projectTargets: input.projectTargets
         }
       }) as { task: Task };
@@ -282,11 +279,11 @@ function AppShell() {
       const created = await runCommand.mutateAsync({
         type: "task.create",
         commandId: commandId("task-create"),
-        input: { ...input, title, column: "inbox", draft: true }
+        input: { ...input, title, column: "inbox", ...(options.draft ? { draft: true } : { status: "idle" }) }
       }) as { task: Task };
       task = created.task;
     }
-    setDraftTask(task.status === "draft" ? task : null);
+    setDraftTask(!input.id || input.id === draftTask?.id || task.status === "draft" ? task : null);
     if (options.execute) {
       const moved = await runCommand.mutateAsync({ type: "task.move", commandId: commandId("task-move"), taskId: task.id, toColumn: "manager", mode: "soft" }) as { task: Task };
       task = moved.task;
@@ -298,7 +295,7 @@ function AppShell() {
   }
 
   async function uploadTaskAttachment(input: { id?: string; title: string; description?: string; projectTargets: string[] }, file: File) {
-    const task = input.id ? { id: input.id } as Task : await saveTask(input, { execute: false }) as Task;
+    const task = input.id ? { id: input.id } as Task : await saveTask(input, { draft: true }) as Task;
     const dataBase64 = await fileToBase64(file);
     const result = await runCommand.mutateAsync({
       type: "task.attachment.write",
@@ -320,18 +317,41 @@ function AppShell() {
     await runCommand.mutateAsync({ type: "task.move", commandId: commandId("task-move"), taskId, toColumn: columnId, mode: "soft" });
   }
 
-  async function taskAction(task: Task, action: "run" | "interrupt" | "complete" | "decompose") {
+  async function taskCommand(payload: Record<string, unknown>) {
+    await runCommand.mutateAsync({ ...payload, commandId: commandId(String(payload.type || "task-command").replaceAll(".", "-")) });
+    await queryClient.invalidateQueries({ queryKey: ["state"] });
+    await queryClient.invalidateQueries({ queryKey: ["orchestrator"] });
+    if (payload.taskId) {
+      await queryClient.invalidateQueries({ queryKey: ["comments", "task", payload.taskId] });
+      await queryClient.invalidateQueries({ queryKey: ["agent-logs", payload.taskId] });
+      await queryClient.invalidateQueries({ queryKey: ["task-files", payload.taskId] });
+    }
+  }
+
+  async function taskAction(task: Task, action: "run" | "interrupt" | "complete" | "decompose" | "pause-chain" | "resume-chain" | "cancel-task" | "cancel-chain") {
     if (action === "run") {
-      await runCommand.mutateAsync({ type: "task.run", commandId: commandId("task-run"), taskId: task.id, agentId: task.routing?.currentAgent || "engineering" });
+      await taskCommand({ type: "task.run", taskId: task.id, agentId: task.routing?.currentAgent || "engineering" });
     }
     if (action === "interrupt") {
-      await runCommand.mutateAsync({ type: "task.interrupt", commandId: commandId("task-interrupt"), taskId: task.id, mode: "soft" });
+      await taskCommand({ type: "task.interrupt", taskId: task.id, mode: "soft" });
     }
     if (action === "complete") {
-      await runCommand.mutateAsync({ type: "workflow.run_definition_of_done_gate", commandId: commandId("task-complete"), taskId: task.id });
+      await taskCommand({ type: "workflow.run_definition_of_done_gate", taskId: task.id });
     }
     if (action === "decompose") {
-      await runCommand.mutateAsync({ type: "task.decompose", commandId: commandId("task-decompose"), taskId: task.id });
+      await taskCommand({ type: "task.decompose", taskId: task.id, subtasks: [{ title: `${task.title}: subtask`, role: task.routing?.currentRole || "generalist" }] });
+    }
+    if (action === "pause-chain") {
+      await taskCommand({ type: "task.pause", taskId: task.id, scope: "chain", mode: "soft" });
+    }
+    if (action === "resume-chain") {
+      await taskCommand({ type: "task.resume", taskId: task.id, scope: "chain" });
+    }
+    if (action === "cancel-task") {
+      await taskCommand({ type: "task.cancel", taskId: task.id, scope: "task" });
+    }
+    if (action === "cancel-chain") {
+      await taskCommand({ type: "task.cancel", taskId: task.id, scope: "chain" });
     }
   }
 
@@ -393,6 +413,7 @@ function AppShell() {
         files={taskFiles.data}
         onSaveFile={(taskId, path, content) => runCommand.mutateAsync({ type: "task.file.write", commandId: commandId("task-file-write"), taskId, path, content }).then(() => queryClient.invalidateQueries({ queryKey: ["task-files", taskId] }))}
         onAction={taskAction}
+        onCommand={taskCommand}
       />
       <SettingsDialog
         open={settingsOpen}

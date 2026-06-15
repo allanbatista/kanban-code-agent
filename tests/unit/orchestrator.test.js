@@ -4,7 +4,9 @@ import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import YAML from "yaml";
-import { handleCommand, handleQuery } from "../../packages/orchestrator/src/index.js";
+import { createEventBus } from "../../packages/application/src/event-bus.js";
+import { handleCommand, handleQuery, whyNotRunning } from "../../packages/orchestrator/src/index.js";
+import { createReconcilerQueue } from "../../packages/orchestrator/src/reconciler.js";
 import { planningArtifactsForTask } from "../../packages/orchestrator/src/planning-service.js";
 import { addProject, appendJsonl, boardSnapshot, initStorage, paths, refreshOpenRouterModelCache } from "../../packages/fsdb/src/index.js";
 import { readTaskComments } from "../../packages/fsdb/src/chat-store.js";
@@ -40,6 +42,33 @@ function readySpec(title = "Spec-first task") {
   ].join("\n");
 }
 
+function approvedProductSpec() {
+  return [
+    "# Task Spec",
+    "",
+    "**Status:** Approved",
+    "",
+    "## Request",
+    "",
+    "Execute four independent deliveries and consolidate the final answer.",
+    "",
+    "## Scope",
+    "",
+    "- Four independent subtasks.",
+    "",
+    "## Acceptance Criteria",
+    "",
+    "- [ ] AC-1: Each delivery has evidence for todos os items.",
+    "- AC-2: Manager consolidates the final answer.",
+    "",
+    "## Dependencies",
+    "",
+    "- None between subtasks.",
+    "",
+    ""
+  ].join("\n");
+}
+
 async function disableColumnAutoStart(root) {
   const snapshot = await boardSnapshot(root);
   await handleCommand({
@@ -48,6 +77,41 @@ async function disableColumnAutoStart(root) {
     scope: "columns",
     patch: { columns: snapshot.columns.map((column) => ({ ...column, autoStart: false })) }
   }, root);
+}
+
+async function waitUntil(fn, timeoutMs = 1500) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (Date.now() < deadline) {
+    last = await fn();
+    if (last) return last;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Timed out waiting for condition: ${last ?? "not ready"}`);
+}
+
+function eventDrivenHarness(root) {
+  const eventBus = createEventBus();
+  const results = [];
+  const queue = createReconcilerQueue({
+    root,
+    eventBus,
+    whyNotRunning,
+    runTask: (task) => handleCommand({
+      type: "task.run",
+      commandId: `test-reconcile-run-${task.id}-${Date.now()}-${Math.random()}`,
+      taskId: task.id,
+      agentId: task.routing?.currentAgent || task.routing?.currentRole || undefined
+    }, root, { eventBus }),
+    onResult: (result) => results.push(result)
+  });
+  return {
+    eventBus,
+    results,
+    stop: () => queue.stop(),
+    waitForStarted: (taskId) => waitUntil(() => results.find((result) => result.started?.some((item) => item.taskId === taskId))),
+    waitForStatus: (taskId, status) => waitUntil(async () => (await handleQuery({ type: "task.detail", taskId }, root)).status === status)
+  };
 }
 
 test("orchestrator applies idempotent task create commands", async () => {
@@ -81,8 +145,9 @@ test("orchestrator updates task and explains why it is not running", async () =>
   assert.match(why.reasons.join(" "), /contract:fsdb/);
 });
 
-test("moving a task into an autoStart column drains the scheduler", async () => {
+test("moving a task into an autoStart column starts through event reconciliation", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-auto-start-move-"));
+  const harness = eventDrivenHarness(root);
   const previousAdapter = process.env.KCA_PI_ADAPTER;
   process.env.KCA_PI_ADAPTER = "fake";
   try {
@@ -90,26 +155,28 @@ test("moving a task into an autoStart column drains the scheduler", async () => 
       type: "task.create",
       commandId: "cmd-auto-start-create",
       input: { title: "Auto start on definition", column: "inbox", projectTargets: ["kanban-code-agent"] }
-    }, root);
+    }, root, { eventBus: harness.eventBus });
     const moved = await handleCommand({
       type: "task.move",
       commandId: "cmd-auto-start-move",
       taskId: created.task.id,
       toColumn: "definition"
-    }, root);
+    }, root, { eventBus: harness.eventBus });
     assert.equal(moved.task.column, "product");
     assert.equal(moved.task.status, "queued");
     assert.equal(moved.task.routing.currentRole, "product");
-    assert.deepEqual(moved.scheduler.started.map((item) => item.taskId), [created.task.id]);
+    await harness.waitForStatus(created.task.id, "running");
     assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
   } finally {
+    harness.stop();
     if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
     else process.env.KCA_PI_ADAPTER = previousAdapter;
   }
 });
 
-test("creating a task directly in an autoStart column drains the scheduler", async () => {
+test("creating a task directly in an autoStart column starts through event reconciliation", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-auto-start-create-"));
+  const harness = eventDrivenHarness(root);
   const previousAdapter = process.env.KCA_PI_ADAPTER;
   process.env.KCA_PI_ADAPTER = "fake";
   try {
@@ -117,13 +184,14 @@ test("creating a task directly in an autoStart column drains the scheduler", asy
       type: "task.create",
       commandId: "cmd-direct-auto-start-create",
       input: { title: "Auto start direct create", column: "product", projectTargets: [] }
-    }, root);
+    }, root, { eventBus: harness.eventBus });
     assert.equal(created.task.column, "product");
     assert.equal(created.task.status, "queued");
     assert.equal(created.task.routing.currentRole, "product");
-    assert.deepEqual(created.scheduler.started.map((item) => item.taskId), [created.task.id]);
+    await harness.waitForStatus(created.task.id, "running");
     assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
   } finally {
+    harness.stop();
     if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
     else process.env.KCA_PI_ADAPTER = previousAdapter;
   }
@@ -229,6 +297,349 @@ test("task run generates missing title with default model before agent prompt", 
   }
 });
 
+test("task run fails when openai compatible adapter fails after prompt send", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-provider-run-fail-"));
+  await disableColumnAutoStart(root);
+  await handleCommand({
+    type: "settings.update",
+    commandId: "cmd-provider-fail-settings",
+    scope: "app",
+    patch: { ai: { defaultProvider: "openai", defaultModel: "gpt-fail-test", enabledProviders: ["openai"] } }
+  }, root);
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-provider-fail-create",
+    input: {
+      title: "Provider failure",
+      column: "engineering",
+      status: "queued",
+      projectTargets: [],
+      routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } }
+    }
+  }, root);
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-key";
+  globalThis.fetch = async () => ({ ok: false, status: 400, json: async () => ({}) });
+  try {
+    const result = await handleCommand({ type: "task.run", commandId: "cmd-provider-fail-run", taskId: created.task.id, agentId: "engineering" }, root);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "http_400");
+    assert.equal(result.task.status, "failed");
+    assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "failed");
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+  }
+});
+
+test("task run retries transient provider request timeout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-provider-timeout-retry-"));
+  await disableColumnAutoStart(root);
+  await handleCommand({
+    type: "settings.update",
+    commandId: "cmd-provider-timeout-settings",
+    scope: "app",
+    patch: { ai: { defaultProvider: "openai", defaultModel: "gpt-timeout-test", enabledProviders: ["openai"], providers: { openai: { requestTimeoutMs: 20 } } } }
+  }, root);
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-provider-timeout-create",
+    input: {
+      title: "Provider timeout",
+      column: "engineering",
+      status: "queued",
+      projectTargets: [],
+      routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } }
+    }
+  }, root);
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-key";
+  globalThis.fetch = async (_url, init = {}) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve({ ok: true, json: async () => ({ choices: [{ message: { content: "late" } }] }) }), 1000);
+    init.signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    });
+  });
+  try {
+    const result = await handleCommand({ type: "task.run", commandId: "cmd-provider-timeout-run", taskId: created.task.id, agentId: "engineering" }, root);
+    assert.equal(result.retry, true);
+    assert.equal(result.reason, "request_timeout");
+    assert.equal(result.task.status, "queued");
+    const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
+    assert.equal(detail.status, "queued");
+    assert.match(await readFile(join(paths(root).tasks, created.task.id, "events.jsonl"), "utf8"), /agent.retry/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+  }
+});
+
+test("max-turn agent exits requeue task for continuation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-max-turn-continuation-"));
+  await disableColumnAutoStart(root);
+  await handleCommand({
+    type: "settings.update",
+    commandId: "cmd-max-turn-settings",
+    scope: "app",
+    patch: { ai: { defaultProvider: "openai", defaultModel: "gpt-max-turn", enabledProviders: ["openai"] }, runtime: { agentMaxTurns: 1 } }
+  }, root);
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-max-turn-create",
+    input: {
+      title: "Max turn continuation",
+      column: "engineering",
+      status: "queued",
+      projectTargets: [],
+      routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } }
+    }
+  }, root);
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-key";
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      id: "resp-max-turn",
+      choices: [{
+        message: {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "call-run", type: "function", function: { name: "run_command", arguments: JSON.stringify({ command: process.execPath, args: ["-e", "process.exit(0)"] }) } }]
+        }
+      }]
+    })
+  });
+  try {
+    const result = await handleCommand({ type: "task.run", commandId: "cmd-max-turn-run", taskId: created.task.id, agentId: "engineering" }, root);
+    assert.equal(result.continuation, true);
+    assert.equal(result.reason, "max_turns_without_terminal");
+    assert.equal(result.task.status, "queued");
+    assert.match(await readFile(join(paths(root).tasks, created.task.id, "events.jsonl"), "utf8"), /agent.continue_queued/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+  }
+});
+
+test("agent tool commands do not recursively start another run without event bus", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-agent-tool-no-drain-"));
+  await disableColumnAutoStart(root);
+  await handleCommand({
+    type: "settings.update",
+    commandId: "cmd-no-drain-settings",
+    scope: "app",
+    patch: { ai: { defaultProvider: "openai", defaultModel: "gpt-no-drain", enabledProviders: ["openai"] }, runtime: { maxParallelTasks: 4 } }
+  }, root);
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-no-drain-create",
+    input: { title: "No recursive drain", column: "manager", status: "queued", projectTargets: [], routing: { currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } } }
+  }, root);
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-key";
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      id: "no-drain-response",
+      model: "gpt-no-drain",
+      choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "call-product", type: "function", function: { name: "wait_for_persona", arguments: JSON.stringify({ targetRole: "product", question: "write spec" }) } }] } }]
+    })
+  });
+  try {
+    const result = await handleCommand({ type: "task.run", commandId: "cmd-no-drain-run", taskId: created.task.id, agentId: "manager" }, root);
+    assert.equal(result.task.status, "queued");
+    assert.equal(result.task.column, "product");
+    const logs = await handleQuery({ type: "agent.logs", taskId: created.task.id, limit: 100 }, root);
+    assert.equal(logs.items.filter((item) => item.type === "agent.run").length, 1);
+    assert.equal(logs.items.find((item) => item.type === "agent.run")?.agentId, "manager");
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+  }
+});
+
+test("agent spawn_subtasks tool event starts runnable subtasks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-agent-tool-reconcile-"));
+  await disableColumnAutoStart(root);
+  await handleCommand({
+    type: "settings.update",
+    commandId: "cmd-tool-reconcile-settings",
+    scope: "app",
+    patch: { ai: { defaultProvider: "openai", defaultModel: "gpt-tool-reconcile", enabledProviders: ["openai"] }, runtime: { maxParallelTasks: 4 } }
+  }, root);
+  const parent = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-tool-reconcile-create",
+    input: { title: "Tool reconcile", column: "manager", status: "queued", projectTargets: [], routing: { currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } } }
+  }, root);
+  const eventBus = createEventBus();
+  const reconciled = [];
+  const queue = createReconcilerQueue({
+    root,
+    eventBus,
+    whyNotRunning,
+    runTask: (task) => handleCommand({ type: "task.update", commandId: `cmd-tool-reconcile-start-${task.id}`, taskId: task.id, patch: { status: "running" } }, root),
+    onResult: (result) => reconciled.push(result)
+  });
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-key";
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      id: "tool-reconcile-response",
+      model: "gpt-tool-reconcile",
+      choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "call-subtasks", type: "function", function: { name: "spawn_subtasks", arguments: JSON.stringify({ subtasks: [{ title: "Child A", role: "generalist" }, { title: "Child B", role: "engineering" }] }) } }] } }]
+    })
+  });
+  try {
+    await handleCommand({ type: "task.run", commandId: "cmd-tool-reconcile-run", taskId: parent.task.id, agentId: "manager" }, root, { eventBus });
+    await waitUntil(async () => {
+      const first = await handleQuery({ type: "task.detail", taskId: `${parent.task.id}-01` }, root).catch(() => null);
+      const second = await handleQuery({ type: "task.detail", taskId: `${parent.task.id}-02` }, root).catch(() => null);
+      return first?.status === "running" && second?.status === "running";
+    });
+    assert.equal(reconciled.some((result) => result.source === "task.decompose" && result.started.length === 2), true);
+  } finally {
+    queue.stop();
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+  }
+});
+
+test("agent chat build includes visible cross-persona task comments", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-cross-persona-comments-"));
+  await disableColumnAutoStart(root);
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-cross-comments-create",
+    input: { title: "Cross persona comments", column: "manager", projectTargets: [] }
+  }, root);
+  await handleCommand({
+    type: "agent.message",
+    commandId: "cmd-cross-comments-product",
+    message: { scope: "task", taskId: created.task.id, persona: "product", agentId: "product", text: "Product spec is ready for Manager approval.", visibility: "both" }
+  }, root);
+  const chatBuild = await handleQuery({ type: "chat.build", taskId: created.task.id, persona: "manager" }, root);
+  assert.equal(chatBuild.messages.some((message) => message.persona === "product"), false);
+  assert.equal(chatBuild.visibleMessages.some((message) => message.persona === "product" && /spec is ready/.test(message.text)), true);
+});
+
+test("manager review_subtask run requeues parent instead of leaving it running", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-review-parent-requeue-"));
+  await disableColumnAutoStart(root);
+  await handleCommand({
+    type: "settings.update",
+    commandId: "cmd-review-parent-settings",
+    scope: "app",
+    patch: { ai: { defaultProvider: "openai", defaultModel: "gpt-review-test", enabledProviders: ["openai"] } }
+  }, root);
+  const parent = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-review-parent-create",
+    input: { title: "Parent review", column: "manager", status: "queued", projectTargets: [], routing: { currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } } }
+  }, root);
+  const child = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-review-child-create",
+    input: { title: "Child review", column: "generalist", status: "waiting_review", parentTaskId: parent.task.id, rootTaskId: parent.task.id, depth: 1, projectTargets: [], routing: { currentAgent: "generalist", currentRole: "generalist", manualOverride: { active: false } } }
+  }, root);
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-key";
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      id: "review-response",
+      model: "gpt-review-test",
+      choices: [{ message: { role: "assistant", content: "", tool_calls: [{ id: "call-review", type: "function", function: { name: "review_subtask", arguments: JSON.stringify({ taskId: child.task.id, decision: "approve" }) } }] } }]
+    })
+  });
+  try {
+    const result = await handleCommand({ type: "task.run", commandId: "cmd-review-parent-run", taskId: parent.task.id, agentId: "manager" }, root);
+    assert.equal(result.task.status, "queued");
+    assert.equal((await handleQuery({ type: "task.detail", taskId: parent.task.id }, root)).status, "queued");
+    assert.equal((await handleQuery({ type: "task.detail", taskId: child.task.id }, root)).status, "done");
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+  }
+});
+
+test("subtask review request queues running parent for decision", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-review-running-parent-"));
+  await disableColumnAutoStart(root);
+  await handleCommand({ type: "settings.update", commandId: "cmd-running-parent-no-drain", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root);
+  const parent = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-running-parent-create",
+    input: { title: "Running parent", column: "manager", status: "running", projectTargets: [], routing: { currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } } }
+  }, root);
+  const child = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-running-parent-child",
+    input: { title: "Child result", column: "generalist", status: "running", parentTaskId: parent.task.id, rootTaskId: parent.task.id, depth: 1, projectTargets: [], routing: { currentAgent: "generalist", currentRole: "generalist", manualOverride: { active: false } } }
+  }, root);
+  await handleCommand({
+    type: "task.update",
+    commandId: "cmd-running-parent-child-run",
+    taskId: child.task.id,
+    patch: { agent: { currentRunId: "child-run", currentSessionRef: "session.jsonl", resumeMode: "continue", lastSummary: "summaries/run-child.md" } }
+  }, root);
+  await handleCommand({
+    type: "agent.complete_task",
+    commandId: "cmd-running-parent-child-complete",
+    taskId: child.task.id,
+    runId: "child-run",
+    nextColumn: "manager",
+    summary: "child done"
+  }, root);
+  assert.equal((await handleQuery({ type: "task.detail", taskId: child.task.id }, root)).status, "waiting_review");
+  assert.equal((await handleQuery({ type: "task.detail", taskId: parent.task.id }, root)).status, "queued");
+});
+
+test("subtask review gate pass queues running parent for manager decision", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-review-gate-parent-"));
+  await disableColumnAutoStart(root);
+  await handleCommand({ type: "settings.update", commandId: "cmd-review-gate-no-drain", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root);
+  const parent = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-review-gate-parent",
+    input: { title: "Running parent", column: "manager", status: "running", projectTargets: [], routing: { currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } } }
+  }, root);
+  const child = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-review-gate-child",
+    input: { title: "Reviewed child", column: "review", status: "running", parentTaskId: parent.task.id, rootTaskId: parent.task.id, depth: 1, projectTargets: [], routing: { currentAgent: "review", currentRole: "review", manualOverride: { active: false } }, agent: { currentRunId: "review-run" } }
+  }, root);
+  const reviewed = await handleCommand({
+    type: "agent.review_task",
+    commandId: "cmd-review-gate-pass",
+    taskId: child.task.id,
+    runId: "review-run",
+    findings: [],
+    evidence: ["review ok"]
+  }, root);
+  assert.equal(reviewed.reviewPending, true);
+  assert.equal(reviewed.task.status, "waiting_review");
+  assert.equal(reviewed.task.column, "review");
+  assert.equal(reviewed.parentTask.status, "queued");
+  assert.equal((await handleQuery({ type: "task.detail", taskId: parent.task.id }, root)).status, "queued");
+});
+
 test("manager task without actionable title waits for human input", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-title-human-wait-"));
   const created = await handleCommand({
@@ -246,6 +657,7 @@ test("manager task without actionable title waits for human input", async () => 
 
 test("moving a running task into an autoStart column queues the target agent", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-running-move-autostart-"));
+  const harness = eventDrivenHarness(root);
   const previousAdapter = process.env.KCA_PI_ADAPTER;
   process.env.KCA_PI_ADAPTER = "fake";
   try {
@@ -253,7 +665,8 @@ test("moving a running task into an autoStart column queues the target agent", a
       type: "task.create",
       commandId: "cmd-running-move-create",
       input: { title: "Running move", column: "product", status: "queued", routing: { currentAgent: "product", currentRole: "product", manualOverride: { active: false } } }
-    }, root);
+    }, root, { eventBus: harness.eventBus });
+    await harness.waitForStarted(created.task.id);
     const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
     assert.equal(detail.status, "running");
     await appendJsonl(join(paths(root).tasks, created.task.id, "events.jsonl"), { ts: new Date().toISOString(), type: "gate.failed", actor: "quality", taskId: created.task.id, reason: "status:queued" });
@@ -263,24 +676,25 @@ test("moving a running task into an autoStart column queues the target agent", a
       commandId: "cmd-running-move-manager",
       taskId: created.task.id,
       toColumn: "manager"
-    }, root);
+    }, root, { eventBus: harness.eventBus });
     assert.equal(moved.task.column, "manager");
     assert.equal(moved.task.status, "queued");
     assert.equal(moved.task.routing.currentAgent, "manager");
     assert.equal(moved.task.routing.currentRole, "manager");
     assert.equal(moved.task.routing.manualOverride.active, false);
-    assert.deepEqual(moved.scheduler.started.map((item) => item.taskId), [created.task.id]);
+    await harness.waitForStatus(created.task.id, "running");
     const latest = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
     assert.equal(latest.status, "running");
     assert.equal(latest.routing.currentAgent, "manager");
     assert.equal(latest.failure, undefined);
   } finally {
+    harness.stop();
     if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
     else process.env.KCA_PI_ADAPTER = previousAdapter;
   }
 });
 
-test("moving a task to the same column is a no-op without scheduler drain", async () => {
+test("moving a task to the same column is a no-op without reconciliation result", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-same-column-move-"));
   const created = await handleCommand({
     type: "task.create",
@@ -302,20 +716,22 @@ test("moving a task to the same column is a no-op without scheduler drain", asyn
 test("moving a task to inbox clears active agent and leaves it idle", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-inbox-special-"));
   const previousAdapter = process.env.KCA_PI_ADAPTER;
+  const harness = eventDrivenHarness(root);
   process.env.KCA_PI_ADAPTER = "fake";
   try {
     const created = await handleCommand({
       type: "task.create",
       commandId: "cmd-inbox-special-create",
       input: { title: "Inbox special", column: "product", status: "queued", routing: { currentAgent: "product", currentRole: "product", lastAgent: "engineering", lastRole: "engineering", manualOverride: { active: false } } }
-    }, root);
+    }, root, { eventBus: harness.eventBus });
+    await harness.waitForStarted(created.task.id);
     assert.equal((await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status, "running");
     const moved = await handleCommand({
       type: "task.move",
       commandId: "cmd-inbox-special-move",
       taskId: created.task.id,
       toColumn: "inbox"
-    }, root);
+    }, root, { eventBus: harness.eventBus });
     assert.equal(moved.task.column, "inbox");
     assert.equal(moved.task.status, "idle");
     assert.equal(moved.task.routing.currentAgent, null);
@@ -323,8 +739,9 @@ test("moving a task to inbox clears active agent and leaves it idle", async () =
     assert.equal(moved.task.routing.lastAgent, "engineering");
     assert.equal(moved.task.routing.lastRole, "engineering");
     assert.equal(moved.task.routing.manualOverride.active, false);
-    assert.equal(moved.scheduler.started.length, 0);
+    assert.equal(moved.scheduler, undefined);
   } finally {
+    harness.stop();
     if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
     else process.env.KCA_PI_ADAPTER = previousAdapter;
   }
@@ -356,6 +773,7 @@ test("moving to legacy definition column keeps task visible on that board", asyn
 
 test("orchestrator starts, completes and summarizes a task session", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-orch-"));
+  const harness = eventDrivenHarness(root);
   const previousAdapter = process.env.KCA_PI_ADAPTER;
   process.env.KCA_PI_ADAPTER = "fake";
   try {
@@ -385,15 +803,17 @@ test("orchestrator starts, completes and summarizes a task session", async () =>
       runId: started.run.runId,
       nextColumn: "validate",
       summary: "Implementado e pronto para validação."
-    }, root);
+    }, root, { eventBus: harness.eventBus });
     assert.equal(completed.task.column, "quality");
     assert.equal(completed.task.status, "queued");
     assert.match(completed.summaryRef, /summaries\/run-/);
-    const autoRun = completed.scheduler.started.find((item) => item.taskId === created.task.id)?.result;
+    const reconcile = await harness.waitForStarted(created.task.id);
+    const autoRun = reconcile.started.find((item) => item.taskId === created.task.id)?.result;
     assert.equal(autoRun.run.previousSessionRef, started.run.sessionRef);
     assert.equal(autoRun.run.previousSummaryRef, completed.summaryRef);
     assert.match(await readFile(join(root, autoRun.run.sessionRef), "utf8"), /previousSummaryRef/);
   } finally {
+    harness.stop();
     if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
     else process.env.KCA_PI_ADAPTER = previousAdapter;
   }
@@ -463,6 +883,7 @@ test("complete_task done request completes directly when agent chooses done", as
 test("spec-first workflow gates technical tasks through DoR, validation, review, deployment and DoD", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-spec-workflow-"));
   await disableColumnAutoStart(root);
+  await handleCommand({ type: "settings.update", commandId: "cmd-spec-flow-no-drain", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root);
   const created = await handleCommand({
     type: "task.create",
     commandId: "cmd-spec-flow-create",
@@ -479,6 +900,8 @@ test("spec-first workflow gates technical tasks through DoR, validation, review,
     content: readySpec("Fluxo gated")
   }, root);
   assert.equal(spec.task.workflow.gates.spec.status, "pending");
+  assert.equal(spec.task.column, "manager");
+  assert.equal(spec.task.routing.currentRole, "manager");
   const approved = await handleCommand({
     type: "workflow.approve_task_spec",
     commandId: "cmd-spec-flow-approve",
@@ -520,8 +943,10 @@ test("spec-first workflow gates technical tasks through DoR, validation, review,
   const dor = await handleCommand({ type: "workflow.run_definition_of_ready_gate", commandId: "cmd-spec-flow-dor", taskId: created.task.id }, root);
   assert.equal(dor.ok, true);
   assert.equal(dor.task.column, "engineering");
+  await handleCommand({ type: "settings.update", commandId: "cmd-spec-flow-enable-runs", scope: "app", patch: { runtime: { maxParallelTasks: 10 } } }, root, { suppressSchedulerDrain: true });
   const why = await handleQuery({ type: "why_not_running", taskId: created.task.id }, root);
   assert.equal(why.runnable, true);
+  await handleCommand({ type: "settings.update", commandId: "cmd-spec-flow-disable-runs-again", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root, { suppressSchedulerDrain: true });
 
   const validation = await handleCommand({
     type: "workflow.record_validation",
@@ -600,6 +1025,86 @@ test("spec-first workflow gates technical tasks through DoR, validation, review,
   assert.equal(files.files.includes("deployment-report.md"), true);
   assert.equal(files.files.includes("summary.md"), true);
   assert.equal(files.events.some((event) => event.type === "deployment.recorded"), true);
+});
+
+test("DoR accepts approved product spec and keeps master tasks with manager", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-approved-master-dor-"));
+  await disableColumnAutoStart(root);
+  await handleCommand({ type: "settings.update", commandId: "cmd-approved-master-no-drain", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root);
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-approved-master-create",
+    input: { title: "Approved master", kind: "master", column: "manager", projectTargets: [] }
+  }, root);
+  await handleCommand({
+    type: "workflow.create_task_spec",
+    commandId: "cmd-approved-master-spec",
+    taskId: created.task.id,
+    kind: "full",
+    content: approvedProductSpec()
+  }, root);
+  const staleDor = await handleCommand({ type: "workflow.run_definition_of_ready_gate", commandId: "cmd-approved-master-dor-stale", taskId: created.task.id }, root);
+  assert.equal(staleDor.ok, false);
+  const approved = await handleCommand({
+    type: "workflow.approve_task_spec",
+    commandId: "cmd-approved-master-approve",
+    taskId: created.task.id,
+    approvedByRole: "product",
+    summary: "Spec aprovada."
+  }, root);
+  assert.equal(approved.task.workflow.gates.definitionOfReady.status, "pending");
+  assert.match(approved.task.workflow.gates.definitionOfReady.reason, /DoR must be rerun/);
+  const dor = await handleCommand({ type: "workflow.run_definition_of_ready_gate", commandId: "cmd-approved-master-dor", taskId: created.task.id }, root);
+  assert.equal(dor.ok, true);
+  assert.equal(dor.task.column, "manager");
+  assert.equal(dor.task.routing.currentRole, "manager");
+});
+
+test("DoR accepts manager-approved product spec without status line", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-approved-shape-dor-"));
+  await disableColumnAutoStart(root);
+  await handleCommand({ type: "settings.update", commandId: "cmd-approved-shape-no-drain", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root);
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-approved-shape-create",
+    input: { title: "Approved shape", kind: "master", column: "manager", projectTargets: [] }
+  }, root);
+  await handleCommand({
+    type: "workflow.create_task_spec",
+    commandId: "cmd-approved-shape-spec",
+    taskId: created.task.id,
+    kind: "full",
+    content: [
+      "# Task Spec",
+      "",
+      "## Problem Statement",
+      "",
+      "Validate four independent deliverables.",
+      "",
+      "## Deliverables",
+      "",
+      "- Japanese greeting.",
+      "- Children's story.",
+      "",
+      "## Technical Constraints",
+      "",
+      "- Use the configured model.",
+      "",
+      "## Acceptance Criteria",
+      "",
+      "- [ ] AC-1: All deliverables are present."
+    ].join("\n")
+  }, root);
+  await handleCommand({
+    type: "workflow.approve_task_spec",
+    commandId: "cmd-approved-shape-approve",
+    taskId: created.task.id,
+    approvedByRole: "manager",
+    summary: "Spec aprovada."
+  }, root);
+  const dor = await handleCommand({ type: "workflow.run_definition_of_ready_gate", commandId: "cmd-approved-shape-dor", taskId: created.task.id }, root);
+  assert.equal(dor.ok, true);
+  assert.equal(dor.task.column, "manager");
 });
 
 test("task run sends Pi prompt and persists prompt-sent evidence", async () => {
@@ -699,6 +1204,15 @@ test("run_command records command evidence without changing task status", async 
   }, root);
   assert.equal(result.ok, true);
   assert.match(result.stdout, /validated/);
+  const shellResult = await handleCommand({
+    type: "agent.run_command",
+    commandId: "cmd-run-command-shell",
+    taskId: created.task.id,
+    runId: "run-command",
+    command: "printf shell-ok"
+  }, root);
+  assert.equal(shellResult.ok, true);
+  assert.equal(shellResult.stdout, "shell-ok");
   const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
   assert.equal(detail.status, "running");
   const events = (await handleQuery({ type: "task.files", taskId: created.task.id }, root)).events;
@@ -712,6 +1226,33 @@ test("run_command records command evidence without changing task status", async 
     cwd: "..",
     args: ["-e", "console.log('outside')"]
   }, root), /cwd_outside_task_workspace/);
+});
+
+test("run_command uses runtime default timeout when tool omits timeout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-run-command-timeout-"));
+  await handleCommand({ type: "settings.update", commandId: "cmd-run-command-timeout-settings", scope: "app", patch: { runtime: { agentCommandTimeoutMs: 50 } } }, root);
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-run-command-timeout-create",
+    input: { title: "Run command timeout", column: "engineering", status: "running", routing: { currentAgent: "engineering", currentRole: "engineering", manualOverride: { active: false } } }
+  }, root);
+  await handleCommand({
+    type: "task.update",
+    commandId: "cmd-run-command-timeout-active",
+    taskId: created.task.id,
+    patch: { agent: { currentRunId: "run-command-timeout", currentSessionRef: "session.jsonl", resumeMode: "continue" } }
+  }, root);
+  const startedAt = Date.now();
+  const result = await handleCommand({
+    type: "agent.run_command",
+    commandId: "cmd-run-command-timeout",
+    taskId: created.task.id,
+    runId: "run-command-timeout",
+    command: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 1000)"]
+  }, root);
+  assert.equal(result.ok, false);
+  assert.equal(Date.now() - startedAt < 1000, true);
 });
 
 test("report_blocker writes one visible manager comment for repeated blocker text", async () => {
@@ -1008,6 +1549,7 @@ test("task comments answer agent input and auto resume requester role", async ()
 
 test("task comments during a running agent requeue the same agent after completion", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-comments-deferred-"));
+  const harness = eventDrivenHarness(root);
   const created = await handleCommand({
     type: "task.create",
     commandId: "cmd-comments-deferred-create",
@@ -1033,15 +1575,16 @@ test("task comments during a running agent requeue the same agent after completi
     runId: started.run.runId,
     nextColumn: "done",
     summary: "Tentaria finalizar."
-  }, root);
+  }, root, { eventBus: harness.eventBus });
   assert.equal(completed.task.status, "queued");
   assert.equal(completed.task.routing.currentAgent, "engineering");
-  assert.deepEqual(completed.scheduler.started.map((item) => item.taskId), [created.task.id]);
+  await harness.waitForStatus(created.task.id, "running");
   const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
   assert.equal(detail.status, "running");
   assert.equal(detail.routing.currentAgent, "engineering");
   const comments = await handleQuery({ type: "task.comments", taskId: created.task.id }, root);
   assert.equal(comments.some((message) => message.text === "Considere este detalhe antes de finalizar."), true);
+  harness.stop();
 });
 
 test("manual override rejects stale agent completion", async () => {
@@ -1228,11 +1771,13 @@ test("orchestrator blocks run when file locks conflict", async () => {
 
 test("orchestrator decomposes a master task into queued subtasks", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-orch-"));
+  await handleCommand({ type: "settings.update", commandId: "cmd-master-no-drain", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root);
   const parent = await handleCommand({
     type: "task.create",
     commandId: "cmd-master",
     input: { title: "Feature master", kind: "master", projectTargets: ["kanban-code-agent"] }
   }, root);
+  await disableColumnAutoStart(root);
   const decomposed = await handleCommand({
     type: "task.decompose",
     commandId: "cmd-decompose",
@@ -1246,6 +1791,9 @@ test("orchestrator decomposes a master task into queued subtasks", async () => {
   assert.equal(decomposed.subtasks[0].kind, "subtask");
   assert.equal(decomposed.subtasks[0].routing.currentRole, "engineering");
   assert.equal(decomposed.subtasks[1].routing.currentRole, "quality");
+  assert.equal(decomposed.subtasks[0].parentTaskId, parent.task.id);
+  assert.equal(decomposed.subtasks[0].rootTaskId, parent.task.id);
+  assert.equal(decomposed.subtasks[0].depth, 1);
   assert.equal(decomposed.subtasks[0].worktree.parentTaskId, parent.task.id);
   assert.equal(decomposed.subtasks[1].dependencies.needs[0], "runtime:agent");
   const subtasksFile = YAML.parse(await readFile(join(root, "tasks", parent.task.id, "subtasks.yaml"), "utf8"));
@@ -1253,9 +1801,8 @@ test("orchestrator decomposes a master task into queued subtasks", async () => {
   assert.equal(subtasksFile.subtasks[0].id, decomposed.subtasks[0].id);
   assert.deepEqual(subtasksFile.subtasks[1].needs, ["runtime:agent"]);
   assert.deepEqual(subtasksFile.subtasks[1].fileLocks, ["tests/**"]);
-  const firstWhy = await handleQuery({ type: "why_not_running", taskId: decomposed.subtasks[0].id }, root);
-  assert.equal(firstWhy.runnable, true);
-  assert.match((await handleQuery({ type: "why_not_running", taskId: decomposed.subtasks[1].id }, root)).reasons.join(" "), /runtime:agent/);
+  assert.equal(decomposed.subtasks[0].status, "queued");
+  assert.equal(decomposed.subtasks[1].status, "queued");
 });
 
 test("manager decomposition with missing product contract spawns agent subtasks", async () => {
@@ -1299,6 +1846,7 @@ test("manager decomposition with missing product contract spawns agent subtasks"
   const subtasksFile = YAML.parse(await readFile(join(root, "tasks", created.task.id, "subtasks.yaml"), "utf8"));
   assert.equal(subtasksFile.nodes.length, 4);
   assert.equal(subtasksFile.edges.length, 0);
+  assert.equal(result.subtasks.every((task) => task.depth === 1 && task.parentTaskId === created.task.id), true);
   const files = await handleQuery({ type: "task.files", taskId: created.task.id }, root);
   const redirectedEvent = ["task", "decompose", "redirected"].join(".");
   assert.equal(files.events.some((event) => event.type === redirectedEvent), false);
@@ -1315,11 +1863,13 @@ test("planning service creates planning and acceptance artifacts for a master ta
 
 test("orchestrator decomposes a master task into N subtasks with DAG edges", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-orch-dag-"));
+  await handleCommand({ type: "settings.update", commandId: "cmd-dag-no-drain", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root);
   const parent = await handleCommand({
     type: "task.create",
     commandId: "cmd-dag-parent",
     input: { title: "Master DAG", kind: "master", projectTargets: ["kanban-code-agent"] }
   }, root);
+  await disableColumnAutoStart(root);
   const subtasks = Array.from({ length: 6 }, (_, index) => ({
     title: `Subtask ${index + 1}`,
     needs: index === 0 ? [] : [`contract:${index}`],
@@ -1334,8 +1884,29 @@ test("orchestrator decomposes a master task into N subtasks with DAG edges", asy
   assert.equal(subtasksFile.edges.length, 5);
 });
 
+test("task.decompose enforces MAX_DEPTH 4", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-depth-"));
+  const parent = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-depth-parent",
+    input: { title: "Depth capped", kind: "subtask", depth: 4, parentTaskId: "KCA-PARENT", rootTaskId: "KCA-ROOT", worktree: { enabled: true, kind: "subtask", branch: "kca/depth", parentTaskId: "KCA-PARENT", mainTaskId: "KCA-ROOT" } }
+  }, root);
+  const result = await handleCommand({
+    type: "task.decompose",
+    commandId: "cmd-depth-decompose",
+    taskId: parent.task.id,
+    subtasks: [{ title: "Too deep", role: "engineering" }]
+  }, root);
+  assert.equal(result.ok, false);
+  assert.equal(result.task.status, "blocked");
+  assert.equal(result.errors[0].type, "max_depth");
+  const files = await handleQuery({ type: "task.files", taskId: parent.task.id }, root);
+  assert.equal(files.events.some((event) => event.type === "subtask.depth_blocked"), true);
+});
+
 test("completed delegated subtask requeues waiting parent", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-delegated-requeue-"));
+  await handleCommand({ type: "settings.update", commandId: "cmd-delegated-no-drain", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root);
   const parent = await handleCommand({
     type: "task.create",
     commandId: "cmd-delegated-parent",
@@ -1367,12 +1938,91 @@ test("completed delegated subtask requeues waiting parent", async () => {
     nextColumn: "done",
     summary: "Subtask entregue."
   }, root);
-  assert.equal(completed.task.status, "done");
-  assert.equal(completed.task.column, "done");
+  assert.equal(completed.task.status, "waiting_review");
+  assert.equal(completed.reviewPending, true);
   assert.equal(completed.parentTask.status, "queued");
   assert.equal(completed.parentTask.column, "generalist");
+  const approved = await handleCommand({
+    type: "subtask.review",
+    commandId: "cmd-delegated-review-approve",
+    taskId: delegated.subtask.id,
+    decision: "approve",
+    feedback: "ok"
+  }, root);
+  assert.equal(approved.task.status, "done");
+  assert.equal(approved.task.column, "done");
   const comments = await handleQuery({ type: "task.comments", taskId: delegated.subtask.id }, root);
-  assert.equal(comments.some((message) => message.disposition === "agent.completed" && /Subtask entregue/.test(message.text)), true);
+  assert.equal(comments.some((message) => message.disposition === "subtask.review_requested" && /Subtask entregue/.test(message.text)), true);
+  assert.equal(comments.some((message) => message.disposition === "subtask.review_approved"), true);
+});
+
+test("subtask review reject requeues same subtask with feedback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-subtask-review-"));
+  await handleCommand({ type: "settings.update", commandId: "cmd-review-no-drain", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root);
+  const parent = await handleCommand({ type: "task.create", commandId: "cmd-review-parent", input: { title: "Review parent", kind: "master" } }, root);
+  const decomposed = await handleCommand({
+    type: "task.decompose",
+    commandId: "cmd-review-decompose",
+    taskId: parent.task.id,
+    subtasks: [{ title: "Review child", role: "engineering" }]
+  }, root);
+  const child = decomposed.subtasks[0];
+  await handleCommand({ type: "task.update", commandId: "cmd-review-child-run", taskId: child.id, patch: { status: "running", agent: { currentRunId: "run-review-child" } } }, root);
+  await handleCommand({ type: "agent.complete_task", commandId: "cmd-review-complete", taskId: child.id, runId: "run-review-child", nextColumn: "done", summary: "Primeira entrega." }, root);
+  const rejected = await handleCommand({ type: "subtask.review", commandId: "cmd-review-reject", taskId: child.id, decision: "reject", feedback: "Falta evidência." }, root);
+  assert.equal(rejected.task.status, "queued");
+  assert.equal(rejected.task.id, child.id);
+  const comments = await handleQuery({ type: "task.comments", taskId: child.id }, root);
+  assert.equal(comments.some((message) => message.disposition === "subtask.review_rejected" && /Falta evidência/.test(message.text)), true);
+});
+
+test("subtask request_user_input routes question to parent and answer resumes child", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-subtask-question-"));
+  await handleCommand({ type: "settings.update", commandId: "cmd-question-no-drain", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root);
+  const parent = await handleCommand({ type: "task.create", commandId: "cmd-question-parent", input: { title: "Question parent", kind: "master" } }, root);
+  const decomposed = await handleCommand({
+    type: "task.decompose",
+    commandId: "cmd-question-decompose",
+    taskId: parent.task.id,
+    subtasks: [{ title: "Question child", role: "engineering" }]
+  }, root);
+  const child = decomposed.subtasks[0];
+  await handleCommand({ type: "task.update", commandId: "cmd-question-child-run", taskId: child.id, patch: { status: "running", agent: { currentRunId: "run-question-child" } } }, root);
+  const question = await handleCommand({ type: "agent.request_user_input", commandId: "cmd-question-ask", taskId: child.id, runId: "run-question-child", question: "Qual endpoint usar?" }, root);
+  assert.equal(question.task.status, "waiting_response");
+  assert.notEqual(question.task.column, "human_wait");
+  assert.equal(question.parentTask.status, "queued");
+  assert.equal(question.parentTask.id, parent.task.id);
+  const parentComments = await handleQuery({ type: "task.comments", taskId: parent.task.id }, root);
+  assert.equal(parentComments.some((message) => /Qual endpoint usar/.test(message.text)), true);
+  const answered = await handleCommand({ type: "subtask.answer_question", commandId: "cmd-question-answer", taskId: child.id, answer: "Use /api/command." }, root);
+  assert.equal(answered.task.status, "queued");
+  const childComments = await handleQuery({ type: "task.comments", taskId: child.id }, root);
+  assert.equal(childComments.some((message) => message.disposition === "subtask.question_answered" && /\/api\/command/.test(message.text)), true);
+});
+
+test("task pause resume and cancel chain preserve terminal descendants", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-chain-controls-"));
+  await handleCommand({ type: "settings.update", commandId: "cmd-chain-no-drain", scope: "app", patch: { runtime: { maxParallelTasks: 0 } } }, root);
+  const parent = await handleCommand({ type: "task.create", commandId: "cmd-chain-parent", input: { title: "Chain parent", kind: "master" } }, root);
+  const decomposed = await handleCommand({
+    type: "task.decompose",
+    commandId: "cmd-chain-decompose",
+    taskId: parent.task.id,
+    subtasks: [{ title: "Chain child A", role: "engineering" }, { title: "Chain child B", role: "quality" }]
+  }, root);
+  const [first, second] = decomposed.subtasks;
+  await handleCommand({ type: "task.update", commandId: "cmd-chain-first-running", taskId: first.id, patch: { status: "running", agent: { currentRunId: "run-chain-first" } } }, root);
+  await handleCommand({ type: "task.update", commandId: "cmd-chain-second-done", taskId: second.id, patch: { status: "done", column: "done" } }, root);
+  const paused = await handleCommand({ type: "task.pause", commandId: "cmd-chain-pause", taskId: parent.task.id, scope: "chain", mode: "soft" }, root);
+  assert.equal(paused.tasks.find((task) => task.id === parent.task.id).status, "paused");
+  assert.equal(paused.tasks.find((task) => task.id === first.id).status, "paused");
+  assert.equal((await handleQuery({ type: "task.detail", taskId: second.id }, root)).status, "done");
+  const resumed = await handleCommand({ type: "task.resume", commandId: "cmd-chain-resume", taskId: parent.task.id, scope: "chain" }, root);
+  assert.equal(resumed.tasks.find((task) => task.id === first.id).status, "queued");
+  const canceled = await handleCommand({ type: "task.cancel", commandId: "cmd-chain-cancel-child", taskId: first.id, scope: "task", reason: "nao necessario" }, root);
+  assert.equal(canceled.task.status, "canceled");
+  assert.equal((await handleQuery({ type: "task.detail", taskId: parent.task.id }, root)).status, "queued");
 });
 
 test("orchestrator rejects invalid DAG decomposition without rerouting", async () => {
@@ -1401,7 +2051,7 @@ test("orchestrator rejects invalid DAG decomposition without rerouting", async (
   assert.equal((await handleQuery({ type: "task.comments", taskId: parent.task.id }, root)).some((message) => /Invalid subtask DAG/.test(message.text)), true);
 });
 
-test("scheduler explains global limits, agent/project tokens and semaphores", async () => {
+test("orchestrator status explains global limits, agent/project tokens and semaphores", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-orch-"));
   await handleCommand({ type: "settings.update", commandId: "cmd-settings-limits", scope: "app", patch: { runtime: { maxParallelTasks: 1, agentTokens: { engineering: 1 }, projectTokens: { "kanban-code-agent": 1 } } } }, root);
   await handleCommand({ type: "settings.update", commandId: "cmd-agent-limit", scope: "agents", patch: { id: "engineering", limits: { maxParallelTasks: 1 } } }, root);
@@ -1522,6 +2172,25 @@ test("default agents expose agent-driven task creation tools", async () => {
   }
 });
 
+test("explicit agent tools can omit delegate_task", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kca-agent-tool-override-"));
+  await handleCommand({
+    type: "settings.update",
+    commandId: "cmd-tool-override-manager",
+    scope: "agents",
+    patch: { id: "manager", tools: ["complete_task", "wait_for_persona", "spawn_subtasks"], instructionsBody: "# Manager\n\nUse configured tools only." }
+  }, root, { suppressSchedulerDrain: true });
+  const created = await handleCommand({
+    type: "task.create",
+    commandId: "cmd-tool-override-task",
+    input: { title: "Tool override", column: "manager", status: "queued", routing: { currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } } }
+  }, root, { suppressSchedulerDrain: true });
+  const chat = await buildAgentChat(created.task, root, { persona: "manager", agentId: "manager" });
+  assert.equal(chat.tools.some((tool) => tool.name === "wait_for_persona"), true);
+  assert.equal(chat.tools.some((tool) => tool.name === "spawn_subtasks"), true);
+  assert.equal(chat.tools.some((tool) => tool.name === "delegate_task"), false);
+});
+
 test("storage init adds task creation tools without prompt routing amendments", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-prompt-tools-"));
   await mkdir(join(root, "settings", "agents"), { recursive: true });
@@ -1618,6 +2287,7 @@ test("fast research task completes through manager to generalist under 120 secon
   const previousAdapter = process.env.KCA_PI_ADAPTER;
   process.env.KCA_PI_SDK_PACKAGE = modulePath;
   delete process.env.KCA_PI_ADAPTER;
+  const harness = eventDrivenHarness(root);
   try {
     const startedAt = Date.now();
     const created = await handleCommand({
@@ -1627,7 +2297,8 @@ test("fast research task completes through manager to generalist under 120 secon
         title: "pesquise e faca uma lista com top 10 paises com as menores temperaturas hoje",
         projectTargets: []
       }
-    }, root);
+    }, root, { eventBus: harness.eventBus });
+    await waitUntil(async () => (await handleQuery({ type: "task.detail", taskId: created.task.id }, root)).status === "done", 10000);
     const elapsedMs = Date.now() - startedAt;
     const detail = await handleQuery({ type: "task.detail", taskId: created.task.id }, root);
     const files = await handleQuery({ type: "task.files", taskId: created.task.id }, root);
@@ -1645,6 +2316,7 @@ test("fast research task completes through manager to generalist under 120 secon
     assert.match(artifact, /Fonte: fake-weather, 2026-06-13/);
     assert.equal((artifact.match(/^\d+\./gm) || []).length, 10);
   } finally {
+    harness.stop();
     if (previousPackage === undefined) delete process.env.KCA_PI_SDK_PACKAGE;
     else process.env.KCA_PI_SDK_PACKAGE = previousPackage;
     if (previousAdapter === undefined) delete process.env.KCA_PI_ADAPTER;
