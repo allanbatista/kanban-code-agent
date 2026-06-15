@@ -18,26 +18,28 @@ Requer `OPENROUTER_API_KEY`.
 - `Orquestrator` cria tasks, agenda execucoes, persiste estado e emite eventos de conclusao.
 - `Task` contem titulo, status, chat, subtasks, runs de orquestracao, artefatos e sessao Pi persistida.
 - `PiAgentClient` executa agents com ferramentas de leitura, `create_subtask` e `create_artifact`.
-- Estado global: `.swarm-state.json`.
-- Arquivos por task: `tasks/{task_id}/task.yml`, `chat.jsonl`, `session.jsonl`, `attachments/`, `artifacts/`, `artifacts.yaml`.
+- Estado global: `.swarm/state.snapshot.json`.
+- Eventos e logs: `.swarm/events/current.jsonl`, `.swarm/logs/orchestrator.jsonl` e stdout em tempo real.
+- Arquivos por task: `.swarm/tasks/{task_id}/task.yml`, `chat.jsonl`, `session.jsonl`, `attachments/`, `artifacts/`, `artifacts.yaml`.
 
 ## Regras
 
 - Tasks nao tem descricao; a interface da task e exclusivamente o chat.
 - Mensagens usam `role` e `type`.
 - Attachments do usuario entram apenas na criacao da task pelo CLI.
-- Attachments sao copiados para `tasks/{task_id}/attachments/{uuid}-{original name}`.
+- Attachments sao copiados para `.swarm/tasks/{task_id}/attachments/{uuid}-{original name}`.
 - Agents retornam `messages[]` para `completed`, `waiting` e `retry`.
 - `waiting` aceita `waitGroups[]` para misturar grupos `WAIT_ALL` e `ON_DEMAND` na mesma task.
 - `WAIT_ALL` entrega os resultados do grupo juntos quando todas as subtasks completarem.
 - `ON_DEMAND` entrega cada subtask concluida individualmente.
-- O terminal nao exibe deltas parciais do modelo; ao final imprime `EXECUTION SUMMARY` e `EXECUTION GRAPH`.
+- O terminal exibe eventos e logs completos no momento em que ocorrem, sem deltas parciais do modelo.
+- Ao final, imprime `EXECUTION SUMMARY` e `EXECUTION GRAPH`.
 - `EXECUTION SUMMARY` lista task, agent, status, dependencias, duracao, tokens input/output/total e preco.
 - `EXECUTION GRAPH` mostra root, subtasks, runs, wait groups e eventos de conclusao.
 - Agents criam artefatos somente via `create_artifact`.
-- Artefatos ficam em `tasks/{task_id}/artifacts/` e sao indexados em `artifacts.yaml`.
+- Artefatos ficam em `.swarm/tasks/{task_id}/artifacts/` e sao indexados em `artifacts.yaml`.
 - Caminhos persistidos em estado, chat, YAML, attachments e artifacts sao relativos ao diretorio da propria task.
-- `task_dir` nao e persistido nem exposto; o diretorio da task e inferido em runtime por `tasks/{task_id}`.
+- `task_dir` nao e persistido nem exposto; o diretorio da task e inferido em runtime por `.swarm/tasks/{task_id}`.
 - Nao ha compatibilidade com estados antigos.
 
 ## Definicoes
