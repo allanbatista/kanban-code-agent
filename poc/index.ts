@@ -39,6 +39,7 @@ const STATE_FILE = '.swarm-state.json';
 const TASKS_DIR = 'tasks';
 const MAX_TASK_DEPTH = 4;
 const MAX_TASK_RETRIES = 2;
+const PI_HEARTBEAT_MS = 5000;
 
 interface RuntimeConfig {
     model?: ModelAlias;
@@ -497,6 +498,53 @@ function formatMessages(messages: TaskChatMessage[]): string {
     return messages.map(message => `${message.role}/${message.type}: ${message.text ?? ''}`).join(' | ');
 }
 
+function formatDuration(ms: number): string {
+    if (ms < 1000) return `${ms}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function indentText(text: string, spaces = 4): string {
+    const indent = ' '.repeat(spaces);
+    return text.split('\n').map(line => `${indent}${line}`).join('\n');
+}
+
+function formatLogText(text: string): string {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return text;
+    try {
+        return JSON.stringify(JSON.parse(trimmed), null, 2);
+    } catch {
+        return text;
+    }
+}
+
+function logTaskMessages(label: string, messages: TaskChatMessage[], agentName?: string) {
+    console.log(label);
+    if (messages.length === 0) {
+        console.log('    (sem mensagens)');
+        return;
+    }
+    for (const message of messages) {
+        const agent = agentName ? ` agent=${agentName}` : '';
+        console.log(`    - ${message.role}/${message.type}${agent} @ ${message.ts}`);
+        if (message.text) console.log(indentText(formatLogText(message.text), 8));
+        if (message.artifacts?.length) console.log(indentText(`artifacts=${message.artifacts.map(artifact => artifact.path).join(',')}`, 8));
+        if (message.attachments?.length) console.log(indentText(`attachments=${message.attachments.map(attachment => attachment.path).join(',')}`, 8));
+    }
+}
+
+function previewJson(value: unknown): string {
+    const text = JSON.stringify(value);
+    return text.length > 240 ? `${text.slice(0, 240)}...` : text;
+}
+
+function printStreamedOutput(output: string) {
+    const formatted = formatLogText(output);
+    if (formatted === output) return;
+    console.log('\n[PI] resposta JSON formatada:');
+    console.log(indentText(formatted, 4));
+}
+
 function normalizeAgentMessages(messages: unknown): AgentOutputMessage[] {
     if (!Array.isArray(messages)) return [];
     const normalized = messages
@@ -543,9 +591,11 @@ class PiAgentClient {
     async run(agent: Agent, task: Task, orquestrator: Orquestrator, triggerEvents: TaskEvent[] = []): Promise<string> {
         const runtimeConfig = orquestrator.resolveRuntimeConfig(task, agent);
         const model = this.resolveModel(runtimeConfig);
+        const startedAt = Date.now();
         const resourceLoader = this.createResourceLoader(agent, task, orquestrator);
         await resourceLoader.reload();
         ensureTaskArtifacts(task);
+        console.log(`[PI] start task=${task.options.task_id} agent=${agent.name} model=${ALLOWED_MODELS[runtimeConfig.model].provider}/${ALLOWED_MODELS[runtimeConfig.model].modelId} effort=${runtimeConfig.effort}`);
 
         const sessionManager = SessionManager.open(resolveTaskPath(
             task.options.task_id,
@@ -568,16 +618,35 @@ class PiAgentClient {
         orquestrator.persist();
 
         let output = '';
+        let streamed = false;
+        const heartbeat = setInterval(() => {
+            console.log(`[PI] aguardando task=${task.options.task_id} agent=${agent.name} elapsed=${formatDuration(Date.now() - startedAt)} output=${output.length} chars`);
+        }, PI_HEARTBEAT_MS);
         try {
             session.subscribe((event) => {
                 if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta') {
+                    if (!streamed) {
+                        streamed = true;
+                        console.log(`[PI] resposta parcial task=${task.options.task_id}:`);
+                    }
+                    process.stdout.write(event.assistantMessageEvent.delta);
                     output += event.assistantMessageEvent.delta;
+                }
+                if (event.type === 'tool_execution_start') {
+                    console.log(`\n[PI TOOL START] task=${task.options.task_id} tool=${event.toolName} args=${previewJson(event.args)}`);
+                }
+                if (event.type === 'tool_execution_end') {
+                    console.log(`[PI TOOL END] task=${task.options.task_id} tool=${event.toolName} error=${event.isError}`);
                 }
             });
 
             await session.prompt(this.buildPrompt(task, orquestrator, triggerEvents));
+            if (streamed) process.stdout.write('\n');
+            if (output) printStreamedOutput(output.trim());
+            console.log(`[PI] end task=${task.options.task_id} agent=${agent.name} elapsed=${formatDuration(Date.now() - startedAt)} output=${output.length} chars`);
             return output.trim();
         } finally {
+            clearInterval(heartbeat);
             session.dispose();
         }
     }
@@ -604,6 +673,8 @@ ${orquestrator.buildTaskMetadataBlock(task)}
 
 Voce decide se resolve diretamente ou se cria subtasks pela tool create_subtask.
 Use create_subtask apenas quando a tarefa realmente precisar de delegacao.
+Se a tarefa ou anexo pedir "subtasks", "subtasks diferentes", "aguarde", "sob demanda" ou grupos de espera, voce DEVE criar subtasks e nao pode responder direto.
+Quando criar subtasks para grupos de espera, chame create_subtask para cada item antes de retornar waiting com waitGroups.
 Nunca crie subtasks quando task_metadata.canCreateSubtasks for false.
 Voce pode escolher model/effort para subtasks usando apenas os aliases e efforts permitidos em task_metadata.
 Se a propria task nao atingiu o objetivo, retorne status retry com novas instrucoes e opcionalmente model/effort.
@@ -621,6 +692,18 @@ ou
 Mensagens devem usar type text, artifact ou event. Quando status for completed, messages deve conter apenas a resposta final ao usuario, sem explicar o workflow.`,
             extensionFactories: [
                 (pi: ExtensionAPI) => {
+                    pi.on('agent_start', () => {
+                        console.log(`[PI AGENT START] task=${task.options.task_id} agent=${agent.name}`);
+                    });
+                    pi.on('agent_end', (event) => {
+                        console.log(`[PI AGENT END] task=${task.options.task_id} agent=${agent.name} messages=${event.messages.length}`);
+                    });
+                    pi.on('tool_call', (event) => {
+                        console.log(`[PI TOOL CALL] task=${task.options.task_id} tool=${event.toolName} input=${previewJson(event.input)}`);
+                    });
+                    pi.on('tool_result', (event) => {
+                        console.log(`[PI TOOL RESULT] task=${task.options.task_id} tool=${event.toolName} error=${event.isError}`);
+                    });
                     pi.registerTool(defineTool({
                         name: 'create_subtask',
                         label: 'Create Subtask',
@@ -746,6 +829,7 @@ class Orquestrator extends EventEmitter {
     rootTaskIds: string[] = [];
     pi = new PiAgentClient();
     private runningTaskIds = new Set<string>();
+    private taskStartedAtMs = new Map<string, number>();
     private store = new SwarmStateStore(STATE_FILE);
     private options: { resetState?: boolean; stopWhenWaiting?: boolean };
 
@@ -794,7 +878,8 @@ class Orquestrator extends EventEmitter {
         parentTask.subtaskIds.push(subtask.options.task_id);
         this.tasks.set(subtask.options.task_id, subtask);
         this.persist();
-        console.log(`   ↳ [SUBTASK CRIADA] "${title}" designada para [${agentName}]`);
+        console.log(`   ↳ [SUBTASK CRIADA] ${subtask.options.task_id} parent=${parentTask.options.task_id} group=pendente mode=pendente agent=${agentName}`);
+        console.log(indentText(title, 6));
         this.scheduleTask(subtask.options.task_id);
         return subtask;
     }
@@ -805,7 +890,10 @@ class Orquestrator extends EventEmitter {
         for (const task of this.tasks.values()) {
             if (task.status !== 'WAITING') continue;
             const triggerEvents = this.getReadyEvents(task);
-            if (triggerEvents.length > 0) this.scheduleTask(task.options.task_id, triggerEvents);
+            if (triggerEvents.length > 0) {
+                console.log(`[READY] ${task.options.task_id} recebeu ${triggerEvents.length} evento(s) pronto(s): ${triggerEvents.map(event => `${event.taskId}@${event.waitId ?? '-'}`).join(', ')}`);
+                this.scheduleTask(task.options.task_id, triggerEvents);
+            }
         }
     }
 
@@ -830,9 +918,11 @@ class Orquestrator extends EventEmitter {
         if (!agent) throw new Error(`Agente ${task.options.assignedTo} não encontrado`);
 
         this.runningTaskIds.add(taskId);
+        this.taskStartedAtMs.set(taskId, Date.now());
         task.status = 'RUNNING';
         this.persist();
-        console.log(`\n[${agent.name}] Processando: "${task.options.title}" (Status: RUNNING)`);
+        console.log(`\n[${agent.name}] Processando: ${task.options.task_id} "${task.options.title}" (Status: RUNNING)`);
+        this.logTriggerEvents(task, triggerEvents);
 
         try {
             const output = await this.pi.run(agent, task, this, triggerEvents);
@@ -844,7 +934,8 @@ class Orquestrator extends EventEmitter {
                     task.status = 'FAILED';
                     this.markEventsProcessed(task, triggerEvents);
                     this.persist();
-                    console.log(`[${agent.name}] Falhou apos ${task.retryCount} retries: "${task.options.title}"`);
+                    console.log(`[${agent.name}] Falhou apos ${task.retryCount} retries: ${task.options.task_id} (${this.getTaskDuration(taskId)})`);
+                    logTaskMessages(`[${agent.name}] Mensagens finais de falha`, task.resultMessages, agent.name);
                     return;
                 }
 
@@ -856,7 +947,8 @@ class Orquestrator extends EventEmitter {
                 task.appendChat('user', 'text', decision.instructions ?? 'Reexecute a task com a configuracao atualizada.', runtimeConfig);
                 this.markEventsProcessed(task, triggerEvents);
                 this.persist();
-                console.log(`[${agent.name}] Retry ${task.retryCount}/${MAX_TASK_RETRIES}: "${task.options.title}"`);
+                console.log(`[${agent.name}] Retry ${task.retryCount}/${MAX_TASK_RETRIES}: ${task.options.task_id} (${this.getTaskDuration(taskId)})`);
+                logTaskMessages(`[${agent.name}] Mensagens do retry`, task.resultMessages, agent.name);
                 this.scheduleTask(task.options.task_id);
                 return;
             }
@@ -872,7 +964,8 @@ class Orquestrator extends EventEmitter {
                 }
                 task.status = 'WAITING';
                 this.persist();
-                console.log(`[${agent.name}] Suspenso em waitGroups: ${this.getActiveRun(task)?.waitGroups.map(group => `${group.waitId}/${group.mode}`).join(', ')}`);
+                console.log(`[${agent.name}] Suspenso: ${task.options.task_id} (${this.getTaskDuration(taskId)}) waitGroups=${this.getActiveRun(task)?.waitGroups.map(group => `${group.waitId}/${group.mode}`).join(', ')}`);
+                logTaskMessages(`[${agent.name}] Mensagens ao suspender`, task.resultMessages, agent.name);
                 return;
             }
 
@@ -882,9 +975,11 @@ class Orquestrator extends EventEmitter {
             this.completeActiveRun(task);
             this.recordCompletionEvent(task);
             this.persist();
-            console.log(`[${agent.name}] Concluiu: "${task.options.title}" (Status: COMPLETED)`);
+            console.log(`[${agent.name}] Concluiu: ${task.options.task_id} (Status: COMPLETED, duracao=${this.getTaskDuration(taskId)})`);
+            logTaskMessages(`[${agent.name}] Mensagens finais`, task.resultMessages, agent.name);
         } finally {
             this.runningTaskIds.delete(taskId);
+            this.taskStartedAtMs.delete(taskId);
             this.emit('state:changed');
             this.scheduleReadyTasks();
         }
@@ -971,6 +1066,22 @@ class Orquestrator extends EventEmitter {
         this.events = state.events;
     }
 
+    private getTaskDuration(taskId: string): string {
+        const startedAt = this.taskStartedAtMs.get(taskId);
+        return startedAt ? formatDuration(Date.now() - startedAt) : 'duracao indisponivel';
+    }
+
+    private logTriggerEvents(task: Task, triggerEvents: TaskEvent[]) {
+        if (triggerEvents.length === 0) return;
+        console.log(`[EVENTOS RECEBIDOS] ${task.options.task_id}`);
+        for (const event of triggerEvents) {
+            const run = task.runs.find(candidate => candidate.runId === event.runId);
+            const group = run?.waitGroups.find(candidate => candidate.waitId === event.waitId);
+            console.log(`    - event=${event.event_id} run=${event.runId ?? '-'} group=${event.waitId ?? '-'} mode=${group?.mode ?? '-'} task=${event.taskId}`);
+            logTaskMessages('      mensagens do evento', event.messages ?? [], this.tasks.get(event.taskId)?.options.assignedTo);
+        }
+    }
+
     private getActiveRun(task: Task): TaskRun | undefined {
         return task.activeRunId ? task.runs.find(run => run.runId === task.activeRunId) : undefined;
     }
@@ -991,6 +1102,14 @@ class Orquestrator extends EventEmitter {
         };
         task.activeRunId = run.runId;
         task.runs.push(run);
+        console.log(`[RUN CRIADO] task=${task.options.task_id} run=${run.runId}`);
+        for (const group of run.waitGroups) {
+            console.log(`    [GRUPO] wait=${group.waitId} mode=${group.mode} status=${group.status}`);
+            for (const taskId of group.taskIds) {
+                const subtask = this.tasks.get(taskId);
+                console.log(`        - subtask=${taskId} title=${quoteYaml(subtask?.options.title)} agent=${subtask?.options.assignedTo ?? '-'} group=${group.waitId} mode=${group.mode}`);
+            }
+        }
     }
 
     private completeActiveRun(task: Task) {
@@ -1070,7 +1189,10 @@ class Orquestrator extends EventEmitter {
             createdAt: new Date().toISOString()
         };
         this.events.push(event);
-        if (task.options.parentId) console.log(`[EVENT] task:completed ${task.options.task_id} -> parent ${task.options.parentId}`);
+        if (task.options.parentId) {
+            console.log(`[EVENT] task:completed ${task.options.task_id} -> parent ${task.options.parentId}`);
+            logTaskMessages(`[EVENT] Mensagens publicadas por ${task.options.task_id}`, task.resultMessages, task.options.assignedTo);
+        }
     }
 
     private isQuiescent(): boolean {
@@ -1143,9 +1265,9 @@ class Orquestrator extends EventEmitter {
 
 function createAgents(): Agent[] {
     return [
-        new Agent('Manager', 'Você é o Gerente de projetos Senior focado em orquestração macro. Siga as ins', { model: 'balanced', effort: 'high' }),
-        new Agent('Produto', 'Você é o Product Owner Senior, focado em regras de negócio e requisitos.', { model: 'balanced', effort: 'low' }),
-        new Agent('Engineer', 'Você é o Principal Engenheiro de Software, focado em arquitetura e código.', { model: 'deep', effort: 'medium' }),
+        new Agent('Manager', 'Você é o Gerente de projetos Senior focado em orquestração macro. Siga as ins', { model: 'fast', effort: 'minimal' }),
+        new Agent('Produto', 'Você é o Product Owner Senior, focado em regras de negócio e requisitos.', { model: 'fast', effort: 'low' }),
+        new Agent('Engineer', 'Você é o Principal Engenheiro de Software, focado em arquitetura e código.', { model: 'fast', effort: 'medium' }),
         new Agent('Generic', 'Você é um executor de tarefas gerais de apoio.', { model: 'fast', effort: 'off' })
     ];
 }
