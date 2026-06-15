@@ -31,7 +31,9 @@ Requer `OPENROUTER_API_KEY`.
 - `waiting` aceita `waitGroups[]` para misturar grupos `WAIT_ALL` e `ON_DEMAND` na mesma task.
 - `WAIT_ALL` entrega os resultados do grupo juntos quando todas as subtasks completarem.
 - `ON_DEMAND` entrega cada subtask concluida individualmente.
-- Logs do terminal exibem heartbeat da sessao Pi, duracao de cada task, eventos recebidos, mensagens formatadas e o grupo/mode associado a cada subtask quando o run e criado.
+- O terminal nao exibe deltas parciais do modelo; ao final imprime `EXECUTION SUMMARY` e `EXECUTION GRAPH`.
+- `EXECUTION SUMMARY` lista task, agent, status, dependencias, duracao, tokens input/output/total e preco.
+- `EXECUTION GRAPH` mostra root, subtasks, runs, wait groups e eventos de conclusao.
 - Agents criam artefatos somente via `create_artifact`.
 - Artefatos ficam em `tasks/{task_id}/artifacts/` e sao indexados em `artifacts.yaml`.
 - Caminhos persistidos em estado, chat, YAML, attachments e artifacts sao relativos ao diretorio da propria task.
@@ -45,6 +47,7 @@ Requer `OPENROUTER_API_KEY`.
 - `TaskChatMessage`: `{ ts, role, type, text?, attachments?, artifacts?, runtimeConfig? }`.
 - `WaitGroup`: `{ waitId, mode, taskIds, processedEventIds, status }`.
 - `TaskRun`: `{ runId, status, waitGroups, resultMessages, createdAt, completedAt? }`.
+- `TaskMetrics`: `{ startedAt?, finishedAt?, durationMs, tokens, cost }`.
 - `AgentDecision`: JSON com `status` e `messages[]`; `waiting` deve incluir `waitGroups`; `retry` pode incluir `instructions`, `model` e `effort`.
 
 Exemplo de `waiting`:
