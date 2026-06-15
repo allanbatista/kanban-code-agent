@@ -19,6 +19,17 @@ async function createTask(request, title, extra = {}) {
   return (await response.json()).task;
 }
 
+async function allowManagerRuns(request) {
+  await request.post(`${daemonUrl}/api/settings.update`, {
+    data: { scope: "app", patch: { runtime: { maxParallelTasks: 100, agentTokens: { manager: 100 }, projectTokens: { "kanban-code-agent": 100 } } } }
+  });
+  const state = await request.get(`${daemonUrl}/api/state`);
+  const columns = (await state.json()).columns.map((column) => column.id === "manager" ? { ...column, wip: 100, wipLimit: 100 } : column);
+  await request.post(`${daemonUrl}/api/settings.update`, {
+    data: { scope: "columns", patch: { columns } }
+  });
+}
+
 function readySpec(title) {
   return [
     "# Task Spec",
@@ -65,11 +76,10 @@ test("starts from a clean daemon storage without fixture tasks", async ({ page, 
   await expect(page.locator('[data-column-id="quality"]').getByRole("button", { name: /Nova task em Qualidade/ })).toHaveCount(0);
   await expect(page.locator('[data-column-id="review"]').getByRole("button", { name: /Nova task em Review/ })).toHaveCount(0);
   await expect(page.locator('[data-column-id="deployment"]').getByRole("button", { name: /Nova task em Deployment/ })).toHaveCount(0);
-  await expect(page.locator('[data-column-id="human_wait"]').getByRole("button", { name: /Nova task em Aguardando Humano/ })).toHaveCount(0);
   await expect(page.locator('[data-column-id="done"]').getByRole("button", { name: /Nova task em Pronto/ })).toHaveCount(0);
   expect(await page.locator(".kanban").evaluate((node) =>
     Array.from(node.children).map((child) => child.getAttribute("data-column-id") || child.getAttribute("data-column-stack"))
-  )).toEqual(["inbox", "manager", "human_wait", "done", "product+design", "architecture+generalist", "engineering+quality", "review+deployment"]);
+  )).toEqual(["inbox", "manager", "done", "product+design", "architecture+generalist", "engineering+quality", "review+deployment"]);
   await expect.poll(async () => page.locator('[data-column-stack="product+design"]').evaluate((node) => {
     const boxes = Array.from(node.children).map((child) => child.getBoundingClientRect());
     return Math.abs(boxes[0].height - boxes[1].height) <= 2;
@@ -137,7 +147,7 @@ test("refreshes the board when FSDB task files change externally", async ({ page
   await expect(page.getByText(data.title)).toBeVisible({ timeout: 7000 });
 });
 
-test("edits and moves a persisted card through daemon commands", async ({ page, request }) => {
+test("edits a persisted card and rejects daemon agent-column move commands", async ({ page, request }) => {
   const task = await createTask(request, `Task edit ${Date.now()}`);
   const editedTitle = `${task.title} updated`;
   await page.goto("/");
@@ -150,10 +160,11 @@ test("edits and moves a persisted card through daemon commands", async ({ page, 
     data: { type: "task.move", commandId: `e2e-move-${Date.now()}`, taskId: task.id, toColumn: "product", mode: "soft" }
   });
   await expect(moved).toBeOK();
+  expect(await moved.json()).toMatchObject({ ok: false, unsupported: true, error: "task_move_disabled" });
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
     return (await state.json()).tasks.find((item) => item.id === task.id)?.column;
-  }).toBe("product");
+  }).toBe("manager");
 });
 
 test("board assistant runs as agent and creates a real task", async ({ page, request }) => {
@@ -188,22 +199,42 @@ test("board assistant starts a blank chat from header action", async ({ page }) 
   await expect(page.getByRole("region", { name: "Assistant do board" }).getByText("status do board")).toHaveCount(0);
 });
 
-test("board assistant moves the selected task through a typed command", async ({ page, request }) => {
+test("board assistant refuses to move the selected task", async ({ page, request }) => {
   const task = await createTask(request, `Assistant move ${Date.now()}`);
   await page.goto("/");
   await page.getByPlaceholder("Peça ao agent principal").fill(`mover ${task.id} para build`);
   await page.getByRole("region", { name: "Assistant do board" }).getByLabel("Enviar").click();
-  await expect(page.getByText(new RegExp(`Movi ${task.id}`))).toBeVisible();
+  await expect(page.getByText(new RegExp(`Movimentação direta de ${task.id}`))).toBeVisible();
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
     return (await state.json()).tasks.find((item) => item.id === task.id)?.column;
-  }).toBe("engineering");
+  }).toBe("manager");
+});
+
+test("inbox cards expose execute action without workflow metadata chips", async ({ page, request }) => {
+  await allowManagerRuns(request);
+  const task = await createTask(request, `Inbox execute ${Date.now()}`, {
+    column: "inbox",
+    status: "idle",
+    routing: { currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } }
+  });
+  await page.goto("/");
+  const card = page.locator(`[data-task-id="${task.id}"]`);
+  await expect(card.locator("button.task-run-button")).toBeVisible();
+  await expect(card).not.toContainText(/depth \d+\/4/);
+  await expect(card).not.toContainText(/phase /);
+  await expect(card).not.toContainText(/role /);
+  await expect(card).not.toContainText(/gate /);
+  await card.locator("button.task-run-button").click();
+  await expect.poll(async () => {
+    const state = await request.get(`${daemonUrl}/api/state`);
+    const item = (await state.json()).tasks.find((candidate) => candidate.id === task.id);
+    return { column: item?.column, status: item?.status, role: item?.routing?.currentRole };
+  }).toEqual({ column: "manager", status: "running", role: "manager" });
 });
 
 test("task modal exposes tabs and runs the assigned agent", async ({ page, request }) => {
-  await request.post(`${daemonUrl}/api/settings.update`, {
-    data: { scope: "app", patch: { runtime: { maxParallelTasks: 10, agentTokens: { manager: 10 }, projectTokens: { "kanban-code-agent": 10 } } } }
-  });
+  await allowManagerRuns(request);
   const task = await createTask(request, `Runtime task ${Date.now()}`, {
     column: "inbox",
     status: "idle",
@@ -363,15 +394,11 @@ test("shows real token usage on task card timing and modal", async ({ page, requ
   await expect(page.getByRole("table", { name: "Uso real de tokens por agent" })).toContainText("125");
 });
 
-test("daemon reconciler starts tasks from persona events", async ({ request }) => {
+test("daemon reconciler starts tasks created in autoStart persona columns", async ({ request }) => {
   await request.post(`${daemonUrl}/api/settings.update`, {
-    data: { scope: "app", patch: { runtime: { maxParallelTasks: 10, agentTokens: { product: 10 }, projectTokens: { "kanban-code-agent": 10 } } } }
+    data: { scope: "app", patch: { runtime: { maxParallelTasks: 100, agentTokens: { product: 100 }, projectTokens: { "kanban-code-agent": 100 } } } }
   });
-  const task = await createTask(request, `Scheduled task ${Date.now()}`, { projectTargets: [] });
-  const moved = await request.post(`${daemonUrl}/api/task.move`, {
-    data: { taskId: task.id, toColumn: "product" }
-  });
-  await expect(moved).toBeOK();
+  const task = await createTask(request, `Scheduled task ${Date.now()}`, { column: "product", projectTargets: [] });
 
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
@@ -384,11 +411,9 @@ test("daemon reconciler starts tasks from persona events", async ({ request }) =
   }).toBe(true);
 });
 
-test("saving and executing a new task sends it to manager workflow", async ({ page, request }) => {
+test("saving and executing a new task moves it to Manager and activates it", async ({ page, request }) => {
   const title = `Direct product task ${Date.now()}`;
-  await request.post(`${daemonUrl}/api/settings.update`, {
-    data: { scope: "app", patch: { runtime: { maxParallelTasks: 10, agentTokens: { manager: 10 }, projectTokens: { "kanban-code-agent": 10 } } } }
-  });
+  await allowManagerRuns(request);
   await page.goto("/");
   await page.locator('[data-column-id="inbox"]').getByRole("button", { name: /Nova task em Entrada/ }).click();
   await page.getByLabel("Título").fill(title);
@@ -439,7 +464,7 @@ test("task comments answer agent questions and logs are paginated", async ({ pag
     const state = await request.get(`${daemonUrl}/api/state`);
     const item = (await state.json()).tasks.find((candidate) => candidate.id === task.id);
     return item?.column;
-  }).toBe("engineering");
+  }).toBe("inbox");
   await expect.poll(async () => {
     const state = await request.get(`${daemonUrl}/api/state`);
     return (await state.json()).events.some((event) => event.type === "orchestrator.reconciled" && event.started?.includes(task.id));
@@ -461,8 +486,8 @@ test("settings modal persists scoped settings through the daemon", async ({ page
   await page.getByRole("button", { name: "Configurações" }).click();
   await page.locator(".settings-provider-row", { hasText: "OpenRouter" }).getByRole("checkbox").check();
   await page.locator("#settings-provider-model-openrouter").fill(providerModel);
-  await page.locator("#settings-provider-effort-openrouter").selectOption("high");
-  await page.locator("#settings-default-provider").selectOption("openrouter");
+  await page.locator("#settings-provider-effort-openrouter").fill("xhigh");
+  await page.locator("#settings-default-provider").fill("openrouter");
   const toggle = page.getByLabel("Mostrar progresso no card");
   const nextValue = !(await toggle.isChecked());
   await toggle.click();
@@ -474,7 +499,13 @@ test("settings modal persists scoped settings through the daemon", async ({ page
   await page.getByRole("button", { name: "Configurações" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(page.locator("#settings-provider-model-openrouter")).toHaveValue(providerModel);
-  await expect(page.locator("#settings-provider-effort-openrouter")).toHaveValue("high");
+  await expect(page.locator("#settings-provider-effort-openrouter")).toHaveValue("xhigh");
+  await page.getByRole("button", { name: "Cancelar" }).click();
+  await page.reload();
+  await page.getByRole("button", { name: "Configurações" }).click();
+  await expect(page.locator("#settings-default-provider")).toHaveValue("openrouter");
+  await expect(page.locator("#settings-provider-model-openrouter")).toHaveValue(providerModel);
+  await expect(page.locator("#settings-provider-effort-openrouter")).toHaveValue("xhigh");
   await page.getByRole("button", { name: "Cancelar" }).click();
 
   await expect.poll(async () => {
@@ -490,18 +521,21 @@ test("settings modal persists scoped settings through the daemon", async ({ page
       providerModel: body.ai.providers.openrouter.defaultModel,
       providerEffort: body.ai.providers.openrouter.defaultEffort
     };
-  }).toEqual({ progress: nextValue, provider: "openrouter", workflowPlan: nextPlanValue, enabled: true, providerModel, providerEffort: "high" });
+  }).toEqual({ progress: nextValue, provider: "openrouter", workflowPlan: nextPlanValue, enabled: true, providerModel, providerEffort: "xhigh" });
 });
 
 test("settings modal edits an agent prompt and persists it", async ({ page, request }) => {
   const marker = `Prompt especializado ${Date.now()}`;
+  await request.post(`${daemonUrl}/api/settings.update`, {
+    data: { scope: "app", patch: { ai: { defaultProvider: "openai", enabledProviders: ["openai"] } } }
+  });
   await page.goto("/");
   await page.getByRole("button", { name: "Configurações" }).click();
   await page.locator(".settings-provider-row", { hasText: "OpenAI Compatible" }).getByRole("checkbox").check();
   await page.getByRole("button", { name: "Engineering", exact: true }).click();
   await page.locator("#settings-agent-provider").fill("openai_compatible");
   await page.locator("#settings-agent-model").fill("gpt-test-e2e");
-  await page.locator("#settings-agent-effort").selectOption("high");
+  await page.locator("#settings-agent-effort").fill("high");
   await expect(page.locator(".settings-provider-status").getByText("missing_env")).toBeVisible();
   await expect(page.locator(".settings-provider-status").getByText(/^missing: OPENAI_COMPATIBLE_API_KEY, OPENAI_COMPATIBLE_BASE_URL$/)).toBeVisible();
   await page.getByLabel("Prompt editável").fill(`# Engineering\n\n${marker}`);
@@ -534,7 +568,7 @@ test("agentic task workflow persists handoffs, human wait, delegation, compactio
   const delegated = await command({ type: "agent.delegate_task", taskId: task.id, fromPersona: "generalist", toPersona: "engineering", wait: true, request: "Implementar ajuste técnico." });
   await expect(delegated).toBeOK();
   const delegatedBody = await delegated.json();
-  expect(delegatedBody.task.column).toBe("generalist");
+  expect(delegatedBody.task.column).toBe("product");
   expect(delegatedBody.task.status).toBe("waiting");
   expect(delegatedBody.subtask.column).toBe("engineering");
   await expect(await command({ type: "agent.wait_for_human", taskId: task.id, requestedByRole: "engineering", question: "Aprovar risco?", options: ["Aprovar"] })).toBeOK();
@@ -549,7 +583,9 @@ test("agentic task workflow persists handoffs, human wait, delegation, compactio
   await expect(await command({ type: "workflow.record_deployment_report", taskId: task.id, status: "passed", summary: "Delivery E2E registrado.", environment: "test", evidence: ["released"] })).toBeOK();
   await expect(await command({ type: "workflow.record_decision", taskId: task.id, role: "manager", decision: "Documentation not applicable for this E2E task.", rationale: "No docs changed." })).toBeOK();
   await expect(await command({ type: "workflow.record_summary", taskId: task.id, summary: "Fluxo E2E concluido com evidencias P1.", evidence: ["validation-report.md", "review-report.md", "deployment-report.md"] })).toBeOK();
-  await expect(await command({ type: "workflow.run_definition_of_done_gate", taskId: task.id })).toBeOK();
+  const dod = await command({ type: "workflow.run_definition_of_done_gate", taskId: task.id });
+  await expect(dod).toBeOK();
+  expect((await dod.json()).ok).toBe(true);
 
   const detail = await request.post(`${daemonUrl}/api/query`, { data: { type: "task.detail", taskId: task.id } });
   await expect(detail).toBeOK();
@@ -557,7 +593,7 @@ test("agentic task workflow persists handoffs, human wait, delegation, compactio
 
   const files = await request.post(`${daemonUrl}/api/query`, { data: { type: "task.files", taskId: task.id } });
   const events = (await files.json()).events;
-  expect(events.some((event) => event.type === "role.handoff" && event.toRole === "generalist")).toBe(true);
+  expect(events.some((event) => event.type === "delegation.subtask_created" && event.toPersona === "generalist")).toBe(true);
   expect(events.some((event) => event.type === "delegation.requested")).toBe(true);
   expect(events.some((event) => event.type === "human.input_requested")).toBe(true);
   expect(events.some((event) => event.type === "chat.compacted")).toBe(true);

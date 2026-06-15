@@ -32,7 +32,7 @@ export class RunnabilityService {
 
   async explain(task) {
     logStep("runnability-service", "explain.start", { taskId: task.id });
-    if (task.column === "human_wait") {
+    if (task.status === "waiting_human") {
       const result = { taskId: task.id, runnable: false, reasons: ["Aguardando resposta humana."] };
       logStep("runnability-service", "explain.done", { taskId: task.id, runnable: false });
       return result;

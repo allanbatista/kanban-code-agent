@@ -269,24 +269,26 @@ function AppShell() {
         taskId: input.id,
         patch: {
           title,
-          ...(options.draft ? {} : { column: "inbox", status: "idle" }),
+          ...(options.draft ? {} : { status: options.execute ? "queued" : "idle" }),
           projectTargets: input.projectTargets
         }
       }) as { task: Task };
       task = updated.task;
+      if (options.execute && task.column !== "manager") {
+        const moved = await runCommand.mutateAsync({ type: "task.move", commandId: commandId("task-move"), taskId: task.id, toColumn: "manager", mode: "soft" }) as { task: Task };
+        task = moved.task;
+      }
       await writeDescription(task.id, title, input.description);
     } else {
       const created = await runCommand.mutateAsync({
         type: "task.create",
         commandId: commandId("task-create"),
-        input: { ...input, title, column: "inbox", ...(options.draft ? { draft: true } : { status: "idle" }) }
+        input: { ...input, title, column: options.execute ? "manager" : "inbox", ...(options.draft ? { draft: true } : { status: options.execute ? "queued" : "idle" }) }
       }) as { task: Task };
       task = created.task;
     }
     setDraftTask(!input.id || input.id === draftTask?.id || task.status === "draft" ? task : null);
     if (options.execute) {
-      const moved = await runCommand.mutateAsync({ type: "task.move", commandId: commandId("task-move"), taskId: task.id, toColumn: "manager", mode: "soft" }) as { task: Task };
-      task = moved.task;
       setDraftTask(null);
     }
     await queryClient.invalidateQueries({ queryKey: ["state"] });
@@ -310,13 +312,6 @@ function AppShell() {
     return result;
   }
 
-  async function moveTask(taskId: string, columnId: string) {
-    const task = tasks.find((item) => item.id === taskId);
-    if (task?.column === columnId) return;
-    if (task?.status === "running" && !window.confirm("Task em execução. Interromper/checkpoint antes de mover?")) return;
-    await runCommand.mutateAsync({ type: "task.move", commandId: commandId("task-move"), taskId, toColumn: columnId, mode: "soft" });
-  }
-
   async function taskCommand(payload: Record<string, unknown>) {
     await runCommand.mutateAsync({ ...payload, commandId: commandId(String(payload.type || "task-command").replaceAll(".", "-")) });
     await queryClient.invalidateQueries({ queryKey: ["state"] });
@@ -330,7 +325,12 @@ function AppShell() {
 
   async function taskAction(task: Task, action: "run" | "interrupt" | "complete" | "decompose" | "pause-chain" | "resume-chain" | "cancel-task" | "cancel-chain") {
     if (action === "run") {
-      await taskCommand({ type: "task.run", taskId: task.id, agentId: task.routing?.currentAgent || "engineering" });
+      if (task.column === "inbox") {
+        await taskCommand({ type: "task.move", taskId: task.id, toColumn: "manager", mode: "soft" });
+        await taskCommand({ type: "task.run", taskId: task.id, agentId: "manager" });
+      } else {
+        await taskCommand({ type: "task.run", taskId: task.id, agentId: task.routing?.currentAgent || task.routing?.currentRole || "manager" });
+      }
     }
     if (action === "interrupt") {
       await taskCommand({ type: "task.interrupt", taskId: task.id, mode: "soft" });
@@ -383,7 +383,7 @@ function AppShell() {
             onSearch={(value) => patchParams({ q: value || null })}
             onOpenTask={(taskId) => patchParams({ task: taskId })}
             onNewTask={(columnId) => { setDraftTask(null); patchParams({ task: "new", column: columnId }); }}
-            onMoveTask={moveTask}
+            onRunTask={(task) => void taskAction(task, "run")}
           />
         </section>
         <aside className="right-rail" aria-label="Painel lateral">

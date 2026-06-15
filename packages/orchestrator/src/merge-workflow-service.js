@@ -15,9 +15,9 @@ export async function mergeTaskWorkflow(command, current, tasks, root) {
       const message = `Parent merge is busy with ${busy.id}.`;
       await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: "manager", agentId: "manager", disposition: "merge.blocked", text: message, visibility: "both" });
       const task = TaskSchema.parse(await updateTask(command.taskId, {
-        status: "queued",
-        column: "manager",
-        routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: "manager", currentRole: "manager" },
+        status: "blocked",
+        column: current.column,
+        routing: current.routing,
         dependencies: { ...current.dependencies, blockedBy: [] }
       }, root, "task.problem"));
       return { ok: false, commandId: command.commandId, task, merge: { ok: false, status: "blocked", reason: "parent_merge_busy", parentTaskId, busyTaskId: busy.id } };
@@ -39,9 +39,9 @@ export async function mergeTaskWorkflow(command, current, tasks, root) {
   await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "merge.conflict", actor: "orchestrator", taskId: command.taskId, branch: command.subtaskBranch || current.worktree?.branch, reason: merge.reason });
   await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: "manager", agentId: "manager", disposition: "merge.conflict", text: merge.reason || "Merge failed.", visibility: "both" });
   const task = TaskSchema.parse(await updateTask(command.taskId, {
-    status: "queued",
-    column: "manager",
-    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: "manager", currentRole: "manager" },
+    status: "blocked",
+    column: current.column,
+    routing: current.routing,
     dependencies: { ...current.dependencies, blockedBy: [] }
   }, root, "task.problem"));
   await releaseSemaphoreLeases({ root, taskId: command.taskId });

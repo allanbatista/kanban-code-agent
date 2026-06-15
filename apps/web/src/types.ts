@@ -84,7 +84,7 @@ export type AppSettings = {
   storageRoot?: string;
   runtimeRoot?: string;
   workspace?: { name?: string; language?: string };
-  ai?: { defaultProvider?: string; defaultModel?: string; defaultEffort?: "minimal" | "low" | "medium" | "high"; enabledProviders?: string[]; providers?: Record<string, { defaultModel?: string; defaultEffort?: "minimal" | "low" | "medium" | "high" } | unknown> };
+  ai?: { defaultProvider?: string; defaultModel?: string; defaultEffort?: AgentEffort; enabledProviders?: string[]; providers?: Record<string, { defaultModel?: string; defaultEffort?: AgentEffort } | unknown> };
   runtime?: { maxParallelTasks?: number; agentTokens?: Record<string, number>; projectTokens?: Record<string, number> };
   workflow?: {
     requireSpec?: boolean;
@@ -108,7 +108,7 @@ export type AgentSettings = {
   id: string;
   label?: string;
   provider?: string;
-  model?: { provider?: string; name?: string; effort?: "minimal" | "low" | "medium" | "high"; temperature?: number };
+  model?: { provider?: string; name?: string; effort?: AgentEffort; temperature?: number };
   instructionsPath?: string;
   instructionsBody?: string;
   skills?: string[];
@@ -138,7 +138,10 @@ export type ProviderModel = {
   name?: string;
   contextWindow?: number;
   maxOutputTokens?: number;
+  supportedEfforts?: AgentEffort[];
 };
+
+export type AgentEffort = "minimal" | "none" | "low" | "medium" | "high" | "xhigh";
 
 export type BoardSnapshot = {
   schema: string;

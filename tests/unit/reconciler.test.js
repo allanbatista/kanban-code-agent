@@ -7,6 +7,7 @@ import { handleCommand, handleQuery, whyNotRunning } from "../../packages/orches
 import { recoverStaleRuns, reconcileOrchestrator, semaphoreRequestsForTask } from "../../packages/orchestrator/src/reconciler.js";
 import { transitionTask } from "../../packages/orchestrator/src/state-machine.js";
 import { acquireSemaphoreLeases, readSemaphoreState, releaseSemaphoreLeases } from "../../packages/fsdb/src/runtime-store.js";
+import { updateTask } from "../../packages/fsdb/src/index.js";
 
 test("state machine applies core task transitions", () => {
   const task = {
@@ -20,9 +21,10 @@ test("state machine applies core task transitions", () => {
   assert.equal(transitionTask(task, "start", { runId: "run-2", agentId: "engineering" }).status, "running");
   assert.equal(transitionTask(task, "complete", { nextColumn: "done" }).status, "done");
   assert.equal(transitionTask(task, "complete", { nextColumn: "done" }).column, "done");
-  assert.equal(transitionTask(task, "block", { blockers: ["missing-input"] }).column, "manager");
-  assert.equal(transitionTask(task, "block", { blockers: ["missing-input"] }).status, "queued");
+  assert.equal(transitionTask(task, "block", { blockers: ["missing-input"] }).column, "build");
+  assert.equal(transitionTask(task, "block", { blockers: ["missing-input"] }).status, "blocked");
   assert.equal(transitionTask(task, "manual_move", { toColumn: "validate" }).routing.manualOverride.active, true);
+  assert.equal(transitionTask(task, "manual_move", { toColumn: "validate" }).column, "build");
 });
 
 test("runtime semaphore store acquires and releases leases", async () => {
@@ -93,9 +95,9 @@ test("reconciler auto-queues eligible idle autoStart tasks only", async () => {
   const eligible = await handleCommand({
     type: "task.create",
     commandId: "scheduler-autostart-eligible",
-    input: { title: "Eligible idle", column: "inbox", projectTargets: ["kanban-code-agent"], status: "idle" }
+    input: { title: "Eligible idle", column: "product", projectTargets: ["kanban-code-agent"], status: "idle", routing: { manualOverride: { active: false } } }
   }, root);
-  await handleCommand({ type: "task.update", commandId: "scheduler-autostart-eligible-idle", taskId: eligible.task.id, patch: { column: "product", status: "idle", routing: { manualOverride: { active: false } } } }, root);
+  await updateTask(eligible.task.id, { status: "idle", column: "product", routing: { manualOverride: { active: false } } }, root, "test.setup");
 
   const excluded = [];
   for (const [status, patch = {}] of [
@@ -107,19 +109,18 @@ test("reconciler auto-queues eligible idle autoStart tasks only", async () => {
     ["waiting_human"],
     ["blocked"],
     ["idle", { routing: { manualOverride: { active: true } } }],
-    ["idle", { dependencies: { needs: [], provides: [], blockedBy: ["human"], fileLocks: [], semaphores: [] } }],
-    ["idle", { column: "human_wait" }]
+    ["idle", { dependencies: { needs: [], provides: [], blockedBy: ["human"], fileLocks: [], semaphores: [] } }]
   ]) {
     const created = await handleCommand({
       type: "task.create",
       commandId: `scheduler-autostart-${status}-${excluded.length}`,
-      input: { title: `Excluded ${status} ${excluded.length}`, column: "inbox", projectTargets: ["kanban-code-agent"], status: "idle" }
+      input: { title: `Excluded ${status} ${excluded.length}`, column: "product", projectTargets: ["kanban-code-agent"], status: "idle" }
     }, root);
     await handleCommand({
       type: "task.update",
       commandId: `scheduler-autostart-excluded-${excluded.length}`,
       taskId: created.task.id,
-      patch: { column: "product", status, routing: { manualOverride: { active: false } }, ...patch }
+      patch: { status, routing: { manualOverride: { active: false } }, ...patch }
     }, root);
     excluded.push({ id: created.task.id, status, patch });
   }
@@ -138,7 +139,7 @@ test("reconciler auto-queues eligible idle autoStart tasks only", async () => {
   for (const item of excluded) {
     const detail = await handleQuery({ type: "task.detail", taskId: item.id }, root);
     assert.equal(detail.status, item.status);
-    if (item.patch.column) assert.equal(detail.column, item.patch.column);
+    assert.equal(detail.column, "product");
   }
 });
 
@@ -147,7 +148,7 @@ test("human wait tasks are not runnable", async () => {
   const created = await handleCommand({
     type: "task.create",
     commandId: "human-wait-create",
-    input: { title: "Needs human", column: "human_wait", status: "idle" }
+    input: { title: "Needs human", column: "manager", status: "waiting_human" }
   }, root);
 
   const why = await whyNotRunning(created.task, root);
@@ -163,13 +164,13 @@ test("queued tasks in same WIP column do not deadlock each other", async () => {
     const result = await handleCommand({
       type: "task.create",
       commandId: `wip-queued-${index}`,
-      input: { title: `Queued ${index}`, column: "inbox", status: "idle", routing: { currentAgent: "generalist", currentRole: "generalist", manualOverride: { active: false } } }
+      input: { title: `Queued ${index}`, column: "generalist", status: "idle", routing: { currentAgent: "generalist", currentRole: "generalist", manualOverride: { active: false } } }
     }, root);
     const queued = await handleCommand({
       type: "task.update",
       commandId: `wip-queued-update-${index}`,
       taskId: result.task.id,
-      patch: { column: "generalist", status: "queued", routing: { currentAgent: "generalist", currentRole: "generalist", manualOverride: { active: false } } }
+      patch: { status: "queued", routing: { currentAgent: "generalist", currentRole: "generalist", manualOverride: { active: false } } }
     }, root);
     created.push(queued.task);
   }

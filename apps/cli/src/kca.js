@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { addProject, createTask, initStorage, listTasks, moveTask, rebuildIndexes, rebuildTaskFromEvents } from "@kca/fsdb";
+import { addProject, createTask, initStorage, listTasks, rebuildIndexes, rebuildTaskFromEvents } from "@kca/fsdb";
 import { handleCommand, handleQuery } from "@kca/orchestrator";
 import { doctorPi } from "@kca/pi-adapter";
 
@@ -80,9 +80,8 @@ async function main() {
 
   if (scope === "task" && action === "move") {
     const taskId = requireValue("taskId", positional);
-    const toColumn = requireValue("column", args[3]);
-    const task = await moveTask(taskId, toColumn, root());
-    console.log(JSON.stringify(task, null, 2));
+    const toColumn = requireValue("column", args[3] || value("--to"));
+    console.log(JSON.stringify(await handleCommand({ type: "task.move", commandId: value("--command-id", `cli-move-${Date.now()}`), taskId, toColumn, mode: value("--mode", "soft") }, root()), null, 2));
     return;
   }
 

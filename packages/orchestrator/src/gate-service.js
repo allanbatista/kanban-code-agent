@@ -1,15 +1,10 @@
-import { appendJsonl, boardSnapshot, getTask, normalizeColumnId, paths, updateTask, writeTaskFile } from "@kca/fsdb";
+import { appendJsonl, getTask, paths, updateTask, writeTaskFile } from "@kca/fsdb";
 import { appendChatMessage } from "@kca/fsdb/chat-store";
 import { releaseSemaphoreLeases } from "@kca/fsdb/runtime-store";
-import { roleById } from "@kca/core/roles";
 import { TaskSchema } from "@kca/schemas";
 import { runDeployment } from "./deployment-service.js";
 import { evaluateReview } from "./review-service.js";
-import { normalizeWorkflow, phaseForRole } from "./spec-workflow-service.js";
-
-function roleAgent(roleId) {
-  return roleById(roleId)?.agentId || roleId;
-}
+import { normalizeWorkflow } from "./spec-workflow-service.js";
 
 function assertActiveRun(current, runId) {
   if (!runId) return;
@@ -53,25 +48,21 @@ export async function reviewTaskGate(command, current, root) {
       await releaseSemaphoreLeases({ root, taskId: command.taskId });
       return { ok: true, commandId: command.commandId, task, review, parentTask, reviewPending: true };
     }
-    const requested = normalizeColumnId(command.passColumn);
-    const column = requested === "done" ? "deployment" : requested;
-    const target = (await boardSnapshot(root)).columns.find((item) => item.id === column);
     const task = TaskSchema.parse(await updateTask(command.taskId, {
       status: "queued",
-      column,
-      routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: target?.agent || roleAgent(column), currentRole: target?.role || column },
-      workflow: { ...normalizeWorkflow(current), phase: phaseForRole(target?.role || column), currentRole: target?.role || column, boardColumn: column }
+      column: current.column,
+      routing: current.routing,
+      workflow: normalizeWorkflow(current)
     }, root, "gate.passed"));
     await appendReviewEvent(command, root, review, "passed");
     await releaseSemaphoreLeases({ root, taskId: command.taskId });
     return { ok: true, commandId: command.commandId, task, review };
   }
-  const failRole = command.failRole;
   const task = TaskSchema.parse(await updateTask(command.taskId, {
     status: "waiting",
-    column: roleById(failRole)?.columnIds?.[0] || normalizeColumnId(failRole),
-    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: roleAgent(failRole), currentRole: failRole },
-    workflow: { ...normalizeWorkflow(current), phase: phaseForRole(failRole), currentRole: failRole, boardColumn: roleById(failRole)?.columnIds?.[0] || normalizeColumnId(failRole) }
+    column: current.column,
+    routing: current.routing,
+    workflow: normalizeWorkflow(current)
   }, root, "gate.failed"));
   await appendReviewEvent(command, root, review, "failed");
   await releaseSemaphoreLeases({ root, taskId: command.taskId });
@@ -85,9 +76,9 @@ export async function deployTaskGate(command, current, root) {
   const workflow = normalizeWorkflow(current);
   const task = TaskSchema.parse(await updateTask(command.taskId, {
     status: "waiting",
-    column: "manager",
-    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: "manager", currentRole: "manager" },
-    workflow: { ...workflow, phase: "delivery", currentRole: "manager", boardColumn: "manager" }
+    column: current.column,
+    routing: current.routing,
+    workflow
   }, root, "gate.passed"));
   await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "deployment.recorded", actor: "deployment", taskId: command.taskId, runId: command.runId, gate: "deployment", deployment });
   await releaseSemaphoreLeases({ root, taskId: command.taskId });

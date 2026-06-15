@@ -32,7 +32,6 @@ export const COMMAND_TYPES = [
   "workflow.run_definition_of_ready_gate",
   "workflow.run_definition_of_done_gate",
   "task.answer_input",
-  "role.route_task",
   "agent.complete_task",
   "agent.report_blocker",
   "agent.request_user_input",

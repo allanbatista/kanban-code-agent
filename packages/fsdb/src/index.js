@@ -7,7 +7,7 @@ import { DEFAULT_ROLES } from "@kca/core/roles";
 import { logStep } from "@kca/core/log";
 import YAML from "yaml";
 
-export const DEFAULT_COLUMNS = ["inbox", "manager", "product", "design", "architecture", "generalist", "engineering", "quality", "review", "deployment", "human_wait", "done"];
+export const DEFAULT_COLUMNS = ["inbox", "manager", "product", "design", "architecture", "generalist", "engineering", "quality", "review", "deployment", "done"];
 const storageInitCache = new Map();
 
 const DEFAULT_COLUMN_META = {
@@ -21,11 +21,11 @@ const DEFAULT_COLUMN_META = {
   quality: { label: "Qualidade", agent: "quality", role: "quality", autoStart: true, wip: 2 },
   review: { label: "Review", agent: "review", role: "review", autoStart: true, wip: 2 },
   deployment: { label: "Deployment", agent: "deployment", role: "deployment", autoStart: false, wip: 1 },
-  human_wait: { label: "Aguardando Humano", agent: null, role: "manager", autoStart: false, wip: null },
   done: { label: "Pronto", agent: null, role: null, autoStart: false, wip: null }
 };
 
-const COLUMN_ALIASES = { definition: "product", build: "engineering", validate: "quality", blocked: "human_wait", deploy: "deployment" };
+const COLUMN_ALIASES = { entrada: "inbox", pronto: "done", definition: "product", build: "engineering", validate: "quality", blocked: "manager", human_wait: "manager", deploy: "deployment" };
+const OPERATIONAL_MOVE_COLUMNS = new Set(["inbox", "manager", "done"]);
 const WORKFLOW_GATE_KEYS = ["spec", "clarification", "definitionOfReady", "validation", "definitionOfDone"];
 const DEFAULT_WORKFLOW_SETTINGS = {
   requireSpec: true,
@@ -64,7 +64,6 @@ function workflowRoleForColumn(column, routing = {}) {
     quality: "qa",
     review: "review",
     deployment: "deployment",
-    human_wait: "manager",
     done: "none"
   };
   return map[column] || "manager";
@@ -72,7 +71,7 @@ function workflowRoleForColumn(column, routing = {}) {
 
 function workflowPhaseForTask(task) {
   if (task.status === "done" || task.column === "done") return "done";
-  if (task.status === "blocked" || task.column === "human_wait") return "blocked";
+  if (task.status === "blocked" || task.status === "waiting_human") return "blocked";
   if (task.status === "canceled") return "cancelled";
   const map = {
     inbox: "intake",
@@ -164,6 +163,34 @@ function patchWithWorkflow(current, patch = {}) {
   return { ...patch, workflow: { ...workflow, ...(patch.workflow || {}) } };
 }
 
+export function canMoveOperationalColumn(fromColumn, toColumn) {
+  return OPERATIONAL_MOVE_COLUMNS.has(normalizeColumnId(fromColumn)) && OPERATIONAL_MOVE_COLUMNS.has(normalizeColumnId(toColumn));
+}
+
+function operationalMovePatch(current, toColumn) {
+  const column = normalizeColumnId(toColumn);
+  if (!canMoveOperationalColumn(current.column, column)) return null;
+  if (column === "done") {
+    return {
+      column,
+      status: "done",
+      routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: null, currentRole: null }
+    };
+  }
+  if (column === "manager") {
+    return {
+      column,
+      status: "queued",
+      routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } }
+    };
+  }
+  return {
+    column,
+    status: "idle",
+    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: null, currentRole: null, manualOverride: { active: false } }
+  };
+}
+
 async function resolveStoredColumnId(columnId, p) {
   const requested = columnId || "manager";
   const board = await readYaml(join(p.settings, "boards", "default.yaml"), { columns: [] });
@@ -232,7 +259,7 @@ export async function readYaml(path, fallback = null) {
 
 function defaultColumnSettings(id) {
   const meta = DEFAULT_COLUMN_META[id];
-  return { id, label: meta.label, agent: meta.agent, role: meta.role, autoStart: meta.autoStart, wip: meta.wip, wipLimit: meta.wip, hooks: { onEnter: id === "human_wait" ? ["summarize-blocker"] : id === "quality" ? ["run-checks"] : [], beforeLeave: [], onAgentComplete: [] } };
+  return { id, label: meta.label, agent: meta.agent, role: meta.role, autoStart: meta.autoStart, wip: meta.wip, wipLimit: meta.wip, hooks: { onEnter: id === "quality" ? ["run-checks"] : [], beforeLeave: [], onAgentComplete: [] } };
 }
 
 async function ensureDefaultBoardColumns(boardPath) {
@@ -1035,7 +1062,7 @@ export async function createTask(input, rootInput) {
   const now = new Date().toISOString();
   const requestedColumn = input.column || (input.draft ? "inbox" : "manager");
   const needsHumanIntake = !input.draft && normalizeColumnId(requestedColumn) === "manager" && !taskHasActionableIntent(input);
-  const column = needsHumanIntake ? "human_wait" : await resolveStoredColumnId(requestedColumn, p);
+  const column = needsHumanIntake ? "manager" : await resolveStoredColumnId(requestedColumn, p);
   const title = needsHumanIntake ? UNCLEAR_TASK_TITLE : fallbackTaskTitle(input);
   const requestedWorktree = input.worktree || { enabled: true, kind: input.kind || "task", branch: input.branch || `kca/${id}`, pathRef: "worktree.yaml", parentTaskId: null, mergeTarget: "main" };
   const parentTaskId = input.parentTaskId ?? requestedWorktree.parentTaskId ?? null;
@@ -1048,7 +1075,7 @@ export async function createTask(input, rootInput) {
     title,
     kind: input.kind || "task",
     column,
-    status: needsHumanIntake ? "idle" : input.status || (input.draft ? "draft" : "idle"),
+    status: needsHumanIntake ? "waiting_human" : input.status || (input.draft ? "draft" : "idle"),
     priority: input.priority || "medium",
     createdAt: now,
     updatedAt: now,
@@ -1058,15 +1085,15 @@ export async function createTask(input, rootInput) {
     rootTaskId,
     depth,
     routing: needsHumanIntake
-      ? { currentAgent: null, currentRole: null, lastAgent: input.agent || "manager", lastRole: input.role || input.agent || "manager", manualOverride: { active: false } }
+      ? { currentAgent: input.agent || "manager", currentRole: input.role || input.agent || "manager", lastAgent: null, lastRole: null, manualOverride: { active: false } }
       : input.routing || { currentAgent: input.agent || "manager", currentRole: input.role || input.agent || "manager", manualOverride: { active: false } },
     worktree,
     dependencies: input.dependencies || { needs: [], provides: [], blockedBy: [], fileLocks: [], semaphores: [] },
     workflow: normalizeWorkflow({
       column: await resolveStoredColumnId(requestedColumn, p),
-      status: needsHumanIntake ? "idle" : input.status || (input.draft ? "draft" : "idle"),
+      status: needsHumanIntake ? "waiting_human" : input.status || (input.draft ? "draft" : "idle"),
       routing: needsHumanIntake
-        ? { currentAgent: null, currentRole: null }
+        ? { currentAgent: input.agent || "manager", currentRole: input.role || input.agent || "manager" }
         : input.routing || { currentAgent: input.agent || "manager", currentRole: input.role || input.agent || "manager" }
     }),
     hooks: input.hooks || { active: [] },
@@ -1131,9 +1158,22 @@ export async function getTask(taskId, rootInput) {
 async function readTaskWithRuntime(taskId, p) {
   const task = await readYaml(join(p.tasks, taskId, "task.yaml"));
   if (!task) return null;
-  const normalizedTreeTask = normalizeTaskTreeFields(task);
-  const workflow = normalizeWorkflow(task);
-  if (!task.workflow || WORKFLOW_GATE_KEYS.some((key) => !task.workflow?.gates?.[key]) || !task.workflow?.artifacts) {
+  let normalizedTreeTask = normalizeTaskTreeFields(task);
+  const migratedHumanWait = normalizedTreeTask.column === "human_wait";
+  if (migratedHumanWait) {
+    normalizedTreeTask = {
+      ...normalizedTreeTask,
+      column: "manager",
+      status: normalizedTreeTask.status === "idle" ? "waiting_human" : normalizedTreeTask.status,
+      routing: {
+        ...normalizedTreeTask.routing,
+        currentAgent: normalizedTreeTask.routing?.currentAgent || normalizedTreeTask.routing?.lastAgent || "manager",
+        currentRole: normalizedTreeTask.routing?.currentRole || normalizedTreeTask.routing?.lastRole || "manager"
+      }
+    };
+  }
+  const workflow = normalizeWorkflow(normalizedTreeTask);
+  if (migratedHumanWait || !task.workflow || WORKFLOW_GATE_KEYS.some((key) => !task.workflow?.gates?.[key]) || !task.workflow?.artifacts) {
     const taskPath = join(p.tasks, taskId, "task.yaml");
     await writeYaml(taskPath, { ...normalizedTreeTask, workflow });
     await ensureWorkflowArtifacts(join(p.tasks, taskId), { ...normalizedTreeTask, workflow });
@@ -1318,33 +1358,22 @@ export async function listTaskFiles(taskId, rootInput) {
 }
 
 export async function moveTask(taskId, toColumn, rootInput) {
-  const p = paths(rootInput);
   logStep("fsdb", "moveTask.start", { taskId, toColumn });
+  const p = paths(rootInput);
   const taskPath = join(p.tasks, taskId, "task.yaml");
-  const task = await readYaml(taskPath);
-  if (!task) throw new Error(`Task not found: ${taskId}`);
-  const from = task.column;
-  task.column = await resolveStoredColumnId(toColumn, p);
-  if (task.column === "done") {
-    task.column = "manager";
-    task.status = "queued";
-    task.workflow = {
-      ...normalizeWorkflow(task),
-      phase: "review",
-      currentRole: "manager",
-      boardColumn: "manager",
-      gates: {
-        ...normalizeWorkflow(task).gates,
-        definitionOfDone: { status: "pending", reason: "Direct Done move requested; waiting for DoD gate.", evidence: [`move:${from}->done`] }
-      }
-    };
-  } else {
-    task.workflow = normalizeWorkflow(task);
-  }
-  task.updatedAt = new Date().toISOString();
+  const current = await readYaml(taskPath);
+  if (!current) throw new Error(`Task not found: ${taskId}`);
+  const targetColumn = await resolveStoredColumnId(toColumn, p);
+  if (current.column === targetColumn) return current;
+  const patch = operationalMovePatch(current, targetColumn);
+  if (!patch) throw new Error("task_move_disabled");
+  const updatedAt = new Date().toISOString();
+  const normalizedPatch = patchWithWorkflow(current, patch);
+  const task = { ...current, ...normalizedPatch, updatedAt };
   await writeYaml(taskPath, task);
-  await appendJsonl(join(p.tasks, taskId, "events.jsonl"), { ts: task.updatedAt, type: "task.moved", actor: "user", taskId, from, to: task.column, patch: { column: task.column, status: task.status } });
-  logStep("fsdb", "moveTask.done", { taskId, from, to: task.column });
+  await ensureWorkflowArtifacts(dirname(taskPath), task);
+  await appendJsonl(join(p.tasks, taskId, "events.jsonl"), { ts: updatedAt, type: "task.moved", actor: "user", taskId, from: current.column, to: task.column, patch: normalizedPatch });
+  logStep("fsdb", "moveTask.done", { taskId, from: current.column, to: task.column, status: task.status });
   return task;
 }
 
@@ -1543,7 +1572,8 @@ export async function boardSnapshot(rootInput) {
     children.push(task);
     directChildrenByParent.set(parentTaskId, children);
   }
-  const tasks = await Promise.all(storedTasks.map(async (task) => {
+  const visibleTasks = storedTasks.filter((task) => task.status !== "done" || !(task.parentTaskId || task.worktree?.parentTaskId));
+  const tasks = await Promise.all(visibleTasks.map(async (task) => {
     const usage = await readTaskUsage(task.id, rootInput);
     const children = directChildrenByParent.get(task.id) || [];
     const subtasksSummary = children.length ? {

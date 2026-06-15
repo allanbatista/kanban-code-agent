@@ -4,14 +4,14 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { interruptRun, startRun, writeRunSummary } from "@kca/agent-runtime";
 import { createWorktree } from "@kca/git-worktree";
-import { appendJsonl, boardSnapshot, getTask, listTasks, normalizeColumnId, paths, readJsonl, readProject, readSettings, updateTask, writeTaskFile } from "@kca/fsdb";
+import { appendJsonl, getTask, listTasks, normalizeColumnId, paths, readJsonl, readProject, readSettings, updateTask, writeTaskFile } from "@kca/fsdb";
 import { appendChatMessage } from "@kca/fsdb/chat-store";
 import { releaseSemaphoreLeases } from "@kca/fsdb/runtime-store";
 import { TaskSchema } from "@kca/schemas";
 import { logStep } from "@kca/core/log";
 import { roleById } from "@kca/core/roles";
 import { discoverProviders } from "@kca/core/providers";
-import { phaseForRole, requestDoneReview } from "./spec-workflow-service.js";
+import { requestDoneReview } from "./spec-workflow-service.js";
 
 const exec = promisify(execFile);
 const ROOT_TASK_ARTIFACTS = new Set(["acceptance.md"]);
@@ -30,11 +30,12 @@ function assertActiveRun(task, runId) {
 }
 
 async function routeProblemToManager(task, root, message, eventType = "task.problem") {
-  await appendChatMessage(root, { scope: "task", taskId: task.id, role: "assistant", persona: "manager", agentId: "manager", disposition: eventType, text: message, visibility: "both" });
+  const persona = task.routing?.currentRole || task.routing?.currentAgent || "manager";
+  await appendChatMessage(root, { scope: "task", taskId: task.id, role: "assistant", persona, agentId: task.routing?.currentAgent || persona, disposition: eventType, text: message, visibility: "both" });
   return TaskSchema.parse(await updateTask(task.id, {
-    status: "queued",
-    column: "manager",
-    routing: { ...task.routing, lastAgent: task.routing?.currentAgent || null, lastRole: task.routing?.currentRole || null, currentAgent: "manager", currentRole: "manager" },
+    status: "blocked",
+    column: task.column,
+    routing: task.routing,
     dependencies: { ...task.dependencies, blockedBy: [] }
   }, root, eventType));
 }
@@ -202,10 +203,57 @@ async function requeueWaitingParentForChild(child, root, summary) {
 }
 
 async function childResultSummary(child, root) {
+  try {
+    const latest = await readFile(`${paths(root).tasks}/${child.id}/result.md`, "utf8");
+    if (latest.trim()) return latest.trim();
+  } catch {}
   const events = await readJsonl(`${paths(root).tasks}/${child.id}/events.jsonl`);
   const reported = events.findLast?.((event) => event.type === "subtask.result_reported" && event.summary)
-    || [...events].reverse().find((event) => event.type === "subtask.result_reported" && event.summary);
+    || [...events].reverse().find((event) => ["subtask.result_reported", "subtask.review_requested"].includes(event.type) && event.summary);
   return reported?.summary || "sem resumo reportado";
+}
+
+async function nextSubtaskResultVersion(child, root) {
+  const events = await readJsonl(`${paths(root).tasks}/${child.id}/events.jsonl`);
+  const versions = events.map((event) => Number(event.resultVersion || 0)).filter((value) => Number.isInteger(value) && value > 0);
+  return versions.length ? Math.max(...versions) + 1 : 1;
+}
+
+async function writeSubtaskResult(child, root, runId, summary, finalText) {
+  const version = await nextSubtaskResultVersion(child, root);
+  const resultPath = `result-v${version}.md`;
+  const content = [
+    `# Result v${version}`,
+    "",
+    `Task: ${child.id}`,
+    `Run: ${runId || "unknown"}`,
+    "",
+    String(finalText || summary || "Sem resumo.").trim() || "Sem resumo.",
+    ""
+  ].join("\n");
+  await writeTaskFile(child.id, resultPath, content, root);
+  await writeTaskFile(child.id, "result.md", content, root);
+  return { resultVersion: version, resultPath, latestResultPath: "result.md", content };
+}
+
+async function recordParentSubtaskResult(parentTaskId, child, root, result) {
+  if (!parentTaskId || !result) return null;
+  let previous = "";
+  try {
+    previous = await readFile(`${paths(root).tasks}/${parentTaskId}/subtask-results.md`, "utf8");
+  } catch {}
+  const entry = [
+    `## ${child.id} result v${result.resultVersion}`,
+    "",
+    `Status: ${child.status}`,
+    `Result: ${child.id}/${result.resultPath}`,
+    `Latest: ${child.id}/${result.latestResultPath}`,
+    "",
+    result.content,
+    ""
+  ].join("\n");
+  await writeTaskFile(parentTaskId, "subtask-results.md", `${previous.trim() ? `${previous.trim()}\n\n` : "# Subtask Results\n\n"}${entry}`, root);
+  return "subtask-results.md";
 }
 
 function parentIdForTask(task) {
@@ -342,7 +390,7 @@ export async function runTaskWorkflow(command, root, whyNotRunning, executeComma
   const latest = await getTask(command.taskId, root);
   if (latest && (latest.status !== runnableTask.status || latest.column !== runnableTask.column || latest.updatedAt !== runnableTask.updatedAt)) {
     const task = TaskSchema.parse(await updateTask(command.taskId, {
-      routing: latest.column === "human_wait"
+      routing: latest.status === "waiting_human"
         ? latest.routing
         : { ...latest.routing, currentAgent: latest.routing?.currentAgent || run.agentId, currentRole: latest.routing?.currentRole || run.role || run.agentId },
       agent: { ...latest.agent, currentRunId: run.runId, currentSessionRef: run.sessionRef, resumeMode: "continue", lastSummary: latest.agent?.lastSummary || run.summaryRef }
@@ -372,6 +420,15 @@ export async function interruptTaskWorkflow(command, root) {
   return { ok: true, commandId: command.commandId, task, event };
 }
 
+export async function moveTaskWorkflow(command, root, { runHooks, taskService } = {}) {
+  logStep("orchestrator", "task.move.start", { commandId: command.commandId, taskId: command.taskId, toColumn: command.toColumn });
+  const current = await getTask(command.taskId, root);
+  if (!current) throw new Error(`Task not found: ${command.taskId}`);
+  const result = await taskService.moveTask(command.taskId, command.toColumn, { runHooks });
+  if (result.unsupported) return { ok: false, commandId: command.commandId, ...result, error: "task_move_disabled" };
+  return { ok: true, commandId: command.commandId, ...result };
+}
+
 export async function completeTaskWorkflow(command, root) {
   logStep("orchestrator", "agent.complete_task", { commandId: command.commandId, taskId: command.taskId, runId: command.runId });
   logStep("agent", "task.complete", { taskId: command.taskId, runId: command.runId, nextColumn: command.nextColumn });
@@ -392,35 +449,34 @@ export async function completeTaskWorkflow(command, root) {
     await releaseSemaphoreLeases({ root, taskId: command.taskId });
     return { ok: true, commandId: command.commandId, task, summaryRef, deferredComments: deferredComments.length };
   }
-  const requestedColumn = normalizeColumnId(command.nextColumn);
-  const nextColumn = requestedColumn;
-  const target = (await boardSnapshot(root)).columns.find((column) => column.id === nextColumn);
+  const nextColumn = normalizeColumnId(command.nextColumn || "");
   const done = nextColumn === "done";
-  if (isSubtask(current) && (done || nextColumn === "manager")) {
+  if (isSubtask(current)) {
+    const resultArtifact = await writeSubtaskResult(current, root, command.runId, command.summary, visibleText);
     const task = TaskSchema.parse(await updateTask(command.taskId, {
       status: "waiting_review",
       column: current.column,
       routing: current.routing,
       agent: { ...current.agent, lastSummary: summaryRef }
     }, root, "subtask.review_requested"));
+    const parentTaskId = parentIdForTask(current);
+    const parentResultPath = await recordParentSubtaskResult(parentTaskId, task, root, resultArtifact);
     await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: current.routing?.currentRole || current.routing?.currentAgent || "assistant", agentId: current.routing?.currentAgent || "assistant", runId: command.runId, disposition: "subtask.review_requested", text: visibleText, visibility: "both" });
-    await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "subtask.review_requested", actor: current.routing?.currentRole || current.routing?.currentAgent || "assistant", taskId: command.taskId, parentTaskId: parentIdForTask(current), summary: command.summary || visibleText });
-    const parentTask = await requeueParentForSubtaskDecision(task, root, "subtask.review_requested", `Subtask aguardando review: ${task.id}. Resultado: ${command.summary || visibleText}`);
+    await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "subtask.review_requested", actor: current.routing?.currentRole || current.routing?.currentAgent || "assistant", taskId: command.taskId, parentTaskId, summary: command.summary || visibleText, ...resultArtifact, parentResultPath });
+    const parentTask = await requeueParentForSubtaskDecision(task, root, "subtask.review_requested", `Subtask aguardando review: ${task.id}. Resultado: ${command.summary || visibleText}. Arquivo: ${resultArtifact.resultPath}`);
     await releaseSemaphoreLeases({ root, taskId: command.taskId });
-    return { ok: true, commandId: command.commandId, task, summaryRef, parentTask, reviewPending: true };
+    return { ok: true, commandId: command.commandId, task, summaryRef, parentTask, reviewPending: true, ...resultArtifact };
   }
   const task = TaskSchema.parse(await updateTask(command.taskId, {
     status: done ? "done" : "queued",
-    column: nextColumn,
+    column: done ? "done" : current.column,
     routing: {
       ...current.routing,
-      lastAgent: current.routing?.currentAgent || null,
-      lastRole: current.routing?.currentRole || null,
-      currentAgent: done ? null : target?.agent || current.routing?.currentAgent,
-      currentRole: done ? null : target?.role || target?.agent || current.routing?.currentRole
+      currentAgent: done ? null : current.routing?.currentAgent,
+      currentRole: done ? null : current.routing?.currentRole
     },
     agent: { ...current.agent, lastSummary: summaryRef },
-    workflow: { ...current.workflow, phase: done ? "done" : phaseForRole(target?.role || target?.agent || current.routing?.currentRole || "manager"), currentRole: done ? "none" : target?.role || target?.agent || current.routing?.currentRole || "manager", boardColumn: nextColumn }
+    workflow: { ...current.workflow, phase: done ? "done" : current.workflow?.phase, currentRole: done ? "none" : current.workflow?.currentRole, boardColumn: done ? "done" : current.column }
   }, root, "agent.completed"));
   await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: current.routing?.currentRole || current.routing?.currentAgent || "assistant", agentId: current.routing?.currentAgent || "assistant", runId: command.runId, disposition: "agent.completed", text: visibleText, visibility: "both" });
   const parentTask = await requeueWaitingParentForChild(task, root, command.summary || visibleText);
@@ -488,9 +544,9 @@ export async function requestUserInputWorkflow(command, root) {
   const requester = current.routing?.currentRole || current.routing?.currentAgent || "assistant";
   const message = await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: requester, agentId: current.routing?.currentAgent || requester, runId: command.runId, disposition: "wait_for_human", text: command.question, visibility: "both" });
   const task = TaskSchema.parse(await updateTask(command.taskId, {
-    status: "idle",
-    column: "human_wait",
-    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: requester, currentAgent: null, currentRole: null },
+    status: "waiting_human",
+    column: current.column,
+    routing: current.routing,
     dependencies: { ...current.dependencies, blockedBy: [] }
   }, root, "agent.input_requested"));
   await releaseSemaphoreLeases({ root, taskId: command.taskId });
@@ -507,7 +563,7 @@ export async function reviewSubtaskWorkflow(command, root) {
   if (command.decision === "approve") {
     const task = TaskSchema.parse(await updateTask(command.taskId, {
       status: "done",
-      column: "done",
+      column: current.column,
       routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: null, currentRole: null }
     }, root, "subtask.review_approved"));
     await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: "manager", agentId: "manager", disposition: "subtask.review_approved", text: feedback || "Subtask aprovada.", visibility: "both" });

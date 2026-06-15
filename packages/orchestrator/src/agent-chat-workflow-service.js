@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { interruptRun, startRun } from "@kca/agent-runtime";
-import { boardSnapshot, createTask, getTask, listTasks, moveTask, normalizeColumnId, paths, readAgent, readSettings, readSettingsScope, updateSettings, updateTask, writeTaskFile, appendJsonl } from "@kca/fsdb";
+import { boardSnapshot, createTask, getTask, listTasks, paths, readAgent, readSettings, readSettingsScope, updateSettings, updateTask, writeTaskFile, appendJsonl } from "@kca/fsdb";
 import { appendChatMessage, readChatHistory } from "@kca/fsdb/chat-store";
 import { runBoardAssistant, loadPiSdk } from "@kca/pi-adapter";
 import { TaskSchema } from "@kca/schemas";
@@ -97,7 +97,6 @@ export async function agentChatWorkflow(command, root, whyNotRunning) {
     const kanbanContext = {
       root,
       createTask: (input) => createTask(input, root),
-      moveTask: (taskId, column) => moveTask(taskId, column, root),
       updateTask: (taskId, patch) => updateTask(taskId, patch, root, "task.updated"),
       getTask: (taskId) => getTask(taskId, root),
       listTasks: () => listTasks(root),
@@ -182,16 +181,8 @@ export async function agentChatWorkflow(command, root, whyNotRunning) {
       reply = `Criei ${task.id} em manager: ${task.title}`;
     }
   } else if ((lower.includes("mover") || lower.includes("mova")) && current) {
-    const snapshot = await boardSnapshot(root);
-    const target = snapshot.columns.find((column) => lower.includes(column.id.toLowerCase()) || lower.includes(String(column.label || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()))
-      || snapshot.columns.find((column) => column.id === normalizeColumnId(lower.includes("build") ? "build" : lower.includes("definition") ? "definition" : lower.includes("validate") ? "validate" : lower.includes("blocked") ? "blocked" : ""));
-    if (target) {
-      const task = TaskSchema.parse(await moveTask(current.id, target.id, root));
-      action = { type: "task.moved", taskId: task.id, column: target.id };
-      reply = `Movi ${task.id} para ${target.label || target.id}.`;
-    } else {
-      reply = `Não encontrei a coluna de destino para ${current.id}.`;
-    }
+    action = { type: "task.move.disabled", taskId: current.id };
+    reply = `Movimentação direta de ${current.id} está desabilitada. Crie uma subtask para outro agent quando precisar de outro papel.`;
   } else if ((lower.includes("renomear") || lower.includes("titulo") || lower.includes("título")) && current) {
     const title = command.prompt.split(/para\s+/i).pop()?.trim();
     if (title && title !== command.prompt) {

@@ -4,7 +4,8 @@ import { Save, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AgentSettings, AppSettings, ProviderModel, ProviderStatus } from "../types";
 
-type AgentEffort = "minimal" | "low" | "medium" | "high";
+type AgentEffort = "minimal" | "none" | "low" | "medium" | "high" | "xhigh";
+type ComboOption = { value: string; label?: string; description?: string };
 
 type AgentDraft = {
   id: string;
@@ -32,6 +33,8 @@ const defaultWorkflowDraft: WorkflowDraft = {
   sandboxPolicy: "prompt_only",
   retryPolicy: { maxAttempts: 2, timeoutMs: 120000 }
 };
+
+const standardEfforts: AgentEffort[] = ["none", "low", "medium", "high", "xhigh"];
 
 export function SettingsDialog({
   open,
@@ -81,11 +84,20 @@ export function SettingsDialog({
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) || agents[0];
   const [agentDrafts, setAgentDrafts] = useState<Record<string, AgentDraft>>({});
   const [saving, setSaving] = useState(false);
+  const [draftDirty, setDraftDirty] = useState(false);
   const selectedAgentDraft = selectedAgent ? agentDrafts[selectedAgent.id] || agentToDraft(selectedAgent) : null;
   const selectedProviderId = selectedAgentDraft?.provider === "inherit" ? defaultProvider : selectedAgentDraft?.provider;
   const selectedProvider = providers.find((provider) => provider.id === selectedProviderId);
   const activeProviders = providers.filter((provider) => enabledProviders.includes(provider.id));
   const globalProviderOptions = activeProviders.length ? activeProviders : providers.filter((provider) => provider.id === defaultProvider);
+  const settingsSignature = JSON.stringify({
+    ui: { currentShowProgress, currentTaskTextScale, currentTaskFontFamily },
+    safety: { currentAllowNetwork },
+    ai: { currentDefaultProvider, currentDefaultModel, currentDefaultEffort, currentEnabledProviders, currentProviderDefaults },
+    runtime: { currentGlobalMaxParallelTasks },
+    workflow: currentWorkflowKey,
+    agents: agents.map(agentToDraft)
+  });
   const changedAgents = agents.filter((agent) => {
     const draft = agentDrafts[agent.id];
     return draft ? isAgentChanged(agent, draft) : false;
@@ -104,7 +116,7 @@ export function SettingsDialog({
   const hasChanges = appChanged || changedAgents.length > 0;
 
   useEffect(() => {
-    if (!open || hasChanges) return;
+    if (!open || draftDirty) return;
     setShowProgress(currentShowProgress);
     setTaskTextScale(currentTaskTextScale);
     setTaskFontFamily(currentTaskFontFamily);
@@ -118,9 +130,10 @@ export function SettingsDialog({
     setProviderDefaults(providerDefaultsToDraft(currentProviderDefaults));
     setAgentDrafts(Object.fromEntries(agents.map((agent) => [agent.id, agentToDraft(agent)])));
     setSelectedAgentId((current) => agents.some((agent) => agent.id === current) ? current : agents[0]?.id || "assistant");
-  }, [open, hasChanges, currentShowProgress, currentTaskTextScale, currentTaskFontFamily, currentAllowNetwork, currentDefaultProvider, currentDefaultModel, currentDefaultEffort, currentGlobalMaxParallelTasks, currentWorkflowKey, currentEnabledProviders, currentProviderDefaults, agents]);
+  }, [open, draftDirty, settingsSignature]);
 
   function resetDrafts() {
+    setDraftDirty(false);
     setShowProgress(currentShowProgress);
     setTaskTextScale(currentTaskTextScale);
     setTaskFontFamily(currentTaskFontFamily);
@@ -154,7 +167,34 @@ export function SettingsDialog({
     for (const providerId of providerIds) void loadModels(providerId);
   }, [open, defaultProvider, selectedProviderId, enabledProviders.join("\n")]);
 
+  useEffect(() => {
+    if (!open) return;
+    let changed = false;
+    const nextDefaultEffort = normalizeEffortForModel(defaultEffort, providerModels[defaultProvider] || [], defaultModel);
+    if (nextDefaultEffort !== defaultEffort) {
+      changed = true;
+      setDefaultEffort(nextDefaultEffort);
+    }
+    const nextProviderDefaults = Object.fromEntries(Object.entries(providerDefaults).map(([providerId, config]) => {
+      const defaultEffort = normalizeEffortForModel(config.defaultEffort || "medium", providerModels[providerId] || [], config.defaultModel || "");
+      if (defaultEffort !== config.defaultEffort) changed = true;
+      return [providerId, { ...config, defaultEffort }];
+    }));
+    const nextAgentDrafts = Object.fromEntries(Object.entries(agentDrafts).map(([agentId, draft]) => {
+      const providerId = draft.provider === "inherit" ? defaultProvider : draft.provider;
+      const effort = normalizeEffortForModel(draft.effort, providerModels[providerId] || [], draft.model);
+      if (effort !== draft.effort) changed = true;
+      return [agentId, { ...draft, effort }];
+    }));
+    if (changed) {
+      setProviderDefaults(nextProviderDefaults);
+      setAgentDrafts(nextAgentDrafts);
+    }
+    if (changed) setDraftDirty(true);
+  }, [open, providerModels, defaultProvider, defaultModel, defaultEffort, providerDefaults, agentDrafts]);
+
   function toggleProvider(providerId: string, checked: boolean) {
+    setDraftDirty(true);
     setEnabledProviders((current) => {
       const next = checked ? [...new Set([...current, providerId])] : current.filter((id) => id !== providerId);
       if (!next.includes(defaultProvider)) {
@@ -169,11 +209,13 @@ export function SettingsDialog({
   }
 
   function updateProviderDefault(providerId: string, patch: { defaultModel?: string; defaultEffort?: AgentEffort }) {
+    setDraftDirty(true);
     setProviderDefaults((current) => ({ ...current, [providerId]: { ...(current[providerId] || {}), ...patch } }));
   }
 
   function updateSelectedAgentDraft(patch: Partial<AgentDraft>) {
     if (!selectedAgent) return;
+    setDraftDirty(true);
     setAgentDrafts((drafts) => ({
       ...drafts,
       [selectedAgent.id]: { ...agentToDraft(selectedAgent), ...drafts[selectedAgent.id], ...patch }
@@ -181,6 +223,7 @@ export function SettingsDialog({
   }
 
   function updateWorkflowDraft(patch: Partial<WorkflowDraft>) {
+    setDraftDirty(true);
     setWorkflowDraft((current) => ({ ...current, ...patch, retryPolicy: { ...(current.retryPolicy || {}), ...(patch.retryPolicy || {}) } }));
   }
 
@@ -192,19 +235,27 @@ export function SettingsDialog({
   async function saveChanges() {
     setSaving(true);
     try {
+      const aiProviders = Object.fromEntries(Object.entries(providerDefaults).map(([providerId, config]) => [
+        providerId,
+        {
+          ...config,
+          defaultEffort: normalizeEffortForModel(config.defaultEffort || "medium", providerModels[providerId] || [], config.defaultModel || "")
+        }
+      ]));
       if (appChanged) {
         await onSave({
           ui: { showProgressOnCard: showProgress, taskTextScale, taskFontFamily },
           safety: { allowNetwork },
           runtime: { maxParallelTasks: globalMaxParallelTasks },
           workflow: workflowDraft,
-          ai: { defaultProvider, defaultModel, defaultEffort, enabledProviders, providers: providerDefaults }
+          ai: { defaultProvider, defaultModel, defaultEffort: normalizeEffortForModel(defaultEffort, providerModels[defaultProvider] || [], defaultModel), enabledProviders, providers: aiProviders }
         });
       }
       for (const agent of changedAgents) {
         const draft = agentDrafts[agent.id];
-        if (draft) await onSaveAgent(agentPatch(agent, draft));
+        if (draft) await onSaveAgent(agentPatch(agent, { ...draft, effort: normalizeEffortForModel(draft.effort, providerModels[draft.provider === "inherit" ? defaultProvider : draft.provider] || [], draft.model) }));
       }
+      setDraftDirty(false);
       onOpenChange(false);
     } finally {
       setSaving(false);
@@ -240,7 +291,7 @@ export function SettingsDialog({
                     aria-label="Mostrar progresso no card"
                     className="switch-root"
                     checked={showProgress}
-                    onCheckedChange={setShowProgress}
+                    onCheckedChange={(value) => { setDraftDirty(true); setShowProgress(value); }}
                   >
                     <Switch.Thumb className="switch-thumb" />
                   </Switch.Root>
@@ -253,11 +304,11 @@ export function SettingsDialog({
                     max={300}
                     step={25}
                     value={taskTextScale}
-                    onChange={(event) => setTaskTextScale(Number(event.target.value))}
+                    onChange={(event) => { setDraftDirty(true); setTaskTextScale(Number(event.target.value)); }}
                   />
                 </SettingRow>
                 <SettingRow label="Fonte dos textos" description="Define a família usada no conteúdo das tasks.">
-                  <select className="input settings-select" value={taskFontFamily} onChange={(event) => setTaskFontFamily(event.target.value as "serif" | "sans-serif")}>
+                  <select className="input settings-select" value={taskFontFamily} onChange={(event) => { setDraftDirty(true); setTaskFontFamily(event.target.value as "serif" | "sans-serif"); }}>
                     <option value="serif">serif</option>
                     <option value="sans-serif">sans-serif</option>
                   </select>
@@ -271,7 +322,7 @@ export function SettingsDialog({
                     aria-label="Permitir rede para agents"
                     className="switch-root"
                     checked={allowNetwork}
-                    onCheckedChange={setAllowNetwork}
+                    onCheckedChange={(value) => { setDraftDirty(true); setAllowNetwork(value); }}
                   >
                     <Switch.Thumb className="switch-thumb" />
                   </Switch.Root>
@@ -287,7 +338,7 @@ export function SettingsDialog({
                     type="number"
                     min={1}
                     value={globalMaxParallelTasks}
-                    onChange={(event) => setGlobalMaxParallelTasks(Math.max(1, Number(event.target.value) || 1))}
+                    onChange={(event) => { setDraftDirty(true); setGlobalMaxParallelTasks(Math.max(1, Number(event.target.value) || 1)); }}
                   />
                 </SettingRow>
                 <div className="settings-metrics">
@@ -364,17 +415,15 @@ export function SettingsDialog({
                 <div className="settings-form-grid three">
                   <div className="field">
                     <label htmlFor="settings-default-provider">Provider padrão</label>
-                    <select id="settings-default-provider" className="input settings-select" value={defaultProvider} onFocus={() => void loadModels(defaultProvider)} onChange={(event) => { const providerId = event.target.value; setDefaultProvider(providerId); setDefaultModel(providerDefaults[providerId]?.defaultModel || ""); setDefaultEffort(providerDefaults[providerId]?.defaultEffort || "medium"); void loadModels(providerId); }}>
-                      {globalProviderOptions.map((provider) => <option key={provider.id} value={provider.id}>{provider.label || provider.id}</option>)}
-                    </select>
+                    <ProviderInput id="settings-default-provider" value={defaultProvider} providers={globalProviderOptions} onFocus={() => void loadModels(defaultProvider)} onChange={(providerId) => { setDraftDirty(true); setDefaultProvider(providerId); setDefaultModel(providerDefaults[providerId]?.defaultModel || ""); setDefaultEffort(providerDefaults[providerId]?.defaultEffort || "medium"); void loadModels(providerId); }} />
                   </div>
                   <div className="field">
                     <label htmlFor="settings-default-model">Modelo padrão</label>
-                    <ModelInput id="settings-default-model" value={defaultModel} models={providerModels[defaultProvider] || []} loading={Boolean(providerModelLoading[defaultProvider])} onFocus={() => void loadModels(defaultProvider)} onChange={setDefaultModel} />
+                    <ModelInput id="settings-default-model" value={defaultModel} models={providerModels[defaultProvider] || []} loading={Boolean(providerModelLoading[defaultProvider])} onFocus={() => void loadModels(defaultProvider)} onChange={(model) => { setDraftDirty(true); setDefaultModel(model); setDefaultEffort(normalizeEffortForModel(defaultEffort, providerModels[defaultProvider] || [], model)); }} />
                   </div>
                   <div className="field">
                     <label htmlFor="settings-default-effort">Effort padrão</label>
-                    <EffortSelect id="settings-default-effort" value={defaultEffort} onChange={setDefaultEffort} />
+                    <EffortInput id="settings-default-effort" value={normalizeEffortForModel(defaultEffort, providerModels[defaultProvider] || [], defaultModel)} models={providerModels[defaultProvider] || []} modelId={defaultModel} onChange={(value) => { setDraftDirty(true); setDefaultEffort(value); }} />
                   </div>
                 </div>
                 <div className="settings-provider-list">
@@ -389,8 +438,8 @@ export function SettingsDialog({
                       <code>{provider.requiredEnv.join(", ") || "none"}</code>
                       {enabledProviders.includes(provider.id) ? (
                         <>
-                          <ModelInput id={`settings-provider-model-${provider.id}`} value={providerDefaults[provider.id]?.defaultModel || ""} models={providerModels[provider.id] || []} loading={Boolean(providerModelLoading[provider.id])} placeholder={provider.defaultModel || "Modelo default"} onFocus={() => void loadModels(provider.id)} onChange={(value) => updateProviderDefault(provider.id, { defaultModel: value })} />
-                          <EffortSelect id={`settings-provider-effort-${provider.id}`} value={providerDefaults[provider.id]?.defaultEffort || "medium"} onChange={(value) => updateProviderDefault(provider.id, { defaultEffort: value })} />
+                          <ModelInput id={`settings-provider-model-${provider.id}`} value={providerDefaults[provider.id]?.defaultModel || ""} models={providerModels[provider.id] || []} loading={Boolean(providerModelLoading[provider.id])} placeholder={provider.defaultModel || "Modelo default"} onFocus={() => void loadModels(provider.id)} onChange={(value) => updateProviderDefault(provider.id, { defaultModel: value, defaultEffort: normalizeEffortForModel(providerDefaults[provider.id]?.defaultEffort || "medium", providerModels[provider.id] || [], value) })} />
+                          <EffortInput id={`settings-provider-effort-${provider.id}`} value={normalizeEffortForModel(providerDefaults[provider.id]?.defaultEffort || "medium", providerModels[provider.id] || [], providerDefaults[provider.id]?.defaultModel || "")} models={providerModels[provider.id] || []} modelId={providerDefaults[provider.id]?.defaultModel || ""} onChange={(value) => updateProviderDefault(provider.id, { defaultEffort: value })} />
                         </>
                       ) : null}
                     </div>
@@ -439,23 +488,15 @@ export function SettingsDialog({
                       <div className="settings-form-grid three">
                         <div className="field">
                           <label htmlFor="settings-agent-provider">Provider</label>
-                          <input id="settings-agent-provider" className="input" list="settings-agent-provider-options" value={selectedAgentDraft.provider === "inherit" ? "" : selectedAgentDraft.provider} placeholder={`Herda padrão (${defaultProvider || "nenhum"})`} onFocus={() => void loadModels(selectedProviderId || defaultProvider)} onChange={(event) => { const providerId = event.target.value || "inherit"; updateSelectedAgentDraft({ provider: providerId, model: "" }); void loadModels(providerId === "inherit" ? defaultProvider : providerId); }} />
-                          <datalist id="settings-agent-provider-options">
-                            {activeProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.label || provider.id}</option>)}
-                          </datalist>
+                          <ProviderInput id="settings-agent-provider" value={selectedAgentDraft.provider} providers={activeProviders} includeInherit inheritLabel={`Herda padrão (${defaultProvider || "nenhum"})`} onFocus={() => void loadModels(selectedProviderId || defaultProvider)} onChange={(providerId) => { updateSelectedAgentDraft({ provider: providerId || "inherit", model: "" }); void loadModels(providerId === "inherit" ? defaultProvider : providerId); }} />
                         </div>
                         <div className="field">
                           <label htmlFor="settings-agent-model">Modelo</label>
-                          <ModelInput id="settings-agent-model" value={selectedAgentDraft.model} models={providerModels[selectedProviderId || defaultProvider] || []} loading={Boolean(providerModelLoading[selectedProviderId || defaultProvider])} placeholder={selectedAgentDraft.provider === "inherit" ? `Herda ${defaultModel || "modelo padrão"}` : ""} onFocus={() => void loadModels(selectedProviderId || defaultProvider)} onChange={(model) => updateSelectedAgentDraft({ model })} />
+                          <ModelInput id="settings-agent-model" value={selectedAgentDraft.model} models={providerModels[selectedProviderId || defaultProvider] || []} loading={Boolean(providerModelLoading[selectedProviderId || defaultProvider])} placeholder={selectedAgentDraft.provider === "inherit" ? `Herda ${defaultModel || "modelo padrão"}` : ""} onFocus={() => void loadModels(selectedProviderId || defaultProvider)} onChange={(model) => updateSelectedAgentDraft({ model, effort: normalizeEffortForModel(selectedAgentDraft.effort, providerModels[selectedProviderId || defaultProvider] || [], model) })} />
                         </div>
                         <div className="field">
                           <label htmlFor="settings-agent-effort">Effort</label>
-                          <select id="settings-agent-effort" className="input settings-select" value={selectedAgentDraft.effort} onChange={(event) => updateSelectedAgentDraft({ effort: event.target.value as AgentEffort })}>
-                            <option value="minimal">minimal</option>
-                            <option value="low">low</option>
-                            <option value="medium">medium</option>
-                            <option value="high">high</option>
-                          </select>
+                          <EffortInput id="settings-agent-effort" value={normalizeEffortForModel(selectedAgentDraft.effort, providerModels[selectedProviderId || defaultProvider] || [], selectedAgentDraft.model)} models={providerModels[selectedProviderId || defaultProvider] || []} modelId={selectedAgentDraft.model} onChange={(effort) => updateSelectedAgentDraft({ effort })} />
                         </div>
                       </div>
                       {selectedProvider ? (
@@ -503,19 +544,19 @@ function SectionHead({ title, description }: { title: string; description: strin
   );
 }
 
-function ModelInput({ id, value, models, loading = false, placeholder, onFocus, onChange }: { id: string; value: string; models: ProviderModel[]; loading?: boolean; placeholder?: string; onFocus: () => void; onChange: (value: string) => void }) {
+function Combobox({ id, value, options, loading = false, placeholder, emptyLabel = "Nenhum item encontrado", loadingLabel = "Carregando...", onFocus, onChange }: { id: string; value: string; options: ComboOption[]; loading?: boolean; placeholder?: string; emptyLabel?: string; loadingLabel?: string; onFocus?: () => void; onChange: (value: string) => void }) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const query = value.trim().toLowerCase();
-  const options = models
-    .filter((model) => {
+  const filteredOptions = options
+    .filter((option) => {
       if (!query) return true;
-      return model.id.toLowerCase().includes(query) || (model.name || "").toLowerCase().includes(query);
+      return option.value.toLowerCase().includes(query) || (option.label || "").toLowerCase().includes(query);
     })
     .slice(0, 50);
   const listId = `${id}-listbox`;
-  function choose(model: ProviderModel) {
-    onChange(model.id);
+  function choose(option: ComboOption) {
+    onChange(option.value);
     setOpen(false);
     setActiveIndex(0);
   }
@@ -530,20 +571,20 @@ function ModelInput({ id, value, models, loading = false, placeholder, onFocus, 
         aria-controls={listId}
         aria-expanded={open}
         autoComplete="off"
-        onFocus={() => { onFocus(); setOpen(true); }}
+        onFocus={() => { onFocus?.(); setOpen(true); }}
         onBlur={() => window.setTimeout(() => setOpen(false), 120)}
         onChange={(event) => { onChange(event.target.value); setOpen(true); setActiveIndex(0); }}
         onKeyDown={(event) => {
           if (event.key === "ArrowDown") {
             event.preventDefault();
             setOpen(true);
-            setActiveIndex((index) => Math.min(index + 1, Math.max(options.length - 1, 0)));
+            setActiveIndex((index) => Math.min(index + 1, Math.max(filteredOptions.length - 1, 0)));
           } else if (event.key === "ArrowUp") {
             event.preventDefault();
             setActiveIndex((index) => Math.max(index - 1, 0));
-          } else if (event.key === "Enter" && open && options[activeIndex]) {
+          } else if (event.key === "Enter" && open && filteredOptions[activeIndex]) {
             event.preventDefault();
-            choose(options[activeIndex]);
+            choose(filteredOptions[activeIndex]);
           } else if (event.key === "Escape") {
             setOpen(false);
           }
@@ -551,19 +592,19 @@ function ModelInput({ id, value, models, loading = false, placeholder, onFocus, 
       />
       {open ? (
         <div id={listId} className="model-combobox-options" role="listbox">
-          {loading ? <div className="model-combobox-empty">Carregando modelos...</div> : null}
-          {!loading && options.length === 0 ? <div className="model-combobox-empty">Nenhum modelo encontrado</div> : null}
-          {!loading && options.map((model, index) => (
+          {loading ? <div className="model-combobox-empty">{loadingLabel}</div> : null}
+          {!loading && filteredOptions.length === 0 ? <div className="model-combobox-empty">{emptyLabel}</div> : null}
+          {!loading && filteredOptions.map((option, index) => (
             <button
               type="button"
               role="option"
               aria-selected={index === activeIndex}
               className={index === activeIndex ? "active" : ""}
-              key={model.id}
-              onMouseDown={(event) => { event.preventDefault(); choose(model); }}
+              key={option.value}
+              onMouseDown={(event) => { event.preventDefault(); choose(option); }}
             >
-              <span>{model.id}</span>
-              <small>{model.contextWindow ? formatTokens(model.contextWindow) : model.name || "modelo"}</small>
+              <span>{option.value}</span>
+              <small>{option.description || option.label || "opção"}</small>
             </button>
           ))}
         </div>
@@ -572,15 +613,44 @@ function ModelInput({ id, value, models, loading = false, placeholder, onFocus, 
   );
 }
 
-function EffortSelect({ id, value, onChange }: { id: string; value: AgentEffort; onChange: (value: AgentEffort) => void }) {
-  return (
-    <select id={id} className="input settings-select" value={value} onChange={(event) => onChange(event.target.value as AgentEffort)}>
-      <option value="minimal">minimal</option>
-      <option value="low">low</option>
-      <option value="medium">medium</option>
-      <option value="high">high</option>
-    </select>
-  );
+function ProviderInput({ id, value, providers, includeInherit = false, inheritLabel = "Herda padrão", onFocus, onChange }: { id: string; value: string; providers: ProviderStatus[]; includeInherit?: boolean; inheritLabel?: string; onFocus: () => void; onChange: (value: string) => void }) {
+  const options = [
+    ...(includeInherit ? [{ value: "inherit", label: inheritLabel, description: "inherit" }] : []),
+    ...providers.map((provider) => ({ value: provider.id, label: provider.label || provider.id, description: provider.type }))
+  ];
+  return <Combobox id={id} value={value} options={options} placeholder={includeInherit ? inheritLabel : undefined} emptyLabel="Nenhum provider encontrado" onFocus={onFocus} onChange={onChange} />;
+}
+
+function ModelInput({ id, value, models, loading = false, placeholder, onFocus, onChange }: { id: string; value: string; models: ProviderModel[]; loading?: boolean; placeholder?: string; onFocus: () => void; onChange: (value: string) => void }) {
+  const options = models.map((model) => ({
+    value: model.id,
+    label: model.name || model.id,
+    description: model.contextWindow ? formatTokens(model.contextWindow) : model.name || "modelo"
+  }));
+  return <Combobox id={id} value={value} options={options} loading={loading} placeholder={placeholder} emptyLabel="Nenhum modelo encontrado" loadingLabel="Carregando modelos..." onFocus={onFocus} onChange={onChange} />;
+}
+
+function EffortInput({ id, value, models, modelId, onChange }: { id: string; value: AgentEffort; models: ProviderModel[]; modelId: string; onChange: (value: AgentEffort) => void }) {
+  const options = effortOptionsForModel(models, modelId, value).map((effort) => ({ value: effort, label: effort, description: effort === "minimal" ? "legacy" : "effort" }));
+  return <Combobox id={id} value={value} options={options} emptyLabel="Nenhum effort permitido" onChange={(next) => onChange(next as AgentEffort)} />;
+}
+
+function effortOptionsForModel(models: ProviderModel[], modelId: string, current?: AgentEffort): AgentEffort[] {
+  const model = models.find((item) => item.id === modelId);
+  const supported = model?.supportedEfforts;
+  const options = Array.isArray(supported) ? supported.filter(isAgentEffort) : [...standardEfforts];
+  const normalized = options.length ? options : ["none" as AgentEffort];
+  if (current === "minimal" && !normalized.includes("minimal")) return ["minimal", ...normalized];
+  return normalized;
+}
+
+function normalizeEffortForModel(value: AgentEffort, models: ProviderModel[], modelId: string): AgentEffort {
+  const options = effortOptionsForModel(models, modelId, value);
+  return options.includes(value) ? value : options[0] || "none";
+}
+
+function isAgentEffort(value: unknown): value is AgentEffort {
+  return ["minimal", "none", "low", "medium", "high", "xhigh"].includes(String(value));
 }
 
 function formatTokens(value: number) {

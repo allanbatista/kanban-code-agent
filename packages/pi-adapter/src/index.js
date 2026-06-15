@@ -321,7 +321,7 @@ function toolsToOpenAI(tools) {
 }
 
 export function buildKanbanTools(context) {
-  // context = { root, createTask, moveTask, updateTask, getTask, listTasks, boardSnapshot,
+  // context = { root, createTask, updateTask, getTask, listTasks, boardSnapshot,
   //             whyNotRunning, decomposeTask, readSettingsScope, updateSettings,
   //             runTask, interruptTask, orchestratorStatus, readAgent }
   const { defineTool } = context.sdkExports;
@@ -331,7 +331,7 @@ export function buildKanbanTools(context) {
     label: "List tasks",
     description: "List all kanban tasks with their current column and status.",
     parameters: TObject({
-      column: TOptional(TString({ description: "Filter by column id (inbox, manager, product, design, architecture, generalist, engineering, quality, review, deployment, human_wait, done)" })),
+      column: TOptional(TString({ description: "Filter by column id (inbox, manager, product, design, architecture, generalist, engineering, quality, review, deployment, done)" })),
       status: TOptional(TString({ description: "Filter by status (idle, queued, running, failed, done, merge_pending)" }))
     }),
     async execute(_callId, params) {
@@ -376,20 +376,6 @@ export function buildKanbanTools(context) {
         projectTargets: params.projectTargets || []
       });
       return { content: [{ type: "text", text: `Task criada: ${task.id} - ${task.title}` }], details: { taskId: task.id, title: task.title } };
-    }
-  });
-
-  const kcaMoveTask = defineTool({
-    name: "kca_move_task",
-    label: "Move task",
-    description: "Move a task to a different column.",
-    parameters: TObject({
-      taskId: TString({ description: "Task ID to move (e.g. KCA-123456)" }),
-      column: TString({ description: "Target column id: inbox, manager, product, design, architecture, generalist, engineering, quality, review, deployment, human_wait, done" })
-    }),
-    async execute(_callId, params) {
-      const task = await context.moveTask(params.taskId, params.column);
-      return { content: [{ type: "text", text: `Task ${task.id} movida para ${params.column}.` }], details: { taskId: task.id, column: task.column } };
     }
   });
 
@@ -528,7 +514,7 @@ export function buildKanbanTools(context) {
   });
 
   return [
-    kcaListTasks, kcaGetBoard, kcaCreateTask, kcaMoveTask, kcaGetTask,
+    kcaListTasks, kcaGetBoard, kcaCreateTask, kcaGetTask,
     kcaWhyNotRunning, kcaDecomposeTask, kcaReadSettings, kcaUpdateTask,
     kcaRunTask, kcaInterruptTask, kcaOrchestratorStatus
   ];
@@ -626,21 +612,21 @@ export function buildTaskAgentTools(context, { allowedTools } = {}) {
     taskTool(context, {
       name: "complete_task",
       label: "Complete task",
-      description: "Complete the current task or move it to the next workflow role.",
+      description: "Complete the current task step. Use subtasks for other personas; only top-level terminal completion may use done.",
       parameters: TObject({ nextColumn: TOptional(TString({ default: "validate" })), summary: TOptional(TString()) }),
       toCommand: (params) => base("agent.complete_task", { nextColumn: params.nextColumn || "validate", summary: params.summary || "" })
     }),
     taskTool(context, {
       name: "request_user_input",
       label: "Request user input",
-      description: "Pause the task and ask the human user for required input.",
+      description: "Pause the task in its current column and ask the human user for required input.",
       parameters: TObject({ question: TString() }),
       toCommand: (params) => base("agent.request_user_input", { question: params.question })
     }),
     taskTool(context, {
       name: "report_blocker",
       label: "Report problem",
-      description: "Report a problem and send the task back to manager triage.",
+      description: "Report a problem on the current task without moving it to another agent.",
       parameters: TObject({ blocker: TString({ description: "Problem description" }) }),
       toCommand: (params) => base("agent.report_blocker", { blocker: params.blocker })
     }),
@@ -835,21 +821,21 @@ export function buildTaskAgentTools(context, { allowedTools } = {}) {
     taskTool(context, {
       name: "wait_for_persona",
       label: "Wait for persona",
-      description: "Route the task to another persona and wait for its artifact.",
+      description: "Create a child subtask for another persona and wait for its artifact.",
       parameters: TObject({ targetRole: TString(), question: TString(), expectedArtifact: TOptional(TString()) }),
       toCommand: (params) => base("agent.wait_for_persona", { targetRole: params.targetRole, question: params.question, expectedArtifact: params.expectedArtifact })
     }),
     taskTool(context, {
       name: "wait_for_human",
       label: "Wait for human",
-      description: "Route the task to human wait with a question.",
+      description: "Set the task to waiting_human in its current column with a question.",
       parameters: TObject({ question: TString(), options: TOptional(TArray(TString())) }),
       toCommand: (params) => base("agent.wait_for_human", { question: params.question, options: params.options || [] })
     }),
     taskTool(context, {
       name: "delegate_task",
       label: "Delegate task",
-      description: "Delegate the task to another persona.",
+      description: "Create a child subtask for another persona.",
       parameters: TObject({ toPersona: TString(), request: TString(), wait: TOptional({ type: "boolean" }), expectedOutput: TOptional(TString()) }),
       toCommand: (params) => base("agent.delegate_task", { fromPersona: context.role || context.agentId, toPersona: params.toPersona, request: params.request, wait: Boolean(params.wait), expectedOutput: params.expectedOutput })
     }),

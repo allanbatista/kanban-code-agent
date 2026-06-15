@@ -270,7 +270,7 @@ const server = createServer(async (req, res) => {
 
     if (req.url === "/api/task.move" && req.method === "POST") {
       const input = await body(req);
-      const result = await handleCommand({ type: "task.move", taskId: input.taskId, toColumn: input.toColumn, mode: input.mode, commandId: input.commandId || `cmd-${Date.now()}` }, root, { eventBus });
+      const result = await handleCommand({ type: "task.move", commandId: input.commandId || `cmd-${Date.now()}`, taskId: input.taskId, toColumn: input.toColumn, mode: input.mode || "soft" }, root, { eventBus });
       await broadcastCommandResult(result);
       return json(res, 200, result);
     }

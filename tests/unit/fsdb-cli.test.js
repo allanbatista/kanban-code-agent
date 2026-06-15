@@ -36,13 +36,19 @@ test("kca project add and task create persist YAML, Markdown and JSONL", async (
   assert.match(await readFile(join(root, "tasks", task.id, "events.jsonl"), "utf8"), /task.created/);
 });
 
-test("kca task move updates materialized YAML and appends event", async () => {
+test("kca task move allows operational columns and blocks agent columns", async () => {
   const root = await mkdtemp(join(tmpdir(), "kca-"));
   const { stdout } = await run(["task", "create", "--title", "Mover task"], root);
   const task = JSON.parse(stdout);
-  await run(["task", "move", task.id, "build"], root);
-  assert.match(await readFile(join(root, "tasks", task.id, "task.yaml"), "utf8"), /column: engineering/);
+  await run(["task", "move", task.id, "inbox"], root);
+  assert.match(await readFile(join(root, "tasks", task.id, "task.yaml"), "utf8"), /column: inbox/);
+  await run(["task", "move", task.id, "manager"], root);
+  assert.match(await readFile(join(root, "tasks", task.id, "task.yaml"), "utf8"), /column: manager/);
   assert.match(await readFile(join(root, "tasks", task.id, "events.jsonl"), "utf8"), /task.moved/);
+  const blocked = JSON.parse((await run(["task", "move", task.id, "build"], root)).stdout);
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.error, "task_move_disabled");
+  assert.match(await readFile(join(root, "tasks", task.id, "task.yaml"), "utf8"), /column: manager/);
 });
 
 test("kca task interrupt loads orchestrator dependencies and interrupts task", async () => {
@@ -62,13 +68,12 @@ test("kca task recover rebuilds materialized YAML from append-only events", asyn
   const root = await mkdtemp(join(tmpdir(), "kca-"));
   const { stdout } = await run(["task", "create", "--title", "Recuperar task"], root);
   const task = JSON.parse(stdout);
-  await run(["task", "move", task.id, "build"], root);
   const taskPath = join(root, "tasks", task.id, "task.yaml");
-  const corrupted = (await readFile(taskPath, "utf8")).replace("column: engineering", "column: human_wait").replace("status: idle", "status: blocked");
+  const corrupted = (await readFile(taskPath, "utf8")).replace("column: manager", "column: human_wait").replace("status: idle", "status: blocked");
   await writeFile(taskPath, corrupted);
 
   const recovered = JSON.parse((await run(["task", "recover", task.id], root)).stdout);
-  assert.equal(recovered.column, "engineering");
+  assert.equal(recovered.column, "manager");
   assert.equal(recovered.status, "idle");
   assert.match(await readFile(join(root, "tasks", task.id, "events.jsonl"), "utf8"), /task.recovered/);
 });

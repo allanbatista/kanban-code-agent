@@ -2,7 +2,7 @@ import { CommandBus } from "@kca/application/command-bus";
 import { QueryBus } from "@kca/application/query-bus";
 import { createBoardService } from "@kca/board-service";
 import { roleById } from "@kca/core/roles";
-import { appendJsonl, getTask, listTasks, paths, readCommandResult, recordCommandResult, updateSettings } from "@kca/fsdb";
+import { appendJsonl, canMoveOperationalColumn, getTask, listTasks, paths, readCommandResult, recordCommandResult, updateSettings } from "@kca/fsdb";
 import { appendChatMessage, compactTaskPersonaChat, resetBoardChat } from "@kca/fsdb/chat-store";
 import { releaseSemaphoreLeases } from "@kca/fsdb/runtime-store";
 import { logStep } from "@kca/core/log";
@@ -30,7 +30,7 @@ import {
   updateTaskSpecWorkflow
 } from "./spec-workflow-service.js";
 import { agentChatWorkflow } from "./agent-chat-workflow-service.js";
-import { answerSubtaskQuestionWorkflow, cancelTaskWorkflow, completeTaskWorkflow, emitArtifactWorkflow, interruptTaskWorkflow, pauseTaskWorkflow, reportBlockerWorkflow, requestUserInputWorkflow, resumeTaskWorkflow, reviewSubtaskWorkflow, runCommandWorkflow, runTaskWorkflow, stepWorkflow } from "./task-agent-workflow-service.js";
+import { answerSubtaskQuestionWorkflow, cancelTaskWorkflow, completeTaskWorkflow, emitArtifactWorkflow, interruptTaskWorkflow, moveTaskWorkflow, pauseTaskWorkflow, reportBlockerWorkflow, requestUserInputWorkflow, resumeTaskWorkflow, reviewSubtaskWorkflow, runCommandWorkflow, runTaskWorkflow, stepWorkflow } from "./task-agent-workflow-service.js";
 import { decomposeTaskWorkflow } from "./task-decomposition-service.js";
 
 const roots = new Map();
@@ -73,6 +73,19 @@ function createWorkflowCommandHandlers(root, options = {}) {
 
     "task.update": async (command) => {
     logStep("orchestrator", "task.update", { commandId: command.commandId, taskId: command.taskId });
+    const current = await requiredTask(command.taskId, root);
+    if (Object.hasOwn(command.patch || {}, "column") && command.patch.column !== current.column) {
+      if (!canMoveOperationalColumn(current.column, command.patch.column)) {
+        return { ok: false, commandId: command.commandId, task: TaskSchema.parse(current), unsupported: true, error: "task_column_update_disabled" };
+      }
+      const moved = await taskService.moveTask(command.taskId, command.patch.column);
+      const restPatch = Object.fromEntries(Object.entries(command.patch).filter(([key]) => key !== "column"));
+      if (Object.keys(restPatch).length) {
+        const task = await taskService.updateTask(command.taskId, restPatch);
+        return { ok: true, commandId: command.commandId, task };
+      }
+      return { ok: true, commandId: command.commandId, task: moved.task };
+    }
     const task = await taskService.updateTask(command.taskId, command.patch);
     return { ok: true, commandId: command.commandId, task };
     },
@@ -90,9 +103,7 @@ function createWorkflowCommandHandlers(root, options = {}) {
     },
 
     "task.move": async (command) => {
-    logStep("orchestrator", "task.move.start", { commandId: command.commandId, taskId: command.taskId, toColumn: command.toColumn });
-    const { task, hooks, noop } = await taskService.moveTask(command.taskId, command.toColumn, { runHooks: (task, trigger) => runHooks(task, root, trigger) });
-    return { ok: true, commandId: command.commandId, task, hooks, noop: Boolean(noop) };
+    return moveTaskWorkflow(command, root, { taskService, runHooks: (task, trigger) => runHooks(task, root, trigger) });
     },
 
     "task.run": (command) => runTaskWorkflow(command, root, whyNotRunning, handleCommand, options),
@@ -150,8 +161,8 @@ function createWorkflowCommandHandlers(root, options = {}) {
     const activeRunId = current.status === "running" ? current.agent?.currentRunId : null;
     const returnRole = activeRunId
       ? current.routing?.currentRole || current.routing?.currentAgent || "manager"
-      : current.column === "human_wait"
-        ? current.routing?.lastRole || current.routing?.lastAgent || "manager"
+      : current.status === "waiting_human"
+        ? current.routing?.currentRole || current.routing?.currentAgent || current.routing?.lastRole || current.routing?.lastAgent || "manager"
         : current.routing?.currentRole || current.routing?.lastRole || current.routing?.currentAgent || "manager";
     const message = await appendChatMessage(root, {
       scope: "task",
@@ -166,7 +177,7 @@ function createWorkflowCommandHandlers(root, options = {}) {
       replyToMessageId: command.replyToMessageId
     });
     await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "task.comment", actor: "user", displayPersona: "human", returnRole, taskId: command.taskId, messageId: message.id, replyToMessageId: command.replyToMessageId || null, deferredForRunId: activeRunId, deferredForAgent: activeRunId ? current.routing?.currentAgent || null : null, deferredForRole: activeRunId ? current.routing?.currentRole || null : null });
-    if (current.column === "human_wait" && ["idle", "waiting_human"].includes(current.status)) {
+    if (current.status === "waiting_human") {
       const task = await taskService.answerInput(command.taskId, command.text, returnRole);
       await releaseSemaphoreLeases({ root, taskId: command.taskId });
       return { ok: true, commandId: command.commandId, task, message, resumed: true };
@@ -178,8 +189,7 @@ function createWorkflowCommandHandlers(root, options = {}) {
     "role.route_task": async (command) => {
     logStep("orchestrator", "role.route_task", { commandId: command.commandId, taskId: command.taskId, role: command.role });
     const task = await taskService.routeTask(command.taskId, command.role);
-    await releaseSemaphoreLeases({ root, taskId: command.taskId });
-    return { ok: true, commandId: command.commandId, task };
+    return { ok: false, commandId: command.commandId, task, unsupported: true, error: "role_route_task_disabled" };
     },
 
     "chat.compact": async (command) => {

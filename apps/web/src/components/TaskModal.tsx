@@ -729,12 +729,13 @@ function workflowEvidenceLines(task?: Task | null, files?: TaskFiles) {
 }
 
 function SubtaskList({ subtasks, onCommand }: { subtasks: Task[]; onCommand: (command: Record<string, unknown>) => Promise<void> | void }) {
-  if (!subtasks.length) return <Panel title="Subtasks paralelas" lines={["Use decompor para criar subtasks com needs/provides e agents sugeridos."]} />;
+  const visibleSubtasks = subtasks.filter((item) => item.status !== "done");
+  if (!visibleSubtasks.length) return <Panel title="Subtasks paralelas" lines={["Use decompor para criar subtasks com needs/provides e agents sugeridos."]} />;
   const terminal = new Set(["done", "canceled"]);
   return (
     <section className="subtask-list">
       <h3 className="text-sm font-semibold">Subtasks paralelas</h3>
-      {subtasks.map((item) => (
+      {visibleSubtasks.map((item) => (
         <article className="subtask-row" key={item.id}>
           <div>
             <strong>{item.id} [{item.status}]</strong>

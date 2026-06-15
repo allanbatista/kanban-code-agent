@@ -15,18 +15,18 @@ function roleAgent(roleId) {
 }
 
 export async function waitForPersonaWorkflow(command, current, root) {
-  const targetColumn = roleColumn(command.targetRole);
-  const agentId = roleAgent(command.targetRole);
   const fromRole = current.routing?.currentRole || current.routing?.currentAgent || "assistant";
-  const message = await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: fromRole, agentId: current.routing?.currentAgent || fromRole, runId: command.runId, disposition: "wait_for_persona", text: command.question, visibility: "both" });
-  const task = TaskSchema.parse(await updateTask(command.taskId, {
-    status: "queued",
-    column: targetColumn,
-    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: fromRole, currentAgent: agentId, currentRole: command.targetRole }
-  }, root, "agent.waiting_for_persona"));
-  await releaseSemaphoreLeases({ root, taskId: command.taskId });
-  await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "role.handoff", actor: fromRole, taskId: command.taskId, fromRole, toRole: command.targetRole, messageId: message.id });
-  return { ok: true, commandId: command.commandId, task, message };
+  return delegateTaskWorkflow({
+    type: "agent.delegate_task",
+    commandId: command.commandId,
+    taskId: command.taskId,
+    runId: command.runId,
+    fromPersona: fromRole,
+    toPersona: command.targetRole,
+    wait: true,
+    request: command.question,
+    expectedOutput: command.expectedArtifact || "Report result to parent task."
+  }, current, root);
 }
 
 export async function waitForHumanWorkflow(command, current, root) {
@@ -36,9 +36,9 @@ export async function waitForHumanWorkflow(command, current, root) {
   const requester = command.requestedByRole || current.routing?.currentRole || current.routing?.currentAgent || "assistant";
   const message = await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: requester, agentId: current.routing?.currentAgent || requester, runId: command.runId, disposition: "wait_for_human", text: command.question, visibility: "both" });
   const task = TaskSchema.parse(await updateTask(command.taskId, {
-    status: "idle",
-    column: "human_wait",
-    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: requester, currentAgent: null, currentRole: null },
+    status: "waiting_human",
+    column: current.column,
+    routing: current.routing,
     dependencies: { ...current.dependencies, blockedBy: [] }
   }, root, "agent.waiting_for_human"));
   await releaseSemaphoreLeases({ root, taskId: command.taskId });

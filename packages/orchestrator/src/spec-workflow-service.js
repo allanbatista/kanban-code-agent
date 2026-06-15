@@ -79,19 +79,53 @@ function withGate(workflow, key, value) {
 }
 
 function routePatch(current, roleId, extra = {}) {
-  const column = roleColumn(roleId);
+  if (roleId === "none") {
+    return {
+      ...extra,
+      status: "done",
+      column: "done",
+      routing: {
+        ...current.routing,
+        lastAgent: current.routing?.currentAgent || null,
+        lastRole: current.routing?.currentRole || null,
+        currentAgent: null,
+        currentRole: null
+      }
+    };
+  }
+  const workflow = extra.workflow ? {
+    ...extra.workflow,
+    currentRole: current.workflow?.currentRole || current.routing?.currentRole || current.routing?.currentAgent || "manager",
+    boardColumn: current.column
+  } : undefined;
   return {
-    status: roleId === "none" ? "done" : "queued",
-    column,
-    routing: {
-      ...current.routing,
-      lastAgent: current.routing?.currentAgent || null,
-      lastRole: current.routing?.currentRole || null,
-      currentAgent: roleId === "none" ? null : roleAgent(roleId),
-      currentRole: roleId === "none" ? null : roleId
-    },
-    ...extra
+    ...extra,
+    status: extra.status || "queued",
+    column: current.column,
+    routing: current.routing,
+    ...(workflow ? { workflow } : {})
   };
+}
+
+const TERMINAL_STATUSES = new Set(["done", "canceled"]);
+
+function parentIdForTask(task) {
+  return task?.parentTaskId || task?.worktree?.parentTaskId || null;
+}
+
+function isSubtask(task) {
+  return Boolean(parentIdForTask(task));
+}
+
+async function requeueParentForSubtaskDecision(child, root, disposition, text) {
+  const parentTaskId = parentIdForTask(child);
+  if (!parentTaskId) return null;
+  const parent = await getTask(parentTaskId, root);
+  if (!parent) return null;
+  await appendChatMessage(root, { scope: "task", taskId: parentTaskId, role: "assistant", persona: "orchestrator", agentId: "orchestrator", disposition, text, visibility: "both" });
+  await appendJsonl(`${paths(root).tasks}/${parentTaskId}/events.jsonl`, { ts: new Date().toISOString(), type: disposition, actor: "orchestrator", taskId: parentTaskId, subtaskId: child.id });
+  if (TERMINAL_STATUSES.has(parent.status) || parent.status === "queued") return parent;
+  return TaskSchema.parse(await updateTask(parentTaskId, { status: "queued", column: parent.column, routing: parent.routing }, root, disposition));
 }
 
 function mdList(items = []) {
@@ -274,6 +308,22 @@ export async function recordValidationWorkflow(command, current, root) {
   const passed = command.criteria.length > 0 && command.evidence.length > 0;
   let workflow = normalizeWorkflow(current);
   workflow = withGate(workflow, "validation", gate(passed ? "passed" : "failed", command.summary || (passed ? "Validation evidence recorded." : "Validation requires criteria and evidence."), [ARTIFACTS.validationReport, ...command.evidence], "qa"));
+  if (passed && isSubtask(current)) {
+    const task = TaskSchema.parse(await updateTask(command.taskId, {
+      status: "waiting_review",
+      column: current.column,
+      routing: current.routing,
+      agent: current.agent,
+      workflow: { ...workflow, phase: "review", currentRole: current.workflow?.currentRole || current.routing?.currentRole || current.routing?.currentAgent || "qa", boardColumn: current.column }
+    }, root, "subtask.review_requested"));
+    const text = `Subtask aguardando review: ${task.id}. Validação registrada em ${ARTIFACTS.validationReport}. Resultado: ${command.summary || "Validation evidence recorded."}`;
+    await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "workflow.validation_recorded", actor: "qa", taskId: command.taskId, runId: command.runId, criteria: command.criteria, evidence: command.evidence });
+    await appendChatMessage(root, { scope: "task", taskId: command.taskId, role: "assistant", persona: current.routing?.currentRole || current.routing?.currentAgent || "qa", agentId: current.routing?.currentAgent || "qa", runId: command.runId, disposition: "subtask.review_requested", text, visibility: "both" });
+    await appendJsonl(`${paths(root).tasks}/${command.taskId}/events.jsonl`, { ts: new Date().toISOString(), type: "subtask.review_requested", actor: current.routing?.currentRole || current.routing?.currentAgent || "qa", taskId: command.taskId, parentTaskId: parentIdForTask(current), summary: command.summary || "", resultPath: ARTIFACTS.validationReport });
+    const parentTask = await requeueParentForSubtaskDecision(task, root, "subtask.review_requested", text);
+    await releaseSemaphoreLeases({ root, taskId: command.taskId });
+    return { ok: true, commandId: command.commandId, task, artifactPath: ARTIFACTS.validationReport, parentTask, reviewPending: true };
+  }
   const task = TaskSchema.parse(await updateTask(command.taskId, routePatch(current, passed ? "review" : "quality", {
     workflow: { ...workflow, phase: passed ? "review" : "validation", currentRole: passed ? "review" : "qa", boardColumn: passed ? "review" : "quality" }
   }), root, "workflow.validation_recorded"));

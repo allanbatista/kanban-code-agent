@@ -20,7 +20,6 @@ export const publicCommandTypes = [
   "agent.step",
   "chat.compact",
   "task.answer_input",
-  "role.route_task",
   "agent.review_task",
   "agent.deploy_task",
   "settings.update"

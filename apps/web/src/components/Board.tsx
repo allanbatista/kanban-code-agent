@@ -1,8 +1,8 @@
-import { GitBranch, MoreHorizontal, MoveRight, Plus } from "lucide-react";
+import { GitBranch, MoreHorizontal, Play, Plus } from "lucide-react";
 import clsx from "clsx";
 import type { Column, Task } from "../types";
 
-const PRIMARY_COLUMN_IDS = ["inbox", "manager", "human_wait", "done"];
+const PRIMARY_COLUMN_IDS = ["inbox", "manager", "done"];
 const AGENT_COLUMN_PAIRS = [
   ["product", "design"],
   ["architecture", "generalist"],
@@ -21,10 +21,10 @@ type Props = {
   onSearch: (value: string) => void;
   onOpenTask: (taskId: string) => void;
   onNewTask: (columnId: string) => void;
-  onMoveTask: (taskId: string, columnId: string) => void;
+  onRunTask: (task: Task) => void;
 };
 
-export function Board({ columns, tasks, loading, statusFilter, search, onFilter, onSearch, onOpenTask, onNewTask, onMoveTask }: Props) {
+export function Board({ columns, tasks, loading, statusFilter, search, onFilter, onSearch, onOpenTask, onNewTask, onRunTask }: Props) {
   const filters = [
     { id: "all", label: "Tudo" },
     { id: "running", label: "Rodando" },
@@ -42,6 +42,7 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
     running: "Rodando",
     failed: "Falhou",
     waiting: "Aguardando",
+    waiting_human: "Aguardando humano",
     waiting_review: "Review",
     waiting_response: "Resposta",
     paused: "Pausada",
@@ -50,7 +51,7 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
     merge_pending: "Merge",
     validating: "Validando"
   };
-  const progressByStatus: Record<string, number> = { idle: 0, queued: 8, running: 50, blocked: 18, failed: 18, paused: 18, canceled: 100, waiting_response: 35, waiting_review: 75, merge_pending: 92, validating: 80, done: 100 };
+  const progressByStatus: Record<string, number> = { idle: 0, queued: 8, running: 50, blocked: 18, failed: 18, paused: 18, canceled: 100, waiting_human: 25, waiting_response: 35, waiting_review: 75, merge_pending: 92, validating: 80, done: 100 };
   const columnById = new Map(columns.map((column) => [column.id, column]));
   const primaryColumns = PRIMARY_COLUMN_IDS.map((id) => columnById.get(id)).filter((column): column is Column => Boolean(column));
   const pairedColumnIds = new Set(AGENT_COLUMN_PAIRS.flat());
@@ -66,13 +67,6 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
         key={column.id}
         className={clsx("column", stacked && "stacked-column")}
         data-column-id={column.id}
-        onDragOver={(event) => event.preventDefault()}
-        onDrop={(event) => {
-          event.preventDefault();
-          const taskId = event.dataTransfer.getData("text/task-id");
-          const task = tasks.find((item) => item.id === taskId);
-          if (task && task.column !== column.id) onMoveTask(task.id, column.id);
-        }}
       >
         <header className="column-head">
           <div className="column-title-row">
@@ -85,14 +79,13 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
           {columnTasks.map((task) => {
             const progress = progressByStatus[task.status] ?? 0;
             const isInboxIdle = task.column === "inbox" && task.status === "idle";
+            const canRunFromInbox = task.column === "inbox" && !["running", "done", "canceled"].includes(task.status);
             const cardDescription = visibleCardDescription(task.description);
             return (
               <article
                 key={task.id}
                 data-task-id={task.id}
                 className="task"
-                draggable
-                onDragStart={(event) => event.dataTransfer.setData("text/task-id", task.id)}
               >
                 <div
                   className="task-open"
@@ -117,10 +110,6 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                   {task.failure?.reason ? <p className="task-failure">Falha: {task.failure.reason}</p> : null}
                   <div className="task-tags">
                     {!isInboxIdle ? <span className={clsx("pill", task.status)}>{statusLabels[task.status] || task.status}</span> : null}
-                    {Number.isInteger(task.depth) ? <span className="pill soft">depth {task.depth}/4</span> : null}
-                    {task.workflow?.phase ? <span className="pill soft">phase {task.workflow.phase}</span> : null}
-                    {task.workflow?.currentRole ? <span className="pill soft">role {task.workflow.currentRole}</span> : null}
-                    {workflowGateSummary(task) ? <span className="pill soft">gate {workflowGateSummary(task)}</span> : null}
                     {task.routing?.nextSuggestedColumn ? <span className="pill soft">next {task.routing.nextSuggestedColumn}</span> : null}
                     {relationTaskIds(task).length ? (
                       <span className="task-relation-row">
@@ -145,21 +134,28 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
                   <div className="progress" aria-label={`Progresso ${progress}%`}><span style={{ width: `${progress}%` }} /></div>
                   <div className="task-footer">
                     <span className="mini-meta"><GitBranch size={13} />{task.worktree?.branch || "sem branch"}</span>
+                    {canRunFromInbox ? (
+                      <button
+                        className="mini-button task-run-button"
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onRunTask(task);
+                        }}
+                      >
+                        <Play size={13} />Executar
+                      </button>
+                    ) : null}
                   </div>
                   <div className="task-timing-row" aria-label="Criacao e tempo total">
                     <time dateTime={task.createdAt || undefined}>{formatTaskDateTime(task.createdAt)}</time>
                     <span>{formatTaskDuration(task.usage?.total?.durationMs)}</span>
                   </div>
                 </div>
-                <div className="task-actions">
-                  {columns.filter((item) => item.id !== column.id).slice(0, 2).map((target) => (
-                    <button className="mini-button" key={target.id} type="button" onClick={() => onMoveTask(task.id, target.id)}><MoveRight size={13} />{target.label}</button>
-                  ))}
-                </div>
               </article>
             );
           })}
-          {!columnTasks.length ? <div className="empty-state"><strong>Nenhuma task</strong><span>Crie uma task ou arraste uma existente para cá.</span></div> : null}
+          {!columnTasks.length ? <div className="empty-state"><strong>Nenhuma task</strong><span>Crie uma task para esta coluna.</span></div> : null}
         </div>
       </section>
     );
@@ -198,16 +194,6 @@ export function Board({ columns, tasks, loading, statusFilter, search, onFilter,
 
 function relationTaskIds(task: Task) {
   return [...new Set([task.rootTaskId || task.worktree?.mainTaskId, task.parentTaskId || task.worktree?.parentTaskId].filter((id): id is string => Boolean(id && id !== task.id)))];
-}
-
-function workflowGateSummary(task: Task) {
-  const gates = task.workflow?.gates || {};
-  const failed = Object.entries(gates).find(([, gate]) => gate?.status === "failed");
-  if (failed) return `${failed[0]} failed`;
-  const pending = Object.entries(gates).find(([, gate]) => gate?.status === "pending");
-  if (pending) return `${pending[0]} pending`;
-  const passed = Object.entries(gates).filter(([, gate]) => gate?.status === "passed").length;
-  return passed ? `${passed} passed` : "";
 }
 
 function visibleCardDescription(value?: string) {

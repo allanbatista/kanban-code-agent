@@ -1,16 +1,40 @@
-import { normalizeColumnId } from "@kca/fsdb";
 import { createFsdbRepositories } from "@kca/fsdb/repositories";
-import { roleById } from "@kca/core/roles";
 import { logStep } from "@kca/core/log";
 import { TaskSchema } from "@kca/schemas";
 
-function roleColumn(roleId) {
-  if (roleId === "done") return "done";
-  return roleById(roleId)?.columnIds?.[0] || normalizeColumnId(roleId);
+const OPERATIONAL_MOVE_COLUMNS = new Set(["inbox", "manager", "done"]);
+const OPERATIONAL_COLUMN_ALIASES = { entrada: "inbox", pronto: "done" };
+
+function normalizeOperationalColumn(column) {
+  return OPERATIONAL_COLUMN_ALIASES[column] || column;
 }
 
-function roleAgent(roleId) {
-  return roleById(roleId)?.agentId || roleId;
+function canMoveOperationalColumn(fromColumn, toColumn) {
+  return OPERATIONAL_MOVE_COLUMNS.has(normalizeOperationalColumn(fromColumn)) && OPERATIONAL_MOVE_COLUMNS.has(normalizeOperationalColumn(toColumn));
+}
+
+function operationalMovePatch(current, toColumn) {
+  const column = normalizeOperationalColumn(toColumn);
+  if (!canMoveOperationalColumn(current.column, column)) return null;
+  if (column === "done") {
+    return {
+      column,
+      status: "done",
+      routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: null, currentRole: null }
+    };
+  }
+  if (column === "manager") {
+    return {
+      column,
+      status: "queued",
+      routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: "manager", currentRole: "manager", manualOverride: { active: false } }
+    };
+  }
+  return {
+    column,
+    status: "idle",
+    routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: null, currentRole: null, manualOverride: { active: false } }
+  };
 }
 
 function fallbackTitle(input = {}) {
@@ -84,58 +108,27 @@ export class TaskService {
     logStep("task-service", "moveTask.start", { taskId, toColumn });
     const current = await this.repositories.tasks.findById(taskId);
     if (!current) throw new Error(`Task not found: ${taskId}`);
-    const snapshot = this.boardService ? await this.boardService.snapshot() : await this.repositories.board.snapshot();
-    const requestedColumn = snapshot.columns.some((column) => column.id === toColumn) ? toColumn : normalizeColumnId(toColumn);
-    if (requestedColumn === current.column) {
+    const targetColumn = normalizeOperationalColumn(toColumn);
+    if (current.column === targetColumn) return { task: TaskSchema.parse(current), hooks: [], noop: true };
+    const patch = operationalMovePatch(current, targetColumn);
+    if (!patch) {
       const task = TaskSchema.parse(current);
-      await this.publish("TaskMoveNoop", { taskId, toColumn: task.column, task });
-      return { task, hooks: [], noop: true };
+      await this.publish("TaskMoveUnsupported", { taskId, toColumn, task });
+      return { task, hooks: [], noop: true, unsupported: true };
     }
-    if (["running", "interrupting"].includes(current.status)) {
-      await this.repositories.tasks.save(taskId, {
-        routing: { ...current.routing, manualOverride: { active: true, lastManualMoveAt: new Date().toISOString(), invalidatesRunId: current.agent?.currentRunId || null } }
-      }, "task.move_requested");
-    }
-    let task = TaskSchema.parse(await this.repositories.tasks.move(taskId, toColumn));
-    const targetColumn = snapshot.columns.find((column) => column.id === task.column);
-    if (task.column === "inbox") {
-      task = TaskSchema.parse(await this.repositories.tasks.save(taskId, {
-        status: "idle",
-        dependencies: { ...task.dependencies, blockedBy: [] },
-        routing: {
-          ...task.routing,
-          currentAgent: null,
-          currentRole: null,
-          nextSuggestedColumn: null,
-          manualOverride: { ...(task.routing?.manualOverride || {}), active: false }
-        }
-      }, "task.unassigned"));
-    } else if (targetColumn?.autoStart && ["draft", "idle", "queued", "running", "interrupting", "waiting_human", "blocked", "failed"].includes(task.status)) {
-      task = TaskSchema.parse(await this.repositories.tasks.save(taskId, {
-        status: "queued",
-        dependencies: { ...task.dependencies, blockedBy: [] },
-        routing: {
-          ...task.routing,
-          currentAgent: targetColumn.agent || task.routing?.currentAgent,
-          currentRole: targetColumn.role || targetColumn.agent || task.routing?.currentRole,
-          manualOverride: { ...(task.routing?.manualOverride || {}), active: false }
-        }
-      }, "agent.queued"));
-    }
-    const hooks = typeof runHooks === "function" ? await runHooks(task, "onColumnEnter") : [];
-    await this.publish("TaskMoved", { taskId, toColumn: task.column, task });
-    return { task, hooks };
+    const task = await this.updateTask(taskId, patch, "task.moved");
+    await this.publish("TaskMoved", { taskId, fromColumn: current.column, toColumn: targetColumn, task });
+    return { task, hooks: [], noop: current.column === task.column };
   }
 
   async answerInput(taskId, answer, returnRole) {
     const current = await this.repositories.tasks.findById(taskId);
     if (!current) throw new Error(`Task not found: ${taskId}`);
-    const role = returnRole || current.routing?.lastRole || "manager";
     await this.repositories.events.appendTaskEvent(taskId, { ts: new Date().toISOString(), type: "human.input_received", actor: "user", taskId, answer });
     const task = await this.updateTask(taskId, {
       status: "queued",
-      column: roleColumn(role),
-      routing: { ...current.routing, currentAgent: roleAgent(role), currentRole: role },
+      column: current.column,
+      routing: current.routing,
       dependencies: { ...current.dependencies, blockedBy: [] }
     }, "task.unblocked");
     return task;
@@ -144,20 +137,16 @@ export class TaskService {
   async routeTask(taskId, role) {
     const current = await this.repositories.tasks.findById(taskId);
     if (!current) throw new Error(`Task not found: ${taskId}`);
-    return this.updateTask(taskId, {
-      status: "queued",
-      column: roleColumn(role),
-      routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: roleAgent(role), currentRole: role }
-    }, "role.handoff");
+    return TaskSchema.parse(current);
   }
 
   async blockTask(taskId, blocker, eventType = "task.blocked") {
     const current = await this.repositories.tasks.findById(taskId);
     if (!current) throw new Error(`Task not found: ${taskId}`);
     return this.updateTask(taskId, {
-      status: "queued",
-      column: "manager",
-      routing: { ...current.routing, lastAgent: current.routing?.currentAgent || null, lastRole: current.routing?.currentRole || null, currentAgent: "manager", currentRole: "manager" },
+      status: "blocked",
+      column: current.column,
+      routing: current.routing,
       dependencies: { ...current.dependencies, blockedBy: [] }
     }, eventType);
   }

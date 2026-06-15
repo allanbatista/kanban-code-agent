@@ -11,7 +11,6 @@ export const columns = [
   { id: "quality", label: "Qualidade", agent: "quality", role: "quality", autoStart: true, wip: 2 },
   { id: "review", label: "Review", agent: "review", role: "review", autoStart: true, wip: 2 },
   { id: "deployment", label: "Deployment", agent: "deployment", role: "deployment", autoStart: false, wip: 1 },
-  { id: "human_wait", label: "Aguardando Humano", agent: null, role: "manager", autoStart: false, wip: null },
   { id: "done", label: "Pronto", agent: null, role: null, autoStart: false, wip: null }
 ];
 

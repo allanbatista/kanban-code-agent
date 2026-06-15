@@ -132,6 +132,15 @@ function numeric(...values) {
   return undefined;
 }
 
+function normalizeEfforts(...values) {
+  const allowed = new Set(["minimal", "none", "low", "medium", "high", "xhigh"]);
+  for (const value of values) {
+    if (!Array.isArray(value)) continue;
+    return value.map((item) => String(item).trim()).filter((item) => allowed.has(item));
+  }
+  return undefined;
+}
+
 export function normalizeModel(raw) {
   const id = String(raw?.id || raw?.name || raw?.model || "").trim();
   if (!id) return null;
@@ -154,11 +163,22 @@ export function normalizeModel(raw) {
     raw.limits?.max_output_tokens,
     raw.limits?.max_completion_tokens
   );
+  const supportedEfforts = normalizeEfforts(
+    raw.supportedEfforts,
+    raw.supported_efforts,
+    raw.supportedReasoningEfforts,
+    raw.supported_reasoning_efforts,
+    raw.reasoningEfforts,
+    raw.reasoning_efforts,
+    raw.reasoning?.efforts,
+    raw.top_provider?.supported_efforts
+  );
   return {
     id,
     name: String(raw.name || raw.display_name || raw.label || id),
     contextWindow,
-    maxOutputTokens
+    maxOutputTokens,
+    ...(supportedEfforts ? { supportedEfforts } : {})
   };
 }
 

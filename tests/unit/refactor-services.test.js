@@ -21,7 +21,7 @@ test("BoardService serves snapshots and task details through FSDB repositories",
   assert.equal((await boardService.taskFiles(task.id)).files.includes("task.yaml"), true);
 });
 
-test("TaskService supports memory repositories for create, update, move and file write", async () => {
+test("TaskService supports memory repositories for create, update, disabled move and file write", async () => {
   const repositories = createMemoryRepositories({ board: { columns: [{ id: "product", label: "Product", autoStart: true, agent: "product", role: "product" }] } });
   const events = new EventBus();
   const seen = [];
@@ -30,7 +30,12 @@ test("TaskService supports memory repositories for create, update, move and file
   const task = await taskService.createTask({ title: "Memory task", projectTargets: [] });
   assert.equal(task.title, "Memory task");
   assert.equal((await taskService.updateTask(task.id, { title: "Updated" })).title, "Updated");
-  assert.equal((await taskService.moveTask(task.id, "product")).task.status, "queued");
+  const moved = await taskService.moveTask(task.id, "inbox");
+  assert.equal(moved.task.column, "inbox");
+  assert.equal(moved.task.status, "idle");
+  const blockedMove = await taskService.moveTask(task.id, "product");
+  assert.equal(blockedMove.unsupported, true);
+  assert.equal(blockedMove.task.column, "inbox");
   assert.equal((await taskService.writeTaskFile(task.id, "acceptance.md", "ok")).path, "acceptance.md");
   assert.deepEqual(seen.includes("TaskCreated"), true);
 });

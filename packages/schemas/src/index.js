@@ -5,6 +5,7 @@ export const TaskKind = z.enum(["task", "master", "subtask", "spike", "bug", "ch
 export const WorkflowPhase = z.enum(["intake", "spec", "planning", "execution", "validation", "review", "delivery", "done", "blocked", "cancelled"]);
 export const WorkflowRole = z.enum(["manager", "product", "design", "architecture", "engineering", "qa", "quality", "review", "deployment", "documentation", "generalist", "none"]);
 export const WorkflowGateStatus = z.enum(["pending", "passed", "failed", "waiting_user", "skipped_with_reason"]);
+export const AgentEffort = z.enum(["minimal", "none", "low", "medium", "high", "xhigh"]);
 export const EventType = z.enum([
   "task.created",
   "task.updated",
@@ -117,7 +118,7 @@ export const RoleSettingsSchema = z.object({
   model: z.object({
     provider: z.string().min(1).default("inherit"),
     name: z.string().default(""),
-    effort: z.enum(["minimal", "low", "medium", "high"]).default("medium"),
+    effort: AgentEffort.default("medium"),
     temperature: z.number().optional()
   }).passthrough().optional(),
   gate: z.string().min(1).optional()
@@ -143,6 +144,7 @@ export const ProviderDiscoverySchema = z.object({
     baseUrl: z.string().nullable().optional(),
     modelsEndpoint: z.string().nullable().optional(),
     defaultModel: z.string().optional(),
+    defaultEffort: AgentEffort.optional(),
     contextSource: z.string().optional()
   }).passthrough())
 });
@@ -335,7 +337,7 @@ export const AppSettingsSchema = z.object({
   ai: z.object({
     defaultProvider: z.string().default("openai"),
     defaultModel: z.string().default(""),
-    defaultEffort: z.enum(["minimal", "low", "medium", "high"]).default("medium"),
+    defaultEffort: AgentEffort.default("medium"),
     enabledProviders: z.array(z.string()).default([]),
     providers: z.record(z.string(), z.any()).default({})
   }).passthrough().optional(),
@@ -379,7 +381,7 @@ export const AgentSettingsSchema = z.object({
   model: z.object({
     provider: z.string().min(1).default("inherit"),
     name: z.string().default(""),
-    effort: z.enum(["minimal", "low", "medium", "high"]).default("medium"),
+    effort: AgentEffort.default("medium"),
     temperature: z.number().optional()
   }).passthrough().optional(),
   instructionsPath: z.string().optional(),

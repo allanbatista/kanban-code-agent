@@ -7,7 +7,7 @@ export const DEFAULT_ROLES = [
     agentId: "manager",
     scope: "task",
     promptPath: "../prompts/manager.md",
-    columnIds: ["manager", "human_wait"],
+    columnIds: ["manager"],
     tools: { custom: ["complete_task", "request_user_input", "report_blocker", "emit_artifact", "wait_for_persona", "delegate_task", "spawn_subtasks", "review_subtask", "answer_subtask_question", "approve_task_spec", "record_handoff", "record_decision", "record_summary", "run_definition_of_ready_gate", "run_definition_of_done_gate"] },
     limits: { tokens: 1 },
     policies: { canCreateSubtasks: true, requiresWorktree: false, autoStart: true },

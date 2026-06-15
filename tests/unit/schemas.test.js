@@ -44,7 +44,9 @@ test("schemas parse generated FSDB settings, task files and events", async () =>
   assert.equal(appSettings.schema, "kanban-code-agent/app@1");
   assert.equal(appSettings.workflow.requireTechnicalPlanForCode, true);
   assert.equal(appSettings.workflow.sandboxPolicy, "prompt_only");
-  assert.equal(BoardSettingsSchema.parse(await readYamlFile(join(root, "settings", "boards", "default.yaml"))).columns.length, 12);
+  assert.equal(AppSettingsSchema.parse({ ...appSettings, ai: { ...appSettings.ai, defaultEffort: "xhigh" } }).ai.defaultEffort, "xhigh");
+  assert.equal(AgentSettingsSchema.parse({ schema: "kanban-code-agent/agent@1", id: "legacy", label: "Legacy", provider: "inherit", model: { effort: "minimal" } }).model.effort, "minimal");
+  assert.equal(BoardSettingsSchema.parse(await readYamlFile(join(root, "settings", "boards", "default.yaml"))).columns.length, 11);
   assert.equal(ProjectSettingsSchema.parse(await readYamlFile(join(root, "settings", "projects", "kanban-code-agent.yaml"))).id, "kanban-code-agent");
   const engineeringAgent = AgentSettingsSchema.parse(await readYamlFile(join(root, "settings", "agents", "engineering.yaml")));
   assert.equal(engineeringAgent.provider, "inherit");

@@ -37,20 +37,15 @@ test("pi adapter tool contracts execute effects through injected context", async
     createTask: async (input) => {
       calls.push({ type: "createTask", input });
       return { id: "KCA-MOCK", title: input.title };
-    },
-    moveTask: async (taskId, column) => {
-      calls.push({ type: "moveTask", taskId, column });
-      return { id: taskId, column };
     }
   });
   const create = tools.find((tool) => tool.name === "kca_create_task");
   const move = tools.find((tool) => tool.name === "kca_move_task");
   assert.equal(create.parameters.properties.title.type, "string");
+  assert.equal(move, undefined);
   await create.execute("call-create", { title: "Mock task", projectTargets: ["kanban-code-agent"] });
-  await move.execute("call-move", { taskId: "KCA-MOCK", column: "build" });
   assert.deepEqual(calls, [
-    { type: "createTask", input: { title: "Mock task", description: "", column: "manager", projectTargets: ["kanban-code-agent"] } },
-    { type: "moveTask", taskId: "KCA-MOCK", column: "build" }
+    { type: "createTask", input: { title: "Mock task", description: "", column: "manager", projectTargets: ["kanban-code-agent"] } }
   ]);
 });
 

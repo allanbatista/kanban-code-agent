@@ -27,14 +27,14 @@ test("core contracts expose canonical command, query and event names", () => {
   assert.equal(ROLE_IDS.includes("generalist"), true);
   assert.equal(ROLE_IDS.includes("architecture"), true);
   assert.equal(ROLE_IDS.includes("project_manager"), false);
-  assert.equal(commandEnvelope("task.move", { taskId: "KCA-1" }).type, "task.move");
+  assert.equal(COMMAND_TYPES.includes("task.move"), true);
   assert.equal(queryEnvelope("why_not_running", { taskId: "KCA-1" }).taskId, "KCA-1");
 });
 
 test("test fixtures provide reusable board and command inputs", () => {
   const board = boardFixture();
   const command = taskCreateCommand({ title: "Fixture personalizada" });
-  assert.equal(board.columns.length, 12);
+  assert.equal(board.columns.length, 11);
   assert.equal(rolesFixture().length, 9);
   assert.equal(planningFixture().roles.required.includes("deployment"), true);
   assert.equal(planningFixture().roles.required.includes("architecture"), true);

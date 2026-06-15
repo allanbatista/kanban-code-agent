@@ -14,7 +14,7 @@ export function transitionTask(task, transition, payload = {}) {
   if (transition === "complete") return {
     ...task,
     status: payload.nextColumn === "done" ? "done" : payload.status || "validating",
-    column: payload.nextColumn || task.column,
+    column: payload.nextColumn === "done" ? "done" : task.column,
     routing: payload.nextColumn === "done"
       ? { ...task.routing, lastAgent: task.routing?.currentAgent || null, lastRole: task.routing?.currentRole || null, currentAgent: null, currentRole: null }
       : task.routing,
@@ -25,30 +25,23 @@ export function transitionTask(task, transition, payload = {}) {
   };
   if (transition === "wait_for_persona") return {
     ...task,
-    status: "queued",
-    column: payload.column || task.column,
-    routing: { ...task.routing, lastAgent: task.routing?.currentAgent || null, lastRole: task.routing?.currentRole || null, currentAgent: payload.agentId || payload.role || null, currentRole: payload.role || null },
+    status: "waiting",
     updatedAt: now
   };
   if (transition === "wait_for_human") return {
     ...task,
-    status: "idle",
-    column: "human_wait",
-    routing: { ...task.routing, lastAgent: task.routing?.currentAgent || null, lastRole: task.routing?.currentRole || null, currentAgent: null, currentRole: null },
+    status: "waiting_human",
     dependencies: { ...task.dependencies, blockedBy: [] },
     updatedAt: now
   };
   if (transition === "block") return {
     ...task,
-    status: "queued",
-    column: "manager",
-    routing: { ...task.routing, lastAgent: task.routing?.currentAgent || null, lastRole: task.routing?.currentRole || null, currentAgent: "manager", currentRole: "manager" },
+    status: "blocked",
     dependencies: { ...task.dependencies, blockedBy: [] },
     updatedAt: now
   };
   if (transition === "manual_move") return {
     ...task,
-    column: payload.toColumn || task.column,
     routing: {
       ...task.routing,
       manualOverride: {

@@ -82,6 +82,7 @@ export async function buildAgentChat(task, root, { persona = task.routing?.curre
     content: [
       "Kanban Code Agent runtime.",
       "Use typed tools for disposition, handoff, human wait, artifacts, and completion.",
+      "Never move the current task to another persona; create a child subtask when another persona is needed.",
       "Agents do not share raw chat context; only explicit artifacts and delegation messages cross personas.",
       "Every chat message from an agent must include persona.",
       "A run is terminal only after a state-changing tool call such as complete_task, report_blocker, wait_for_persona, delegate_task, or request_user_input.",
