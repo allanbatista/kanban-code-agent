@@ -97,6 +97,7 @@ interface TaskMetadata {
     canCreateSubtasks: boolean;
     taskDir: string;
     sessionFile: string;
+    chatFile: string;
     runtimeConfig: Required<RuntimeConfig>;
     allowedModels: Record<ModelAlias, { provider: string; modelId: string; description: string }>;
     allowedEfforts: EffortLevel[];
@@ -139,7 +140,7 @@ class Task {
         task.waitingForTaskIds = serialized.waitingForTaskIds;
         task.processedEventIds = new Set(serialized.processedEventIds);
         task.piSessionFile = serialized.piSessionFile;
-        task.chat = serialized.chat ?? [];
+        task.chat = loadTaskChat(serialized.options.task_id, serialized.chat);
         task.retryCount = serialized.retryCount ?? 0;
         return task;
     }
@@ -157,7 +158,6 @@ class Task {
             waitingForTaskIds: this.waitingForTaskIds,
             processedEventIds: [...this.processedEventIds],
             piSessionFile: this.piSessionFile,
-            chat: this.chat,
             retryCount: this.retryCount
         };
     }
@@ -209,6 +209,10 @@ function getTaskSessionFile(taskId: string): string {
     return join(getTaskDir(taskId), 'session.jsonl');
 }
 
+function getTaskChatFile(taskId: string): string {
+    return join(getTaskDir(taskId), 'chat.jsonl');
+}
+
 function getTaskDepth(taskId: string): number {
     return Math.max(0, taskId.split('-').length - 2);
 }
@@ -242,6 +246,22 @@ function mergeRuntimeConfig(...configs: (RuntimeConfig | undefined)[]): Required
     );
 }
 
+function loadTaskChat(taskId: string, fallback: TaskChatMessage[] = []): TaskChatMessage[] {
+    const chatFile = getTaskChatFile(taskId);
+    if (!existsSync(chatFile)) return fallback;
+
+    return readFileSync(chatFile, 'utf8')
+        .split('\n')
+        .filter(line => line.trim().length > 0)
+        .map(line => JSON.parse(line) as TaskChatMessage);
+}
+
+function writeTaskChat(task: Task) {
+    const chatFile = getTaskChatFile(task.options.task_id);
+    const content = task.chat.map(message => JSON.stringify(message)).join('\n');
+    writeFileSync(chatFile, content ? `${content}\n` : '');
+}
+
 function quoteYaml(value: string | undefined): string {
     return value === undefined ? 'null' : JSON.stringify(value);
 }
@@ -266,6 +286,7 @@ function serializeTaskYaml(task: Task): string {
         `  can_create_subtasks: ${getTaskDepth(task.options.task_id) < MAX_TASK_DEPTH}`,
         `  task_dir: ${quoteYaml(getTaskDir(task.options.task_id))}`,
         `  session_file: ${quoteYaml(task.piSessionFile ?? getTaskSessionFile(task.options.task_id))}`,
+        `  chat_file: ${quoteYaml(getTaskChatFile(task.options.task_id))}`,
         'scope:',
         `  name: ${quoteYaml(task.options.name)}`,
         `  description: ${yamlBlock(task.options.description)}`,
@@ -282,8 +303,8 @@ function serializeTaskYaml(task: Task): string {
         yamlStringList('waiting_for_task_ids', task.waitingForTaskIds),
         yamlStringList('processed_event_ids', [...task.processedEventIds]),
         `  session_file: ${quoteYaml(task.piSessionFile)}`,
-        `  result: ${yamlBlock(task.result)}`,
-        `  chat: ${yamlBlock(JSON.stringify(task.chat, null, 2))}`
+        `  chat_file: ${quoteYaml(getTaskChatFile(task.options.task_id))}`,
+        `  result: ${yamlBlock(task.result)}`
     ].join('\n') + '\n';
 }
 
@@ -293,6 +314,7 @@ function ensureTaskArtifacts(task: Task) {
     mkdirSync(taskDir, { recursive: true });
     if (!existsSync(sessionFile)) writeFileSync(sessionFile, '');
     task.piSessionFile ??= sessionFile;
+    writeTaskChat(task);
     writeFileSync(join(taskDir, 'task.yml'), serializeTaskYaml(task));
 }
 
@@ -656,6 +678,7 @@ class Orquestrator extends EventEmitter {
             canCreateSubtasks: getTaskDepth(task.options.task_id) < MAX_TASK_DEPTH,
             taskDir: getTaskDir(task.options.task_id),
             sessionFile: task.piSessionFile ?? getTaskSessionFile(task.options.task_id),
+            chatFile: getTaskChatFile(task.options.task_id),
             runtimeConfig: this.resolveRuntimeConfig(task, agent),
             allowedModels: ALLOWED_MODELS,
             allowedEfforts: ALLOWED_EFFORTS,
