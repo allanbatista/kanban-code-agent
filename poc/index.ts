@@ -16,14 +16,37 @@ import {
 type TaskStatus = 'PENDING' | 'RUNNING' | 'WAITING' | 'COMPLETED' | 'FAILED';
 type SubtaskMode = 'WAIT_ALL' | 'ON_DEMAND';
 type TaskEventType = 'TASK_COMPLETED';
+type ModelAlias = 'fast' | 'balanced' | 'deep';
+type EffortLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+type TaskChatRole = 'system' | 'user' | 'assistant' | 'event';
 
 const MODEL_PROVIDER = 'openrouter';
-const DEFAULT_MODEL_ID = 'deepseek/deepseek-v4-flash';
-const DEFAULT_THINKING_LEVEL = 'off' as const;
+const DEFAULT_MODEL_ALIAS: ModelAlias = 'fast';
+const DEFAULT_EFFORT: EffortLevel = 'off';
+const ALLOWED_MODELS: Record<ModelAlias, { provider: string; modelId: string; description: string }> = {
+    fast: { provider: MODEL_PROVIDER, modelId: 'openai/gpt-5.4-nano', description: 'tarefas simples e baixo custo' },
+    balanced: { provider: MODEL_PROVIDER, modelId: 'deepseek/deepseek-v4-flash', description: 'uso geral equilibrado' },
+    deep: { provider: MODEL_PROVIDER, modelId: 'deepseek/deepseek-v4-pro', description: 'tarefas complexas ou criticas' }
+};
+const ALLOWED_EFFORTS: EffortLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+const DEFAULT_RUNTIME_CONFIG: Required<RuntimeConfig> = { model: DEFAULT_MODEL_ALIAS, effort: DEFAULT_EFFORT };
 const AVAILABLE_TOOLS = ['read', 'grep', 'find', 'ls', 'create_subtask'];
 const STATE_FILE = join(process.cwd(), '.swarm-state.json');
 const TASKS_DIR = join(process.cwd(), 'tasks');
 const MAX_TASK_DEPTH = 4;
+const MAX_TASK_RETRIES = 2;
+
+interface RuntimeConfig {
+    model?: ModelAlias;
+    effort?: EffortLevel;
+}
+
+interface TaskChatMessage {
+    ts: string;
+    role: TaskChatRole;
+    text: string;
+    runtimeConfig?: RuntimeConfig;
+}
 
 interface TaskOptions {
     task_id: string;
@@ -32,6 +55,7 @@ interface TaskOptions {
     assignedTo: string;
     parentId?: string;
     subtaskMode?: SubtaskMode;
+    runtimeConfig?: RuntimeConfig;
 }
 
 interface SerializedTask {
@@ -42,6 +66,8 @@ interface SerializedTask {
     waitingForTaskIds: string[];
     processedEventIds: string[];
     piSessionFile?: string;
+    chat?: TaskChatMessage[];
+    retryCount?: number;
 }
 
 interface TaskEvent {
@@ -71,13 +97,22 @@ interface TaskMetadata {
     canCreateSubtasks: boolean;
     taskDir: string;
     sessionFile: string;
+    runtimeConfig: Required<RuntimeConfig>;
+    allowedModels: Record<ModelAlias, { provider: string; modelId: string; description: string }>;
+    allowedEfforts: EffortLevel[];
+    retryCount: number;
+    maxRetries: number;
+    taskChat: TaskChatMessage[];
 }
 
 interface AgentDecision {
-    status: 'completed' | 'waiting';
+    status: 'completed' | 'waiting' | 'retry';
     result: string;
     waitMode?: SubtaskMode;
     waitingForTaskIds?: string[];
+    instructions?: string;
+    model?: ModelAlias;
+    effort?: EffortLevel;
 }
 
 class Task {
@@ -88,9 +123,12 @@ class Task {
     waitingForTaskIds: string[] = [];
     processedEventIds = new Set<string>();
     piSessionFile?: string;
+    chat: TaskChatMessage[] = [];
+    retryCount = 0;
 
     constructor(options: TaskOptions) {
         this.options = options;
+        this.appendChat('user', `${options.name}\n\n${options.description}`, options.runtimeConfig);
     }
 
     static fromSerialized(serialized: SerializedTask): Task {
@@ -101,7 +139,13 @@ class Task {
         task.waitingForTaskIds = serialized.waitingForTaskIds;
         task.processedEventIds = new Set(serialized.processedEventIds);
         task.piSessionFile = serialized.piSessionFile;
+        task.chat = serialized.chat ?? [];
+        task.retryCount = serialized.retryCount ?? 0;
         return task;
+    }
+
+    appendChat(role: TaskChatRole, text: string, runtimeConfig?: RuntimeConfig) {
+        this.chat.push({ ts: new Date().toISOString(), role, text, runtimeConfig });
     }
 
     serialize(): SerializedTask {
@@ -112,7 +156,9 @@ class Task {
             result: this.result,
             waitingForTaskIds: this.waitingForTaskIds,
             processedEventIds: [...this.processedEventIds],
-            piSessionFile: this.piSessionFile
+            piSessionFile: this.piSessionFile,
+            chat: this.chat,
+            retryCount: this.retryCount
         };
     }
 }
@@ -120,10 +166,12 @@ class Task {
 class Agent {
     name: string;
     system_prompt: string;
+    runtimeConfig: Required<RuntimeConfig>;
 
-    constructor(name: string, system_prompt: string) {
+    constructor(name: string, system_prompt: string, runtimeConfig: Required<RuntimeConfig>) {
         this.name = name;
         this.system_prompt = system_prompt;
+        this.runtimeConfig = mergeRuntimeConfig(runtimeConfig);
     }
 }
 
@@ -165,6 +213,35 @@ function getTaskDepth(taskId: string): number {
     return Math.max(0, taskId.split('-').length - 2);
 }
 
+function isModelAlias(value: unknown): value is ModelAlias {
+    return typeof value === 'string' && value in ALLOWED_MODELS;
+}
+
+function isEffortLevel(value: unknown): value is EffortLevel {
+    return typeof value === 'string' && ALLOWED_EFFORTS.includes(value as EffortLevel);
+}
+
+function normalizeRuntimeConfig(config?: RuntimeConfig): RuntimeConfig | undefined {
+    if (!config) return undefined;
+    const normalized: RuntimeConfig = {};
+    if (config.model !== undefined) {
+        if (!isModelAlias(config.model)) throw new Error(`Modelo alias invalido: ${config.model}`);
+        normalized.model = config.model;
+    }
+    if (config.effort !== undefined) {
+        if (!isEffortLevel(config.effort)) throw new Error(`Effort invalido: ${config.effort}`);
+        normalized.effort = config.effort;
+    }
+    return Object.keys(normalized).length ? normalized : undefined;
+}
+
+function mergeRuntimeConfig(...configs: (RuntimeConfig | undefined)[]): Required<RuntimeConfig> {
+    return configs.reduce<Required<RuntimeConfig>>(
+        (merged, config) => ({ ...merged, ...normalizeRuntimeConfig(config) }),
+        { ...DEFAULT_RUNTIME_CONFIG }
+    );
+}
+
 function quoteYaml(value: string | undefined): string {
     return value === undefined ? 'null' : JSON.stringify(value);
 }
@@ -193,14 +270,20 @@ function serializeTaskYaml(task: Task): string {
         `  name: ${quoteYaml(task.options.name)}`,
         `  description: ${yamlBlock(task.options.description)}`,
         `  assigned_to: ${quoteYaml(task.options.assignedTo)}`,
+        'runtime:',
+        `  model: ${quoteYaml(task.options.runtimeConfig?.model)}`,
+        `  effort: ${quoteYaml(task.options.runtimeConfig?.effort)}`,
         'memory:',
         `  status: ${quoteYaml(task.status)}`,
+        `  retry_count: ${task.retryCount}`,
+        `  max_retries: ${MAX_TASK_RETRIES}`,
         `  subtask_mode: ${quoteYaml(task.options.subtaskMode)}`,
         yamlStringList('subtask_ids', task.subtaskIds),
         yamlStringList('waiting_for_task_ids', task.waitingForTaskIds),
         yamlStringList('processed_event_ids', [...task.processedEventIds]),
         `  session_file: ${quoteYaml(task.piSessionFile)}`,
-        `  result: ${yamlBlock(task.result)}`
+        `  result: ${yamlBlock(task.result)}`,
+        `  chat: ${yamlBlock(JSON.stringify(task.chat, null, 2))}`
     ].join('\n') + '\n';
 }
 
@@ -221,17 +304,22 @@ class PiAgentClient {
         compaction: { enabled: false },
         retry: { enabled: true, maxRetries: 1 }
     });
-    private model = this.modelRegistry.find(MODEL_PROVIDER, DEFAULT_MODEL_ID);
 
     constructor() {
         const apiKey = process.env.OPENROUTER_API_KEY;
         if (!apiKey) throw new Error('OPENROUTER_API_KEY não configurada');
 
         this.authStorage.setRuntimeApiKey(MODEL_PROVIDER, apiKey);
-        if (!this.model) throw new Error(`Modelo ${MODEL_PROVIDER}/${DEFAULT_MODEL_ID} não encontrado no Pi SDK`);
+        for (const [alias, config] of Object.entries(ALLOWED_MODELS)) {
+            if (!this.modelRegistry.find(config.provider, config.modelId)) {
+                throw new Error(`Modelo alias ${alias} (${config.provider}/${config.modelId}) não encontrado no Pi SDK`);
+            }
+        }
     }
 
     async run(agent: Agent, task: Task, orquestrator: Orquestrator, triggerEvents: TaskEvent[] = []): Promise<string> {
+        const runtimeConfig = orquestrator.resolveRuntimeConfig(task, agent);
+        const model = this.resolveModel(runtimeConfig);
         const resourceLoader = this.createResourceLoader(agent, task, orquestrator);
         await resourceLoader.reload();
         ensureTaskArtifacts(task);
@@ -240,8 +328,8 @@ class PiAgentClient {
 
         const { session } = await createAgentSession({
             cwd: this.cwd,
-            model: this.model,
-            thinkingLevel: DEFAULT_THINKING_LEVEL,
+            model,
+            thinkingLevel: runtimeConfig.effort,
             authStorage: this.authStorage,
             modelRegistry: this.modelRegistry,
             resourceLoader,
@@ -268,6 +356,13 @@ class PiAgentClient {
         }
     }
 
+    private resolveModel(config: Required<RuntimeConfig>) {
+        const modelConfig = ALLOWED_MODELS[config.model];
+        const model = this.modelRegistry.find(modelConfig.provider, modelConfig.modelId);
+        if (!model) throw new Error(`Modelo ${modelConfig.provider}/${modelConfig.modelId} não encontrado no Pi SDK`);
+        return model;
+    }
+
     private createResourceLoader(agent: Agent, task: Task, orquestrator: Orquestrator): DefaultResourceLoader {
         return new DefaultResourceLoader({
             cwd: this.cwd,
@@ -284,6 +379,8 @@ ${orquestrator.buildTaskMetadataBlock(task)}
 Voce decide se resolve diretamente ou se cria subtasks pela tool create_subtask.
 Use create_subtask apenas quando a tarefa realmente precisar de delegacao.
 Nunca crie subtasks quando task_metadata.canCreateSubtasks for false.
+Voce pode escolher model/effort para subtasks usando apenas os aliases e efforts permitidos em task_metadata.
+Se a propria task nao atingiu o objetivo, retorne status retry com novas instrucoes e opcionalmente model/effort.
 Depois de criar subtasks, retorne JSON aguardando as task_ids criadas.
 Se ja houver subtasks listadas para o mesmo pedido, nao crie outra; use os resultados existentes.
 Para WAIT_ALL, aguarde todas antes de processar. Para ON_DEMAND, processe cada conclusao quando ela chegar.
@@ -291,6 +388,8 @@ Responda sempre somente JSON no formato:
 {"status":"completed","result":"resultado final"}
 ou
 {"status":"waiting","waitMode":"WAIT_ALL|ON_DEMAND","waitingForTaskIds":["id"],"result":"motivo curto"}
+ou
+{"status":"retry","instructions":"novas instrucoes objetivas","model":"fast|balanced|deep","effort":"off|minimal|low|medium|high|xhigh","result":"motivo curto"}
 Quando status for completed, result deve conter apenas a resposta final ao usuario, sem explicar o workflow.`,
             extensionFactories: [
                 (pi: ExtensionAPI) => {
@@ -306,23 +405,42 @@ Quando status for completed, result deve conter apenas a resposta final ao usuar
                                     description: `Agente destino. Disponiveis: ${orquestrator.getAgentNames().join(', ')}`
                                 },
                                 name: { type: 'string', description: 'Nome curto da subtask' },
-                                description: { type: 'string', description: 'Descricao objetiva da subtask' }
+                                description: { type: 'string', description: 'Descricao objetiva da subtask' },
+                                model: {
+                                    type: 'string',
+                                    enum: Object.keys(ALLOWED_MODELS),
+                                    description: 'Alias opcional de modelo permitido.'
+                                },
+                                effort: {
+                                    type: 'string',
+                                    enum: ALLOWED_EFFORTS,
+                                    description: 'Effort opcional para a subtask.'
+                                }
                             },
                             required: ['assignedTo', 'name', 'description'],
                             additionalProperties: false
                         },
-                        async execute(_toolCallId, params: { assignedTo: string; name: string; description: string }) {
+                        async execute(_toolCallId, params: Record<string, unknown>) {
+                            const assignedTo = requireStringParam(params, 'assignedTo');
+                            const name = requireStringParam(params, 'name');
+                            const description = requireStringParam(params, 'description');
+                            const runtimeConfig = normalizeRuntimeConfig({
+                                model: params.model === undefined ? undefined : parseModelAlias(String(params.model)),
+                                effort: params.effort === undefined ? undefined : parseEffortLevel(String(params.effort))
+                            });
                             const existingSubtask = orquestrator.getSubtasks(task).find(subtask =>
-                                subtask.options.assignedTo === params.assignedTo &&
-                                subtask.options.name === params.name &&
-                                subtask.options.description === params.description
+                                subtask.options.assignedTo === assignedTo &&
+                                subtask.options.name === name &&
+                                subtask.options.description === description &&
+                                JSON.stringify(subtask.options.runtimeConfig ?? {}) === JSON.stringify(runtimeConfig ?? {})
                             );
 
                             const subtask = existingSubtask ?? orquestrator.spawnSubtask(
                                 task,
-                                params.assignedTo,
-                                params.name,
-                                params.description
+                                assignedTo,
+                                name,
+                                description,
+                                runtimeConfig
                             );
 
                             return {
@@ -337,6 +455,10 @@ Quando status for completed, result deve conter apenas a resposta final ao usuar
     }
 
     private buildPrompt(task: Task, orquestrator: Orquestrator, triggerEvents: TaskEvent[]): string {
+        for (const event of triggerEvents) {
+            task.appendChat('event', `task ${event.taskId} concluida: ${event.result ?? ''}`);
+        }
+
         const subtaskResults = orquestrator.getSubtasks(task)
             .map(subtask => `- ${subtask.options.task_id} ${subtask.options.name} (${subtask.options.assignedTo}) [${subtask.status}]: ${subtask.result ?? 'sem resultado'}`)
             .join('\n');
@@ -349,6 +471,7 @@ Quando status for completed, result deve conter apenas a resposta final ao usuar
             `Descrição: ${task.options.description}`,
             `Eventos recebidos:\n${eventSummary}`,
             subtaskResults ? `Subtasks:\n${subtaskResults}` : 'Sem subtasks.',
+            `Task chat:\n${task.chat.map(message => `- ${message.ts} ${message.role}: ${message.text}`).join('\n')}`,
             task.piSessionFile ? `Sessao Pi persistida: ${task.piSessionFile}` : 'Sem sessao Pi persistida.',
             'Continue a partir do historico anterior da sessao, decida o proximo passo e retorne somente o JSON estruturado.'
         ].join('\n\n');
@@ -376,12 +499,13 @@ class Orquestrator extends EventEmitter {
         this.loadState();
     }
 
-    addTask(name: string, description: string, agentName: string): Task {
+    addTask(name: string, description: string, agentName: string, runtimeConfig?: RuntimeConfig): Task {
         const task = new Task({
             task_id: this.createTaskId(),
             name,
             description,
-            assignedTo: agentName
+            assignedTo: agentName,
+            runtimeConfig: normalizeRuntimeConfig(runtimeConfig)
         });
         this.tasks.set(task.options.task_id, task);
         this.rootTaskIds.push(task.options.task_id);
@@ -390,7 +514,7 @@ class Orquestrator extends EventEmitter {
         return task;
     }
 
-    spawnSubtask(parentTask: Task, agentName: string, name: string, description: string): Task {
+    spawnSubtask(parentTask: Task, agentName: string, name: string, description: string, runtimeConfig?: RuntimeConfig): Task {
         if (!this.agents.has(agentName)) throw new Error(`Agente ${agentName} não encontrado`);
         if (getTaskDepth(parentTask.options.task_id) >= MAX_TASK_DEPTH) {
             throw new Error(`Depth maximo ${MAX_TASK_DEPTH} atingido para task ${parentTask.options.task_id}`);
@@ -401,7 +525,8 @@ class Orquestrator extends EventEmitter {
             name,
             description,
             assignedTo: agentName,
-            parentId: parentTask.options.task_id
+            parentId: parentTask.options.task_id,
+            runtimeConfig: normalizeRuntimeConfig(runtimeConfig)
         });
 
         parentTask.subtaskIds.push(subtask.options.task_id);
@@ -451,12 +576,37 @@ class Orquestrator extends EventEmitter {
             const output = await this.pi.run(agent, task, this, triggerEvents);
             const decision = this.parseDecision(output);
 
+            if (decision.status === 'retry') {
+                if (task.retryCount >= MAX_TASK_RETRIES) {
+                    task.result = decision.result || `Retry maximo atingido: ${decision.instructions ?? ''}`;
+                    task.status = 'FAILED';
+                    this.markEventsProcessed(task, triggerEvents);
+                    this.persist();
+                    console.log(`[${agent.name}] Falhou apos ${task.retryCount} retries: "${task.options.name}"`);
+                    return;
+                }
+
+                const runtimeConfig = normalizeRuntimeConfig({ model: decision.model, effort: decision.effort });
+                task.retryCount += 1;
+                task.status = 'PENDING';
+                task.result = decision.result;
+                task.options.runtimeConfig = { ...(task.options.runtimeConfig ?? {}), ...(runtimeConfig ?? {}) };
+                task.appendChat('assistant', decision.result || 'retry solicitado');
+                task.appendChat('user', decision.instructions ?? 'Reexecute a task com a configuracao atualizada.', runtimeConfig);
+                this.markEventsProcessed(task, triggerEvents);
+                this.persist();
+                console.log(`[${agent.name}] Retry ${task.retryCount}/${MAX_TASK_RETRIES}: "${task.options.name}"`);
+                this.scheduleTask(task.options.task_id);
+                return;
+            }
+
             if (decision.status === 'waiting') {
                 task.options.subtaskMode = decision.waitMode ?? 'WAIT_ALL';
                 task.waitingForTaskIds = decision.waitingForTaskIds?.length
                     ? decision.waitingForTaskIds
                     : this.getSubtasks(task).filter(st => st.status !== 'COMPLETED').map(st => st.options.task_id);
                 task.result = decision.result;
+                task.appendChat('assistant', decision.result);
                 task.status = 'WAITING';
                 this.markEventsProcessed(task, triggerEvents);
                 this.persist();
@@ -465,6 +615,7 @@ class Orquestrator extends EventEmitter {
             }
 
             task.result = decision.result;
+            task.appendChat('assistant', decision.result);
             task.status = 'COMPLETED';
             this.markEventsProcessed(task, triggerEvents);
             this.recordCompletionEvent(task);
@@ -487,7 +638,12 @@ class Orquestrator extends EventEmitter {
         return [...this.agents.keys()];
     }
 
+    resolveRuntimeConfig(task: Task, agent?: Agent): Required<RuntimeConfig> {
+        return mergeRuntimeConfig(agent?.runtimeConfig, task.options.runtimeConfig);
+    }
+
     toMetadata(task: Task): TaskMetadata {
+        const agent = this.agents.get(task.options.assignedTo);
         return {
             task_id: task.options.task_id,
             name: task.options.name,
@@ -499,7 +655,13 @@ class Orquestrator extends EventEmitter {
             maxDepth: MAX_TASK_DEPTH,
             canCreateSubtasks: getTaskDepth(task.options.task_id) < MAX_TASK_DEPTH,
             taskDir: getTaskDir(task.options.task_id),
-            sessionFile: task.piSessionFile ?? getTaskSessionFile(task.options.task_id)
+            sessionFile: task.piSessionFile ?? getTaskSessionFile(task.options.task_id),
+            runtimeConfig: this.resolveRuntimeConfig(task, agent),
+            allowedModels: ALLOWED_MODELS,
+            allowedEfforts: ALLOWED_EFFORTS,
+            retryCount: task.retryCount,
+            maxRetries: MAX_TASK_RETRIES,
+            taskChat: task.chat
         };
     }
 
@@ -608,6 +770,17 @@ class Orquestrator extends EventEmitter {
 
         try {
             const parsed = JSON.parse(jsonMatch[0]) as Partial<AgentDecision>;
+            if (parsed.status === 'retry') {
+                if (parsed.model !== undefined && !isModelAlias(parsed.model)) throw new Error(`Modelo alias invalido: ${parsed.model}`);
+                if (parsed.effort !== undefined && !isEffortLevel(parsed.effort)) throw new Error(`Effort invalido: ${parsed.effort}`);
+                return {
+                    status: 'retry',
+                    result: parsed.result ?? '',
+                    instructions: parsed.instructions ?? '',
+                    model: isModelAlias(parsed.model) ? parsed.model : undefined,
+                    effort: isEffortLevel(parsed.effort) ? parsed.effort : undefined
+                };
+            }
             if (parsed.status === 'waiting') {
                 return {
                     status: 'waiting',
@@ -629,24 +802,24 @@ class Orquestrator extends EventEmitter {
 
 function createAgents(): Agent[] {
     return [
-        new Agent('Manager', 'Você é o Gerente de projetos Senior focado em orquestração macro. Siga as ins'),
-        new Agent('Produto', 'Você é o Product Owner Senior, focado em regras de negócio e requisitos.'),
-        new Agent('Engineer', 'Você é o Principal Engenheiro de Software, focado em arquitetura e código.'),
-        new Agent('Generic', 'Você é um executor de tarefas gerais de apoio.')
+        new Agent('Manager', 'Você é o Gerente de projetos Senior focado em orquestração macro. Siga as ins', { model: 'balanced', effort: 'high' }),
+        new Agent('Produto', 'Você é o Product Owner Senior, focado em regras de negócio e requisitos.', { model: 'balanced', effort: 'low' }),
+        new Agent('Engineer', 'Você é o Principal Engenheiro de Software, focado em arquitetura e código.', { model: 'deep', effort: 'medium' }),
+        new Agent('Generic', 'Você é um executor de tarefas gerais de apoio.', { model: 'fast', effort: 'off' })
     ];
 }
 
-async function runNormal(requestedTask: string) {
+async function runNormal(requestedTask: string, runtimeConfig?: RuntimeConfig) {
     const orquestrator = new Orquestrator(createAgents(), { resetState: true });
-    const mainTask = orquestrator.addTask(requestedTask, requestedTask, 'Manager');
+    const mainTask = orquestrator.addTask(requestedTask, requestedTask, 'Manager', runtimeConfig);
     await orquestrator.waitUntilSettled(mainTask);
     return mainTask;
 }
 
-async function runRestartSimulation(requestedTask: string) {
+async function runRestartSimulation(requestedTask: string, runtimeConfig?: RuntimeConfig) {
     console.log('[SIM] Fase 1: executando ate suspender e persistir estado.');
     const firstRun = new Orquestrator(createAgents(), { resetState: true, stopWhenWaiting: true });
-    const firstTask = firstRun.addTask(requestedTask, requestedTask, 'Manager');
+    const firstTask = firstRun.addTask(requestedTask, requestedTask, 'Manager', runtimeConfig);
     await firstRun.waitUntilSettled(firstTask);
     console.log(`[SIM] Crash simulado. Estado persistido em ${STATE_FILE}`);
 
@@ -659,18 +832,71 @@ async function runRestartSimulation(requestedTask: string) {
     return resumedTask;
 }
 
+function parseCliArgs(args: string[]): { requestedTask: string; simulateRestart: boolean; runtimeConfig?: RuntimeConfig } {
+    const taskParts: string[] = [];
+    const runtimeConfig: RuntimeConfig = {};
+    let simulateRestart = false;
+
+    for (let index = 0; index < args.length; index++) {
+        const arg = args[index];
+        if (arg === '--simulate-restart') {
+            simulateRestart = true;
+            continue;
+        }
+        if (arg === '--model') {
+            runtimeConfig.model = parseModelAlias(args[++index]);
+            continue;
+        }
+        if (arg.startsWith('--model=')) {
+            runtimeConfig.model = parseModelAlias(arg.slice('--model='.length));
+            continue;
+        }
+        if (arg === '--effort') {
+            runtimeConfig.effort = parseEffortLevel(args[++index]);
+            continue;
+        }
+        if (arg.startsWith('--effort=')) {
+            runtimeConfig.effort = parseEffortLevel(arg.slice('--effort='.length));
+            continue;
+        }
+        taskParts.push(arg);
+    }
+
+    return {
+        requestedTask: taskParts.join(' ') || 'execute em subtasks diferentes no agent genérico. como se fala "oi" em japones, coreano, frances e ingles',
+        simulateRestart,
+        runtimeConfig: normalizeRuntimeConfig(runtimeConfig)
+    };
+}
+
+function parseModelAlias(value: string | undefined): ModelAlias {
+    if (!isModelAlias(value)) throw new Error(`Modelo alias invalido: ${value}. Permitidos: ${Object.keys(ALLOWED_MODELS).join(', ')}`);
+    return value;
+}
+
+function parseEffortLevel(value: string | undefined): EffortLevel {
+    if (!isEffortLevel(value)) throw new Error(`Effort invalido: ${value}. Permitidos: ${ALLOWED_EFFORTS.join(', ')}`);
+    return value;
+}
+
+function requireStringParam(params: Record<string, unknown>, key: string): string {
+    const value = params[key];
+    if (typeof value !== 'string' || value.trim() === '') throw new Error(`Parametro obrigatorio invalido: ${key}`);
+    return value;
+}
+
 async function main() {
-    const args = process.argv.slice(2);
-    const simulateRestart = args.includes('--simulate-restart');
-    const requestedTask = args.filter(arg => arg !== '--simulate-restart').join(' ') || 'execute em subtasks diferentes no agent genérico. como se fala "oi" em japones, coreano, frances e ingles';
+    const { requestedTask, simulateRestart, runtimeConfig } = parseCliArgs(process.argv.slice(2));
+    const effectiveRootConfig = mergeRuntimeConfig(createAgents().find(agent => agent.name === 'Manager')?.runtimeConfig, runtimeConfig);
+    const rootModel = ALLOWED_MODELS[effectiveRootConfig.model];
 
     console.log('================== START SWARM POC =================');
-    console.log(`Modelo Pi: ${MODEL_PROVIDER}/${DEFAULT_MODEL_ID} (${DEFAULT_THINKING_LEVEL})`);
+    console.log(`Modelo Pi root: ${rootModel.provider}/${rootModel.modelId} (${effectiveRootConfig.effort})`);
     console.log(`State: ${STATE_FILE}`);
 
     const mainTask = simulateRestart
-        ? await runRestartSimulation(requestedTask)
-        : await runNormal(requestedTask);
+        ? await runRestartSimulation(requestedTask, runtimeConfig)
+        : await runNormal(requestedTask, runtimeConfig);
 
     console.log('\n================== SWARM FINISHED =================');
     console.log('Status Final da Task Principal:', mainTask.status);
