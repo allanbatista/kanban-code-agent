@@ -18,10 +18,12 @@ type SubtaskMode = 'WAIT_ALL' | 'ON_DEMAND';
 type TaskEventType = 'TASK_COMPLETED';
 
 const MODEL_PROVIDER = 'openrouter';
-const MODEL_ID = 'openai/gpt-5.4-nano';
-const THINKING_LEVEL = 'medium' as const;
+const DEFAULT_MODEL_ID = 'deepseek/deepseek-v4-flash';
+const DEFAULT_THINKING_LEVEL = 'off' as const;
 const AVAILABLE_TOOLS = ['read', 'grep', 'find', 'ls', 'create_subtask'];
 const STATE_FILE = join(process.cwd(), '.swarm-state.json');
+const TASKS_DIR = join(process.cwd(), 'tasks');
+const MAX_TASK_DEPTH = 4;
 
 interface TaskOptions {
     task_id: string;
@@ -64,6 +66,11 @@ interface TaskMetadata {
     assignedTo: string;
     parentId?: string;
     status: TaskStatus;
+    depth: number;
+    maxDepth: number;
+    canCreateSubtasks: boolean;
+    taskDir: string;
+    sessionFile: string;
 }
 
 interface AgentDecision {
@@ -146,6 +153,66 @@ class SwarmStateStore {
     }
 }
 
+function getTaskDir(taskId: string): string {
+    return join(TASKS_DIR, taskId);
+}
+
+function getTaskSessionFile(taskId: string): string {
+    return join(getTaskDir(taskId), 'session.jsonl');
+}
+
+function getTaskDepth(taskId: string): number {
+    return Math.max(0, taskId.split('-').length - 2);
+}
+
+function quoteYaml(value: string | undefined): string {
+    return value === undefined ? 'null' : JSON.stringify(value);
+}
+
+function yamlStringList(key: string, values: string[]): string {
+    if (values.length === 0) return `  ${key}: []`;
+    return [`  ${key}:`, ...values.map(value => `    - ${quoteYaml(value)}`)].join('\n');
+}
+
+function yamlBlock(value: string | undefined): string {
+    if (!value) return "''";
+    return `|-\n${value.split('\n').map(line => `    ${line}`).join('\n')}`;
+}
+
+function serializeTaskYaml(task: Task): string {
+    return [
+        `task_id: ${quoteYaml(task.options.task_id)}`,
+        `parent_id: ${quoteYaml(task.options.parentId)}`,
+        'metadata:',
+        `  depth: ${getTaskDepth(task.options.task_id)}`,
+        `  max_depth: ${MAX_TASK_DEPTH}`,
+        `  can_create_subtasks: ${getTaskDepth(task.options.task_id) < MAX_TASK_DEPTH}`,
+        `  task_dir: ${quoteYaml(getTaskDir(task.options.task_id))}`,
+        `  session_file: ${quoteYaml(task.piSessionFile ?? getTaskSessionFile(task.options.task_id))}`,
+        'scope:',
+        `  name: ${quoteYaml(task.options.name)}`,
+        `  description: ${yamlBlock(task.options.description)}`,
+        `  assigned_to: ${quoteYaml(task.options.assignedTo)}`,
+        'memory:',
+        `  status: ${quoteYaml(task.status)}`,
+        `  subtask_mode: ${quoteYaml(task.options.subtaskMode)}`,
+        yamlStringList('subtask_ids', task.subtaskIds),
+        yamlStringList('waiting_for_task_ids', task.waitingForTaskIds),
+        yamlStringList('processed_event_ids', [...task.processedEventIds]),
+        `  session_file: ${quoteYaml(task.piSessionFile)}`,
+        `  result: ${yamlBlock(task.result)}`
+    ].join('\n') + '\n';
+}
+
+function ensureTaskArtifacts(task: Task) {
+    const taskDir = getTaskDir(task.options.task_id);
+    const sessionFile = getTaskSessionFile(task.options.task_id);
+    mkdirSync(taskDir, { recursive: true });
+    if (!existsSync(sessionFile)) writeFileSync(sessionFile, '');
+    task.piSessionFile ??= sessionFile;
+    writeFileSync(join(taskDir, 'task.yml'), serializeTaskYaml(task));
+}
+
 class PiAgentClient {
     private cwd = process.cwd();
     private authStorage = AuthStorage.inMemory();
@@ -154,28 +221,27 @@ class PiAgentClient {
         compaction: { enabled: false },
         retry: { enabled: true, maxRetries: 1 }
     });
-    private model = this.modelRegistry.find(MODEL_PROVIDER, MODEL_ID);
+    private model = this.modelRegistry.find(MODEL_PROVIDER, DEFAULT_MODEL_ID);
 
     constructor() {
         const apiKey = process.env.OPENROUTER_API_KEY;
         if (!apiKey) throw new Error('OPENROUTER_API_KEY não configurada');
 
         this.authStorage.setRuntimeApiKey(MODEL_PROVIDER, apiKey);
-        if (!this.model) throw new Error(`Modelo ${MODEL_PROVIDER}/${MODEL_ID} não encontrado no Pi SDK`);
+        if (!this.model) throw new Error(`Modelo ${MODEL_PROVIDER}/${DEFAULT_MODEL_ID} não encontrado no Pi SDK`);
     }
 
     async run(agent: Agent, task: Task, orquestrator: Orquestrator, triggerEvents: TaskEvent[] = []): Promise<string> {
         const resourceLoader = this.createResourceLoader(agent, task, orquestrator);
         await resourceLoader.reload();
+        ensureTaskArtifacts(task);
 
-        const sessionManager = task.piSessionFile
-            ? SessionManager.open(task.piSessionFile)
-            : SessionManager.create(this.cwd);
+        const sessionManager = SessionManager.open(task.piSessionFile ?? getTaskSessionFile(task.options.task_id));
 
         const { session } = await createAgentSession({
             cwd: this.cwd,
             model: this.model,
-            thinkingLevel: THINKING_LEVEL,
+            thinkingLevel: DEFAULT_THINKING_LEVEL,
             authStorage: this.authStorage,
             modelRegistry: this.modelRegistry,
             resourceLoader,
@@ -213,8 +279,11 @@ class PiAgentClient {
             noThemes: true,
             noContextFiles: true,
             systemPrompt: `${agent.system_prompt}
+${orquestrator.buildTaskMetadataBlock(task)}
+
 Voce decide se resolve diretamente ou se cria subtasks pela tool create_subtask.
 Use create_subtask apenas quando a tarefa realmente precisar de delegacao.
+Nunca crie subtasks quando task_metadata.canCreateSubtasks for false.
 Depois de criar subtasks, retorne JSON aguardando as task_ids criadas.
 Se ja houver subtasks listadas para o mesmo pedido, nao crie outra; use os resultados existentes.
 Para WAIT_ALL, aguarde todas antes de processar. Para ON_DEMAND, processe cada conclusao quando ela chegar.
@@ -300,13 +369,16 @@ class Orquestrator extends EventEmitter {
         super();
         this.options = options;
         for (const agent of agents) this.agents.set(agent.name, agent);
-        if (options.resetState) this.store.reset();
+        if (options.resetState) {
+            this.store.reset();
+            if (existsSync(TASKS_DIR)) rmSync(TASKS_DIR, { recursive: true, force: true });
+        }
         this.loadState();
     }
 
     addTask(name: string, description: string, agentName: string): Task {
         const task = new Task({
-            task_id: this.createId(),
+            task_id: this.createTaskId(),
             name,
             description,
             assignedTo: agentName
@@ -320,9 +392,12 @@ class Orquestrator extends EventEmitter {
 
     spawnSubtask(parentTask: Task, agentName: string, name: string, description: string): Task {
         if (!this.agents.has(agentName)) throw new Error(`Agente ${agentName} não encontrado`);
+        if (getTaskDepth(parentTask.options.task_id) >= MAX_TASK_DEPTH) {
+            throw new Error(`Depth maximo ${MAX_TASK_DEPTH} atingido para task ${parentTask.options.task_id}`);
+        }
 
         const subtask = new Task({
-            task_id: this.createId(),
+            task_id: this.createSubtaskId(parentTask),
             name,
             description,
             assignedTo: agentName,
@@ -419,11 +494,25 @@ class Orquestrator extends EventEmitter {
             description: task.options.description,
             assignedTo: task.options.assignedTo,
             parentId: task.options.parentId,
-            status: task.status
+            status: task.status,
+            depth: getTaskDepth(task.options.task_id),
+            maxDepth: MAX_TASK_DEPTH,
+            canCreateSubtasks: getTaskDepth(task.options.task_id) < MAX_TASK_DEPTH,
+            taskDir: getTaskDir(task.options.task_id),
+            sessionFile: task.piSessionFile ?? getTaskSessionFile(task.options.task_id)
         };
     }
 
+    buildTaskMetadataBlock(task: Task): string {
+        return [
+            '<task_metadata>',
+            JSON.stringify(this.toMetadata(task), null, 2),
+            '</task_metadata>'
+        ].join('\n');
+    }
+
     persist() {
+        for (const task of this.tasks.values()) ensureTaskArtifacts(task);
         this.store.save(this.tasks, this.events);
     }
 
@@ -498,6 +587,21 @@ class Orquestrator extends EventEmitter {
         return this.runningTaskIds.size === 0 && [...this.tasks.values()].every(task => task.status !== 'PENDING' && task.status !== 'RUNNING');
     }
 
+    private createTaskId(): string {
+        const timestampNs = (BigInt(Date.now()) * 1_000_000n) + (process.hrtime.bigint() % 1_000_000n);
+        return `t-${timestampNs.toString(36)}${this.randomAlphaNumeric(2)}`;
+    }
+
+    private createSubtaskId(parentTask: Task): string {
+        return `${parentTask.options.task_id}-${this.randomAlphaNumeric(2)}`;
+    }
+
+    private randomAlphaNumeric(length: number): string {
+        let value = '';
+        for (let i = 0; i < length; i++) value += Math.floor(Math.random() * 36).toString(36);
+        return value;
+    }
+
     private parseDecision(output: string): AgentDecision {
         const jsonMatch = output.match(/\{[\s\S]*\}/);
         if (!jsonMatch) return { status: 'completed', result: output };
@@ -525,9 +629,9 @@ class Orquestrator extends EventEmitter {
 
 function createAgents(): Agent[] {
     return [
-        new Agent('Manager', 'Você é o gerente de projetos focado em orquestração macro.'),
-        new Agent('Produto', 'Você é o Product Owner, focado em regras de negócio e requisitos.'),
-        new Agent('Engineer', 'Você é o Engenheiro de Software principal, focado em arquitetura e código.'),
+        new Agent('Manager', 'Você é o Gerente de projetos Senior focado em orquestração macro. Siga as ins'),
+        new Agent('Produto', 'Você é o Product Owner Senior, focado em regras de negócio e requisitos.'),
+        new Agent('Engineer', 'Você é o Principal Engenheiro de Software, focado em arquitetura e código.'),
         new Agent('Generic', 'Você é um executor de tarefas gerais de apoio.')
     ];
 }
@@ -561,7 +665,7 @@ async function main() {
     const requestedTask = args.filter(arg => arg !== '--simulate-restart').join(' ') || 'execute em subtasks diferentes no agent genérico. como se fala "oi" em japones, coreano, frances e ingles';
 
     console.log('================== START SWARM POC =================');
-    console.log(`Modelo Pi: ${MODEL_PROVIDER}/${MODEL_ID} (${THINKING_LEVEL})`);
+    console.log(`Modelo Pi: ${MODEL_PROVIDER}/${DEFAULT_MODEL_ID} (${DEFAULT_THINKING_LEVEL})`);
     console.log(`State: ${STATE_FILE}`);
 
     const mainTask = simulateRestart
