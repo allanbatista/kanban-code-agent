@@ -15,7 +15,9 @@ import {
 } from '@earendil-works/pi-coding-agent';
 
 type TaskStatus = 'PENDING' | 'RUNNING' | 'WAITING' | 'COMPLETED' | 'FAILED';
-type SubtaskMode = 'WAIT_ALL' | 'ON_DEMAND';
+type WaitGroupMode = 'WAIT_ALL' | 'ON_DEMAND';
+type WaitGroupStatus = 'WAITING' | 'PROCESSED';
+type TaskRunStatus = 'WAITING' | 'COMPLETED';
 type TaskEventType = 'TASK_COMPLETED';
 type ModelAlias = 'fast' | 'balanced' | 'deep';
 type EffortLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
@@ -70,8 +72,24 @@ interface TaskOptions {
     title: string;
     assignedTo: string;
     parentId?: string;
-    subtaskMode?: SubtaskMode;
     runtimeConfig?: RuntimeConfig;
+}
+
+interface WaitGroup {
+    waitId: string;
+    mode: WaitGroupMode;
+    taskIds: string[];
+    processedEventIds: string[];
+    status: WaitGroupStatus;
+}
+
+interface TaskRun {
+    runId: string;
+    status: TaskRunStatus;
+    waitGroups: WaitGroup[];
+    resultMessages: TaskChatMessage[];
+    createdAt: string;
+    completedAt?: string;
 }
 
 interface SerializedTask {
@@ -79,8 +97,8 @@ interface SerializedTask {
     status: TaskStatus;
     subtaskIds: string[];
     resultMessages?: TaskChatMessage[];
-    waitingForTaskIds: string[];
-    processedEventIds: string[];
+    activeRunId?: string;
+    runs?: TaskRun[];
     piSessionFile?: string;
     chat?: TaskChatMessage[];
     artifacts?: TaskArtifact[];
@@ -92,6 +110,8 @@ interface TaskEvent {
     type: TaskEventType;
     taskId: string;
     parentId?: string;
+    runId?: string;
+    waitId?: string;
     messages?: TaskChatMessage[];
     processedByTaskIds: string[];
     createdAt: string;
@@ -118,6 +138,8 @@ interface TaskMetadata {
     allowedEfforts: EffortLevel[];
     retryCount: number;
     maxRetries: number;
+    activeRunId?: string;
+    runs: TaskRun[];
     taskChat: TaskChatMessage[];
     artifacts: TaskArtifact[];
 }
@@ -131,11 +153,18 @@ interface AgentOutputMessage {
 interface AgentDecision {
     status: 'completed' | 'waiting' | 'retry';
     messages: AgentOutputMessage[];
-    waitMode?: SubtaskMode;
+    waitGroups?: AgentWaitGroup[];
+    waitMode?: WaitGroupMode;
     waitingForTaskIds?: string[];
     instructions?: string;
     model?: ModelAlias;
     effort?: EffortLevel;
+}
+
+interface AgentWaitGroup {
+    waitId: string;
+    mode: WaitGroupMode;
+    taskIds: string[];
 }
 
 class Task {
@@ -143,8 +172,8 @@ class Task {
     status: TaskStatus = 'PENDING';
     subtaskIds: string[] = [];
     resultMessages: TaskChatMessage[] = [];
-    waitingForTaskIds: string[] = [];
-    processedEventIds = new Set<string>();
+    activeRunId?: string;
+    runs: TaskRun[] = [];
     piSessionFile?: string;
     chat: TaskChatMessage[] = [];
     artifacts: TaskArtifact[] = [];
@@ -160,8 +189,8 @@ class Task {
         task.status = serialized.status;
         task.subtaskIds = serialized.subtaskIds;
         task.resultMessages = serialized.resultMessages ?? [];
-        task.waitingForTaskIds = serialized.waitingForTaskIds;
-        task.processedEventIds = new Set(serialized.processedEventIds);
+        task.activeRunId = serialized.activeRunId;
+        task.runs = serialized.runs ?? [];
         task.piSessionFile = serialized.piSessionFile;
         task.chat = loadTaskChat(serialized.options.task_id, serialized.chat);
         task.artifacts = serialized.artifacts ?? [];
@@ -189,8 +218,8 @@ class Task {
             status: this.status,
             subtaskIds: this.subtaskIds,
             resultMessages: this.resultMessages,
-            waitingForTaskIds: this.waitingForTaskIds,
-            processedEventIds: [...this.processedEventIds],
+            activeRunId: this.activeRunId,
+            runs: this.runs,
             piSessionFile: this.piSessionFile,
             artifacts: this.artifacts,
             retryCount: this.retryCount
@@ -321,14 +350,17 @@ function quoteYaml(value: string | undefined): string {
     return value === undefined ? 'null' : JSON.stringify(value);
 }
 
-function yamlStringList(key: string, values: string[]): string {
-    if (values.length === 0) return `  ${key}: []`;
-    return [`  ${key}:`, ...values.map(value => `    - ${quoteYaml(value)}`)].join('\n');
+function yamlStringList(key: string, values: string[], indent = 2): string {
+    const base = ' '.repeat(indent);
+    const item = ' '.repeat(indent + 2);
+    if (values.length === 0) return `${base}${key}: []`;
+    return [`${base}${key}:`, ...values.map(value => `${item}- ${quoteYaml(value)}`)].join('\n');
 }
 
-function yamlBlock(value: string | undefined): string {
+function yamlBlock(value: string | undefined, indent = 4): string {
     if (!value) return "''";
-    return `|-\n${value.split('\n').map(line => `    ${line}`).join('\n')}`;
+    const spaces = ' '.repeat(indent);
+    return `|-\n${value.split('\n').map(line => `${spaces}${line}`).join('\n')}`;
 }
 
 function serializeArtifactsYaml(artifacts: TaskArtifact[]): string {
@@ -341,6 +373,30 @@ function serializeArtifactsYaml(artifacts: TaskArtifact[]): string {
             `    path: ${quoteYaml(artifact.path)}`
         ])
     ].join('\n') + '\n';
+}
+
+function serializeTaskRunsYaml(runs: TaskRun[]): string {
+    if (runs.length === 0) return '  runs: []';
+    return [
+        '  runs:',
+        ...runs.flatMap(run => [
+            `    - run_id: ${quoteYaml(run.runId)}`,
+            `      status: ${quoteYaml(run.status)}`,
+            `      created_at: ${quoteYaml(run.createdAt)}`,
+            `      completed_at: ${quoteYaml(run.completedAt)}`,
+            '      wait_groups:',
+            ...(run.waitGroups.length
+                ? run.waitGroups.flatMap(group => [
+                    `        - wait_id: ${quoteYaml(group.waitId)}`,
+                    `          mode: ${quoteYaml(group.mode)}`,
+                    `          status: ${quoteYaml(group.status)}`,
+                    yamlStringList('task_ids', group.taskIds, 10),
+                    yamlStringList('processed_event_ids', group.processedEventIds, 10)
+                ])
+                : ['        []']),
+            `      result_messages: ${yamlBlock(run.resultMessages.map(message => `${message.role}/${message.type}: ${message.text ?? ''}`).join('\n'), 8)}`
+        ])
+    ].join('\n');
 }
 
 function serializeTaskYaml(task: Task): string {
@@ -367,10 +423,9 @@ function serializeTaskYaml(task: Task): string {
         `  status: ${quoteYaml(task.status)}`,
         `  retry_count: ${task.retryCount}`,
         `  max_retries: ${MAX_TASK_RETRIES}`,
-        `  subtask_mode: ${quoteYaml(task.options.subtaskMode)}`,
+        `  active_run_id: ${quoteYaml(task.activeRunId)}`,
         yamlStringList('subtask_ids', task.subtaskIds),
-        yamlStringList('waiting_for_task_ids', task.waitingForTaskIds),
-        yamlStringList('processed_event_ids', [...task.processedEventIds]),
+        serializeTaskRunsYaml(task.runs),
         `  result_messages: ${yamlBlock(task.resultMessages.map(message => `${message.role}/${message.type}: ${message.text ?? ''}`).join('\n'))}`
     ].join('\n') + '\n';
 }
@@ -555,11 +610,12 @@ Se a propria task nao atingiu o objetivo, retorne status retry com novas instruc
 Quando precisar produzir arquivo, use create_artifact. Nunca escreva artefatos por outro caminho.
 Depois de criar subtasks, retorne JSON aguardando as task_ids criadas.
 Se ja houver subtasks listadas para o mesmo pedido, nao crie outra; use os resultados existentes.
-Para WAIT_ALL, aguarde todas antes de processar. Para ON_DEMAND, processe cada conclusao quando ela chegar.
+Para esperas mistas, retorne waitGroups no status waiting. Cada waitGroup tem waitId, mode e taskIds.
+WAIT_ALL entrega os eventos do grupo juntos quando todas as taskIds completarem. ON_DEMAND entrega uma task concluida por vez.
 Responda sempre somente JSON no formato:
 {"status":"completed","messages":[{"type":"text","text":"resultado final"}]}
 ou
-{"status":"waiting","waitMode":"WAIT_ALL|ON_DEMAND","waitingForTaskIds":["id"],"messages":[{"type":"text","text":"motivo curto"}]}
+{"status":"waiting","waitGroups":[{"waitId":"grupo-a","mode":"WAIT_ALL|ON_DEMAND","taskIds":["id"]}],"messages":[{"type":"text","text":"motivo curto"}]}
 ou
 {"status":"retry","instructions":"novas instrucoes objetivas","model":"fast|balanced|deep","effort":"off|minimal|low|medium|high|xhigh","messages":[{"type":"text","text":"motivo curto"}]}
 Mensagens devem usar type text, artifact ou event. Quando status for completed, messages deve conter apenas a resposta final ao usuario, sem explicar o workflow.`,
@@ -665,13 +721,17 @@ Mensagens devem usar type text, artifact ou event. Quando status for completed, 
             .map(subtask => `- ${subtask.options.task_id} ${subtask.options.title} (${subtask.options.assignedTo}) [${subtask.status}]: ${formatMessages(subtask.resultMessages) || 'sem mensagens'}`)
             .join('\n');
         const eventSummary = triggerEvents.length
-            ? triggerEvents.map(event => `- ${event.event_id}: task ${event.taskId} concluida com mensagens: ${formatMessages(event.messages ?? [])}`).join('\n')
+            ? triggerEvents.map(event => `- ${event.event_id}: run ${event.runId ?? '-'} wait ${event.waitId ?? '-'} task ${event.taskId} concluida com mensagens: ${formatMessages(event.messages ?? [])}`).join('\n')
             : 'inicio ou retomada sem novo evento.';
+        const runSummary = task.runs.length
+            ? task.runs.map(run => `- ${run.runId} [${run.status}]: ${run.waitGroups.map(group => `${group.waitId}/${group.mode}/${group.status} tasks=${group.taskIds.join(',')} processed=${group.processedEventIds.join(',')}`).join(' ; ')}`).join('\n')
+            : 'Sem runs.';
 
         return [
             `Tarefa: ${task.options.title}`,
             `Eventos recebidos:\n${eventSummary}`,
             subtaskResults ? `Subtasks:\n${subtaskResults}` : 'Sem subtasks.',
+            `Runs:\n${runSummary}`,
             `Task chat:\n${task.chat.map(formatChatMessage).join('\n')}`,
             task.piSessionFile ? `Sessao Pi persistida: ${task.piSessionFile}` : 'Sem sessao Pi persistida.',
             'Continue a partir do historico anterior da sessao, decida o proximo passo e retorne somente o JSON estruturado.'
@@ -802,21 +862,24 @@ class Orquestrator extends EventEmitter {
             }
 
             if (decision.status === 'waiting') {
-                task.options.subtaskMode = decision.waitMode ?? 'WAIT_ALL';
-                task.waitingForTaskIds = decision.waitingForTaskIds?.length
-                    ? decision.waitingForTaskIds
-                    : this.getSubtasks(task).filter(st => st.status !== 'COMPLETED').map(st => st.options.task_id);
-                task.resultMessages = task.appendAgentMessages(decision.messages);
-                task.status = 'WAITING';
                 this.markEventsProcessed(task, triggerEvents);
+                task.resultMessages = task.appendAgentMessages(decision.messages);
+                const activeRun = this.getActiveRun(task);
+                if (activeRun?.waitGroups.some(group => group.status === 'WAITING')) {
+                    activeRun.resultMessages = task.resultMessages;
+                } else {
+                    this.startRun(task, this.normalizeWaitGroups(task, decision), task.resultMessages);
+                }
+                task.status = 'WAITING';
                 this.persist();
-                console.log(`[${agent.name}] Suspenso em ${task.options.subtaskMode}: ${task.waitingForTaskIds.join(', ')}`);
+                console.log(`[${agent.name}] Suspenso em waitGroups: ${this.getActiveRun(task)?.waitGroups.map(group => `${group.waitId}/${group.mode}`).join(', ')}`);
                 return;
             }
 
             task.resultMessages = task.appendAgentMessages(decision.messages);
             task.status = 'COMPLETED';
             this.markEventsProcessed(task, triggerEvents);
+            this.completeActiveRun(task);
             this.recordCompletionEvent(task);
             this.persist();
             console.log(`[${agent.name}] Concluiu: "${task.options.title}" (Status: COMPLETED)`);
@@ -859,6 +922,8 @@ class Orquestrator extends EventEmitter {
             allowedEfforts: ALLOWED_EFFORTS,
             retryCount: task.retryCount,
             maxRetries: MAX_TASK_RETRIES,
+            activeRunId: task.activeRunId,
+            runs: task.runs,
             taskChat: task.chat,
             artifacts: task.artifacts
         };
@@ -906,22 +971,86 @@ class Orquestrator extends EventEmitter {
         this.events = state.events;
     }
 
-    private getReadyEvents(task: Task): TaskEvent[] {
-        const completionEvents = this.events.filter(event =>
-            event.type === 'TASK_COMPLETED' &&
-            task.waitingForTaskIds.includes(event.taskId) &&
-            !event.processedByTaskIds.includes(task.options.task_id)
+    private getActiveRun(task: Task): TaskRun | undefined {
+        return task.activeRunId ? task.runs.find(run => run.runId === task.activeRunId) : undefined;
+    }
+
+    private startRun(task: Task, waitGroups: AgentWaitGroup[], resultMessages: TaskChatMessage[]) {
+        const run: TaskRun = {
+            runId: this.createId(),
+            status: 'WAITING',
+            waitGroups: waitGroups.map(group => ({
+                waitId: group.waitId,
+                mode: group.mode,
+                taskIds: group.taskIds,
+                processedEventIds: [],
+                status: 'WAITING'
+            })),
+            resultMessages,
+            createdAt: new Date().toISOString()
+        };
+        task.activeRunId = run.runId;
+        task.runs.push(run);
+    }
+
+    private completeActiveRun(task: Task) {
+        const run = this.getActiveRun(task);
+        if (!run) return;
+        run.status = 'COMPLETED';
+        run.completedAt = new Date().toISOString();
+        for (const group of run.waitGroups) group.status = 'PROCESSED';
+        task.activeRunId = undefined;
+    }
+
+    private normalizeWaitGroups(task: Task, decision: AgentDecision): AgentWaitGroup[] {
+        const waitGroups = decision.waitGroups?.filter(group =>
+            group.waitId &&
+            (group.mode === 'WAIT_ALL' || group.mode === 'ON_DEMAND') &&
+            group.taskIds.length > 0
         );
+        if (waitGroups?.length) return waitGroups;
 
-        if (task.options.subtaskMode === 'ON_DEMAND') return completionEvents.slice(0, 1);
+        const taskIds = decision.waitingForTaskIds?.length
+            ? decision.waitingForTaskIds
+            : this.getSubtasks(task).filter(subtask => subtask.status !== 'COMPLETED').map(subtask => subtask.options.task_id);
+        return [{ waitId: 'default', mode: decision.waitMode ?? 'WAIT_ALL', taskIds }];
+    }
 
-        const allCompleted = task.waitingForTaskIds.every(taskId => this.tasks.get(taskId)?.status === 'COMPLETED');
-        return allCompleted ? completionEvents : [];
+    private getReadyEvents(task: Task): TaskEvent[] {
+        const run = this.getActiveRun(task);
+        if (!run || run.status !== 'WAITING') return [];
+
+        for (const group of run.waitGroups) {
+            if (group.status === 'PROCESSED') continue;
+            const completionEvents = this.events
+                .filter(event =>
+                    event.type === 'TASK_COMPLETED' &&
+                    group.taskIds.includes(event.taskId) &&
+                    !event.processedByTaskIds.includes(task.options.task_id) &&
+                    !group.processedEventIds.includes(event.event_id)
+                )
+                .map(event => ({ ...event, runId: run.runId, waitId: group.waitId }));
+
+            if (group.mode === 'ON_DEMAND' && completionEvents.length > 0) return [completionEvents[0]];
+
+            const allCompleted = group.taskIds.every(taskId => this.tasks.get(taskId)?.status === 'COMPLETED');
+            if (group.mode === 'WAIT_ALL' && allCompleted) return completionEvents;
+        }
+
+        return [];
     }
 
     private markEventsProcessed(task: Task, triggerEvents: TaskEvent[]) {
+        const run = this.getActiveRun(task);
         for (const event of triggerEvents) {
-            task.processedEventIds.add(event.event_id);
+            const group = run?.waitGroups.find(candidate => candidate.waitId === event.waitId);
+            if (group && !group.processedEventIds.includes(event.event_id)) {
+                group.processedEventIds.push(event.event_id);
+                const completedTaskIds = new Set(this.events
+                    .filter(candidate => group.taskIds.includes(candidate.taskId) && group.processedEventIds.includes(candidate.event_id))
+                    .map(candidate => candidate.taskId));
+                if (group.taskIds.every(taskId => completedTaskIds.has(taskId))) group.status = 'PROCESSED';
+            }
             if (!event.processedByTaskIds.includes(task.options.task_id)) {
                 event.processedByTaskIds.push(task.options.task_id);
             }
@@ -981,11 +1110,24 @@ class Orquestrator extends EventEmitter {
                 };
             }
             if (parsed.status === 'waiting') {
+                const waitGroups = Array.isArray(parsed.waitGroups)
+                    ? parsed.waitGroups
+                        .map(group => {
+                            if (!group || typeof group !== 'object') return undefined;
+                            const candidate = group as Partial<AgentWaitGroup>;
+                            if (typeof candidate.waitId !== 'string' || candidate.waitId.trim() === '') return undefined;
+                            if (candidate.mode !== 'WAIT_ALL' && candidate.mode !== 'ON_DEMAND') return undefined;
+                            if (!Array.isArray(candidate.taskIds) || !candidate.taskIds.every(taskId => typeof taskId === 'string')) return undefined;
+                            return { waitId: candidate.waitId, mode: candidate.mode, taskIds: candidate.taskIds };
+                        })
+                        .filter((group): group is AgentWaitGroup => Boolean(group))
+                    : undefined;
                 return {
                     status: 'waiting',
                     messages: normalizeAgentMessages(parsed.messages),
                     waitMode: parsed.waitMode === 'ON_DEMAND' ? 'ON_DEMAND' : 'WAIT_ALL',
-                    waitingForTaskIds: parsed.waitingForTaskIds ?? []
+                    waitingForTaskIds: parsed.waitingForTaskIds ?? [],
+                    waitGroups
                 };
             }
             return { status: 'completed', messages: normalizeAgentMessages(parsed.messages) };

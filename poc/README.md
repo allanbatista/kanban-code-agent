@@ -16,7 +16,7 @@ Requer `OPENROUTER_API_KEY`.
 ## Arquitetura
 
 - `Orquestrator` cria tasks, agenda execucoes, persiste estado e emite eventos de conclusao.
-- `Task` contem titulo, status, chat, subtasks, artefatos e sessao Pi persistida.
+- `Task` contem titulo, status, chat, subtasks, runs de orquestracao, artefatos e sessao Pi persistida.
 - `PiAgentClient` executa agents com ferramentas de leitura, `create_subtask` e `create_artifact`.
 - Estado global: `.swarm-state.json`.
 - Arquivos por task: `tasks/{task_id}/task.yml`, `chat.jsonl`, `session.jsonl`, `attachments/`, `artifacts/`, `artifacts.yaml`.
@@ -28,6 +28,9 @@ Requer `OPENROUTER_API_KEY`.
 - Attachments do usuario entram apenas na criacao da task pelo CLI.
 - Attachments sao copiados para `tasks/{task_id}/attachments/{uuid}-{original name}`.
 - Agents retornam `messages[]` para `completed`, `waiting` e `retry`.
+- `waiting` aceita `waitGroups[]` para misturar grupos `WAIT_ALL` e `ON_DEMAND` na mesma task.
+- `WAIT_ALL` entrega os resultados do grupo juntos quando todas as subtasks completarem.
+- `ON_DEMAND` entrega cada subtask concluida individualmente.
 - Agents criam artefatos somente via `create_artifact`.
 - Artefatos ficam em `tasks/{task_id}/artifacts/` e sao indexados em `artifacts.yaml`.
 - Caminhos persistidos em estado, chat, YAML, attachments e artifacts sao relativos ao diretorio da propria task.
@@ -39,4 +42,19 @@ Requer `OPENROUTER_API_KEY`.
 - `AttachmentRef`: `{ id, originalName, path }`.
 - `TaskArtifact`: `{ description, file_type, path }`.
 - `TaskChatMessage`: `{ ts, role, type, text?, attachments?, artifacts?, runtimeConfig? }`.
-- `AgentDecision`: JSON com `status` e `messages[]`; `waiting` pode incluir `waitMode` e `waitingForTaskIds`; `retry` pode incluir `instructions`, `model` e `effort`.
+- `WaitGroup`: `{ waitId, mode, taskIds, processedEventIds, status }`.
+- `TaskRun`: `{ runId, status, waitGroups, resultMessages, createdAt, completedAt? }`.
+- `AgentDecision`: JSON com `status` e `messages[]`; `waiting` deve incluir `waitGroups`; `retry` pode incluir `instructions`, `model` e `effort`.
+
+Exemplo de `waiting`:
+
+```json
+{
+  "status": "waiting",
+  "waitGroups": [
+    { "waitId": "telas", "mode": "WAIT_ALL", "taskIds": ["s1", "s2"] },
+    { "waitId": "stream", "mode": "ON_DEMAND", "taskIds": ["s3", "s4"] }
+  ],
+  "messages": [{ "type": "text", "text": "aguardando grupos" }]
+}
+```
