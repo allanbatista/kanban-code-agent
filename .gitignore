@@ -11,3 +11,23 @@ tmp/
 .features/
 /current_state/
 
+# Build artifacts
+*.tsbuildinfo
+
+# ESLint
+.eslintcache
+
+# Coverage
+coverage/
+
+# Vitest
+.vitest/
+
+# Source maps
+*.js.map
+
+#graphify
+/graphify-runs/
+/graphify-out/cache/
+/graphify-out/cost.json
+
