@@ -79,10 +79,11 @@ export function TaskCard({ task }: TaskCardProps) {
   const shortId = (id: string) => `#${id.slice(0, 8)}`;
 
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
+    <div ref={setNodeRef} style={style} {...attributes} {...listeners} className="group">
       <Card
         className={cn(
-          'cursor-pointer border-l-[6px] p-3 transition-all duration-200 bg-transparent',
+          'cursor-pointer border-l-[6px] p-[10px] transition-all duration-200 bg-transparent',
+          'group-hover:bg-black/20 group-hover:scale-[1.025] group-hover:shadow-lg group-hover:shadow-black/30',
           isDragging && 'opacity-50 shadow-2xl ring-2 ring-primary/50'
         )}
         style={{ borderLeftColor: treeColor } as React.CSSProperties}
@@ -91,12 +92,12 @@ export function TaskCard({ task }: TaskCardProps) {
         {/* Meta: ID + data + duração + workflow */}
         <div className="mb-1 flex items-center justify-between">
           <div className="flex items-center gap-1.5 min-w-0">
-            <span className="font-mono text-[10px] text-muted-foreground/60 shrink-0">{shortId(task.id)}</span>
+            <span className="font-mono text-[10px] text-muted-foreground/60 group-hover:text-white/90 shrink-0">{shortId(task.id)}</span>
             {createdAt && (
-              <span className="text-[10px] text-muted-foreground/50 shrink-0">{createdAt}</span>
+              <span className="text-[10px] text-muted-foreground/50 group-hover:text-white/80 shrink-0">{createdAt}</span>
             )}
             {task.metrics.durationMs > 0 && (
-              <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground/50 shrink-0">
+              <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground/50 group-hover:text-white/80 shrink-0">
                 <span>·</span>
                 <Clock className="h-2.5 w-2.5" />
                 {formatDuration(task.metrics.durationMs)}
@@ -105,7 +106,7 @@ export function TaskCard({ task }: TaskCardProps) {
           </div>
           <button
             onClick={handleDagClick}
-            className="text-muted-foreground/40 transition-colors hover:text-foreground shrink-0"
+            className="text-muted-foreground/40 transition-colors hover:text-foreground group-hover:text-white shrink-0"
             title="Visualizar workflow"
           >
             <GitBranch className="h-3 w-3" />
@@ -113,7 +114,7 @@ export function TaskCard({ task }: TaskCardProps) {
         </div>
 
         {/* Título */}
-        <p className="mb-2 line-clamp-2 min-h-[2.5rem] text-sm font-medium leading-tight">{task.title}</p>
+        <p className="mb-2 line-clamp-2 min-h-[2.5rem] text-sm font-medium leading-tight group-hover:text-white">{task.title}</p>
 
         {/* Status + ancestors */}
         <div className="flex items-center justify-between gap-1">
@@ -123,7 +124,7 @@ export function TaskCard({ task }: TaskCardProps) {
               {parentId && parentId !== rootId && (
                 <button
                   onClick={(e) => openTaskModal(e, parentId)}
-                  className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-400 hover:bg-amber-500/20 transition-colors font-mono"
+                  className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-400 hover:bg-amber-500/20 transition-colors group-hover:bg-amber-500/20 group-hover:text-amber-300 font-mono"
                   title={`Parent: ${parentId}`}
                 >
                   {shortId(parentId)}
@@ -131,7 +132,7 @@ export function TaskCard({ task }: TaskCardProps) {
               )}
               <button
                 onClick={(e) => openTaskModal(e, rootId)}
-                className="inline-flex items-center rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[10px] text-violet-400 hover:bg-violet-500/20 transition-colors font-mono"
+                className="inline-flex items-center rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[10px] text-violet-400 hover:bg-violet-500/20 transition-colors group-hover:bg-violet-500/20 group-hover:text-violet-300 font-mono"
                 title={`Main: ${rootId}`}
               >
                 {shortId(rootId)}

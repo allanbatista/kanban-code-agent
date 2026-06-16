@@ -19,7 +19,7 @@ export function Navbar() {
 
   return (
     <>
-      <nav className="fixed top-0 left-0 right-0 z-40 h-14 backdrop-blur-md bg-background/90 border-b border-border/50 shadow-sm">
+      <nav className="fixed top-0 left-0 right-0 z-40 h-14 backdrop-blur-md bg-black/10 border-b border-border/50 shadow-sm">
         <div className="flex items-center h-full px-4 gap-4">
           <Link to="/" className="flex items-center gap-2 font-semibold text-foreground shrink-0">
             <Workflow className="h-5 w-5 text-primary" />
