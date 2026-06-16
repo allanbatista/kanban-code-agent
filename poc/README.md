@@ -1,6 +1,65 @@
 # Swarm PoC
 
-PoC simples de swarm multi-agent/task em um unico arquivo: `index.ts`.
+PoC de um agent swarm multi-agent/task. Contém:
+- Orquestrador de agents em `index.ts` (CLI)
+- UI web em `layout/` (Vite + React 19 + shadcn/ui + Tailwind v4)
+
+## UI Web
+
+Interface single-page para orquestração visual de agents de IA em formato kanban com chat integrado e visualização DAG de workflow.
+
+### Visual System
+- Tema dark elegante: deep navy/graphite, primary periwinkle/indigo e status colors tonais.
+- Superfícies com blur, bordas suaves e hierarquia visual consistente em kanban, projects, settings e workflow.
+- Validação visual: `cd layout && npm run build && npm run lint`, depois browser em `/`, `/projects`, `/projects/:id` e `/settings`.
+
+### Stack
+- React 19 + Vite 8 + TypeScript 6 + Tailwind CSS 4 + shadcn/ui (Radix)
+- zustand (estado), react-router-dom (rotas + URL state)
+- @xyflow/react (DAG), @dnd-kit (drag & drop), lucide-react (ícones)
+
+### Rotas
+| Rota | Página |
+|------|--------|
+| `/` | Kanban Board |
+| `/projects` | Projects Grid |
+| `/projects/:id` | Project Detail |
+| `/settings` | Settings |
+
+URL state via searchParams: `?task=<id>&tab=<chat|prompt|workflow>&section=<appearance|providers|advanced>`
+
+### Uso
+
+```bash
+cd layout
+pnpm install
+pnpm run dev
+```
+
+### Build
+
+```bash
+cd layout
+pnpm run build
+```
+
+### Estrutura do Layout
+
+```
+layout/
+├── src/
+│   ├── components/{ui,layout,kanban,workflow,projects,settings,shared}/
+│   ├── stores/{kanbanStore,projectsStore,settingsStore}.ts
+│   ├── hooks/{useLocalStorage,useSearchParamsState,useDragAndDrop}.ts
+│   ├── types/{task,project,provider,settings}.ts
+│   └── mocks/{mockTasks,mockAgents,mockProjects,mockChat,mockProviders}.ts
+├── screenshots/        # Capturas de validação
+└── [config files]
+```
+
+---
+
+## PoC original (index.ts)
 
 ## Uso do CLI
 
