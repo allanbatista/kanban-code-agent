@@ -21,7 +21,43 @@ interface AgentColumnProps {
   subAgentTasks?: Task[];
 }
 
+function ColumnHeader({ name, icon, color, tasks }: { name: string; icon: string; color: string; tasks: Task[] }) {
+  const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string; style?: React.CSSProperties }>>)[icon] ?? LucideIcons.Bot;
+  const runningCount = tasks.filter(t => t.status === 'RUNNING').length;
+
+  return (
+    <div className="flex items-center justify-between border-b border-border/50 px-3 py-[10px] shrink-0">
+      <div className="flex items-center gap-2">
+        <IconComponent className="h-4 w-4" style={{ color }} />
+        <span className="text-sm font-medium">{name}</span>
+      </div>
+      <Badge
+        variant="outline"
+        className={cn(
+          'text-xs border-border/60 bg-background/50',
+          runningCount > 0 ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300' : 'text-muted-foreground'
+        )}
+      >
+        {runningCount}/{tasks.length}
+      </Badge>
+    </div>
+  );
+}
+
+function ColumnBody({ taskIds, isOver, children }: { taskIds: string[]; isOver: boolean; children: React.ReactNode }) {
+  return (
+    <ScrollArea className={cn('min-h-0 flex-1 px-2 transition-colors', isOver && 'bg-primary/5')}>
+      <SortableContext items={taskIds} strategy={verticalListSortingStrategy}>
+        <div className="space-y-2 py-2">
+          {children}
+        </div>
+      </SortableContext>
+    </ScrollArea>
+  );
+}
+
 interface AgentPanelProps {
+  droppableId: string;
   name: string;
   icon: string;
   color: string;
@@ -30,64 +66,40 @@ interface AgentPanelProps {
 }
 
 const AgentPanel = forwardRef<HTMLDivElement, AgentPanelProps>(function AgentPanel(
-  { name, icon, color, tasks, className },
-  ref
+  { droppableId, name, icon, color, tasks, className },
+  _ref
 ) {
-  const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string; style?: React.CSSProperties }>>)[icon] ?? LucideIcons.Bot;
-  const runningCount = tasks.filter(t => t.status === 'RUNNING').length;
+  const { setNodeRef, isOver } = useDroppable({ id: droppableId });
 
   return (
     <div
-      ref={ref}
-      style={{ height: '100%' }}
-      className={cn('flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border/60 bg-card/90 shadow-xl shadow-black/20 backdrop-blur-sm', className)}
+      className={cn('flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border/60 shadow-xl shadow-black/20 backdrop-blur-sm', className)}
     >
-      <div className="mb-3 flex items-center justify-between border-b border-border/50 bg-background/30 px-3 py-[10px]">
-        <div className="flex items-center gap-2">
-          <IconComponent className="h-4 w-4" style={{ color }} />
-          <span className="text-sm font-medium">{name}</span>
-        </div>
-        <Badge
-          variant="outline"
-          className={cn(
-            'text-xs border-border/60 bg-background/50',
-            runningCount > 0 ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300' : 'text-muted-foreground'
+      <ColumnHeader name={name} icon={icon} color={color} tasks={tasks} />
+      <div ref={setNodeRef} className="min-h-0 flex-1 flex flex-col overflow-hidden">
+        <ColumnBody taskIds={tasks.map(t => t.id)} isOver={isOver}>
+          {tasks.length === 0 ? (
+            <EmptyState title="Sem tasks" className="py-6" />
+          ) : (
+            tasks.map(task => <TaskCard key={task.id} task={task} />)
           )}
-        >
-          {runningCount}/{tasks.length}
-        </Badge>
+        </ColumnBody>
       </div>
-      <ScrollArea className="min-h-0 flex-1 px-2">
-        <SortableContext items={tasks.map(t => t.id)} strategy={verticalListSortingStrategy}>
-          <div className="space-y-2 pb-2">
-            {tasks.length === 0 ? (
-              <EmptyState title="Sem tasks" className="py-6" />
-            ) : (
-              tasks.map(task => <TaskCard key={task.id} task={task} />)
-            )}
-          </div>
-        </SortableContext>
-      </ScrollArea>
     </div>
   );
 });
 AgentPanel.displayName = 'AgentPanel';
 
 export function AgentColumn({ id, name, icon, color, tasks, isMulti, subAgentName, subAgentColor, subAgentTasks }: AgentColumnProps) {
-  const { setNodeRef, isOver } = useDroppable({ id: `column-${id}` });
-
   if (isMulti && subAgentName !== undefined && subAgentTasks !== undefined) {
     return (
       <div
-        ref={setNodeRef}
         style={{ height: '100%' }}
-        className={cn(
-          'flex h-full min-h-0 min-w-[280px] flex-1 flex-col gap-4 rounded-2xl',
-          isOver && 'ring-2 ring-primary/60'
-        )}
+        className="flex h-full min-h-0 min-w-[280px] flex-1 flex-col gap-4 rounded-2xl"
       >
-        <AgentPanel name={name} icon={icon} color={color} tasks={tasks} className="flex-1" />
+        <AgentPanel droppableId={`drop-${id}-top`} name={name} icon={icon} color={color} tasks={tasks} className="flex-1" />
         <AgentPanel
+          droppableId={`drop-${id}-bottom`}
           name={subAgentName}
           icon="Bot"
           color={subAgentColor ?? color}
@@ -100,12 +112,12 @@ export function AgentColumn({ id, name, icon, color, tasks, isMulti, subAgentNam
 
   return (
     <AgentPanel
-      ref={setNodeRef}
+      droppableId={`drop-${id}`}
       name={name}
       icon={icon}
       color={color}
       tasks={tasks}
-      className={cn('h-full min-w-[280px]', isOver && 'ring-2 ring-primary/60')}
+      className="h-full min-w-[280px]"
     />
   );
 }

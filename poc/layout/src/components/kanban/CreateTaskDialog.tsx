@@ -33,7 +33,7 @@ export function CreateTaskDialog({ open, onOpenChange }: CreateTaskDialogProps) 
       chat: [],
       artifacts: [],
       attachments: [],
-      metrics: { durationMs: 0, tokens: { input: 0, output: 0, total: 0 }, cost: 0 },
+      metrics: { durationMs: 0, waitingMs: 0, tokens: { input: 0, output: 0, total: 0, cache: 0 }, cost: 0 },
       retryCount: 0,
       runs: [],
     };

@@ -14,7 +14,7 @@ export function AnimatedEdge({
     <>
       <BaseEdge id={id} path={edgePath} style={style} {...delegated} />
       {animated && (
-        <circle r="4" fill={typeof style === 'object' && style && 'stroke' in style ? String(style.stroke) : 'var(--primary)'}>
+        <circle r="4" fill={typeof style === 'object' && style && 'stroke' in style ? String(style.stroke) : 'var(--color-primary)'}>
           <animateMotion dur="1.5s" repeatCount="indefinite">
             <mpath href={`#${id}`} />
           </animateMotion>

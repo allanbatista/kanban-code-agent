@@ -34,6 +34,7 @@
     "date-fns": "^4.4.0",
     "lucide-react": "^1.17.0",
     "react": "^19.2.6",
+    "react-colorful": "^5.7.0",
     "react-dom": "^19.2.6",
     "react-router-dom": "^7.17.0",
     "react-syntax-highlighter": "^16.1.1",

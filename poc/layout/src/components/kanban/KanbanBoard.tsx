@@ -52,7 +52,7 @@ export function KanbanBoard() {
   const [activeTask, setActiveTask] = useState<Task | null>(null);
 
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
+    useSensor(PointerSensor, { activationConstraint: { distance: 12 } })
   );
 
   const { handleDragStart, handleDragEnd } = useDragAndDrop({
@@ -60,7 +60,7 @@ export function KanbanBoard() {
   });
 
   const openTaskId = searchParams.get('task');
-  const openTab = searchParams.get('tab') as 'chat' | 'prompt' | 'workflow' | null;
+  const openTab = searchParams.get('tab') as 'chat' | 'workflow' | 'history' | 'summary' | null;
 
   const handleCloseDrawer = () => {
     const params = new URLSearchParams(searchParams);

@@ -3,48 +3,50 @@
 
 @custom-variant dark (&:is(.dark *));
 
+@theme {
+  --color-background: #0f1419;
+  --color-foreground: #e1e4e8;
+  --color-card: #1c2433;
+  --color-card-foreground: #e1e4e8;
+  --color-popover: #1c2433;
+  --color-popover-foreground: #e1e4e8;
+  --color-primary: #7c7cff;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #252d3a;
+  --color-secondary-foreground: #d1d5db;
+  --color-muted: #1f2937;
+  --color-muted-foreground: #9ca3af;
+  --color-accent: #8b7cf6;
+  --color-accent-foreground: #ffffff;
+  --color-destructive: #f87171;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #374151;
+  --color-input: #252d3a;
+  --color-ring: #7c7cff;
+  --color-sidebar-background: #111827;
+  --color-sidebar-foreground: #e1e4e8;
+  --color-sidebar-primary: #7c7cff;
+  --color-sidebar-primary-foreground: #ffffff;
+  --color-sidebar-accent: #1f2937;
+  --color-sidebar-accent-foreground: #d1d5db;
+  --color-sidebar-border: #374151;
+  --color-sidebar-ring: #7c7cff;
+  --color-status-running: #34d399;
+  --color-status-waiting: #60a5fa;
+  --color-status-completed: #10b981;
+  --color-status-failed: #f87171;
+  --color-status-pending: #9ca3af;
+  --color-status-queued: #fbbf24;
+  --color-status-cancelled: #9ca3af;
+}
+
 :root {
   color-scheme: dark;
-  --background: #0f1419;
-  --foreground: #e1e4e8;
-  --card: #1c2433;
-  --card-foreground: #e1e4e8;
-  --popover: #1c2433;
-  --popover-foreground: #e1e4e8;
-  --primary: #7c7cff;
-  --primary-foreground: #ffffff;
-  --secondary: #252d3a;
-  --secondary-foreground: #d1d5db;
-  --muted: #1f2937;
-  --muted-foreground: #9ca3af;
-  --accent: #8b7cf6;
-  --accent-foreground: #ffffff;
-  --destructive: #f87171;
-  --destructive-foreground: #ffffff;
-  --border: #374151;
-  --input: #252d3a;
-  --ring: #7c7cff;
   --radius: 0.75rem;
-  --sidebar-background: #111827;
-  --sidebar-foreground: #e1e4e8;
-  --sidebar-primary: #7c7cff;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #1f2937;
-  --sidebar-accent-foreground: #d1d5db;
-  --sidebar-border: #374151;
-  --sidebar-ring: #7c7cff;
-
-  --status-running: #34d399;
-  --status-waiting: #60a5fa;
-  --status-completed: #10b981;
-  --status-failed: #f87171;
-  --status-pending: #9ca3af;
-  --status-queued: #fbbf24;
-  --status-cancelled: #9ca3af;
 }
 
 * {
-  border-color: var(--border);
+  border-color: var(--color-border);
 }
 
 body {
@@ -53,11 +55,11 @@ body {
     radial-gradient(circle at top, rgba(124, 124, 255, 0.10), transparent 36%),
     radial-gradient(circle at 85% 0%, rgba(45, 212, 191, 0.08), transparent 28%),
     linear-gradient(180deg, #0f1419 0%, #0e1318 100%);
-  color: var(--foreground);
+  color: var(--color-foreground);
   font-family: "Inter", system-ui, -apple-system, sans-serif;
 }
 
 ::selection {
   background: rgba(124, 124, 255, 0.28);
-  color: var(--foreground);
+  color: var(--color-foreground);
 }

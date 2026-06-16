@@ -4,7 +4,8 @@ export interface TaskMetrics {
   startedAt?: string;
   finishedAt?: string;
   durationMs: number;
-  tokens: { input: number; output: number; total: number };
+  waitingMs: number;
+  tokens: { input: number; output: number; total: number; cache: number };
   cost: number;
 }
 
