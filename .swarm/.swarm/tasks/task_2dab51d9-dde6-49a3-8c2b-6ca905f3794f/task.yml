@@ -1,0 +1,48 @@
+{
+  "options": {
+    "taskId": "task_2dab51d9-dde6-49a3-8c2b-6ca905f3794f",
+    "title": "say hello again",
+    "assignedTo": "Manager",
+    "depth": 0,
+    "runtimeConfig": {
+      "model": "balanced",
+      "effort": "medium"
+    }
+  },
+  "status": "FAILED",
+  "subtaskIds": [],
+  "resultMessages": [
+    {
+      "ts": "2026-06-23T22:20:19.795Z",
+      "role": "assistant",
+      "type": "text",
+      "text": "Falha ao executar task: Empty agent output"
+    }
+  ],
+  "runs": [
+    {
+      "runId": "run_79d2d831-9902-4e3b-9d55-b9dde3b0ce35",
+      "status": "FAILED",
+      "waitGroups": [],
+      "resultMessages": [],
+      "createdAt": "2026-06-23T21:30:20.720Z",
+      "startedAt": "2026-06-23T22:20:18.138Z",
+      "error": "Empty agent output",
+      "completedAt": "2026-06-23T22:20:19.794Z"
+    }
+  ],
+  "artifacts": [],
+  "retryCount": 0,
+  "technicalRetryCount": 2,
+  "metrics": {
+    "startedAt": "2026-06-23T21:30:20.720Z",
+    "finishedAt": "2026-06-23T22:20:19.795Z",
+    "durationMs": 9025,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0
+    },
+    "cost": 0
+  }
+}

@@ -1,0 +1,150 @@
+// Tipos que correspondem exatamente ao contrato da API backend
+
+export interface ApiTask {
+  taskId: string;
+  title: string;
+  assignedTo: string;
+  parentId?: string;
+  status: 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+  depth: number;
+  subtaskIds: string[];
+  runtimeConfig: { model?: string; effort?: string };
+  metadata: {
+    taskId: string;
+    title: string;
+    assignedTo: string;
+    parentId?: string;
+    status: string;
+    depth: number;
+    maxDepth: number;
+    canCreateSubtasks: boolean;
+    runtimeConfig: { model: string; effort: string };
+    retryCount: number;
+    technicalRetryCount: number;
+    maxRetries: number;
+    maxTechnicalRetries: number;
+    maxSubtasksPerTask: number;
+    runTimeoutMs: number;
+    activeRunId?: string;
+    runs: ApiTaskRun[];
+    taskChat: ApiChatMessage[];
+    artifacts: ApiArtifact[];
+    metrics: ApiMetrics;
+  };
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface ApiTaskRun {
+  runId: string;
+  status: 'RUNNING' | 'WAITING' | 'COMPLETED' | 'FAILED' | 'TIMEOUT';
+  waitGroups: ApiWaitGroup[];
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+  piSessionFile?: string;
+}
+
+export interface ApiWaitGroup {
+  waitId: string;
+  mode: 'WAIT_ALL' | 'ON_DEMAND';
+  taskIds: string[];
+  processedEventIds: string[];
+  status: 'WAITING' | 'READY' | 'PROCESSED' | 'FAILED';
+}
+
+export interface ApiChatMessage {
+  ts: string;
+  role: 'user' | 'assistant' | 'event';
+  type: 'text' | 'artifact' | 'event';
+  text?: string;
+  attachments?: ApiAttachment[];
+  artifacts?: ApiArtifact[];
+  runtimeConfig?: { model?: string; effort?: string };
+  eventId?: string;
+}
+
+export interface ApiArtifact {
+  description: string;
+  fileType: string;
+  path: string;
+  sizeBytes?: number;
+}
+
+export interface ApiAttachment {
+  id: string;
+  originalName: string;
+  path: string;
+  sizeBytes: number;
+}
+
+export interface ApiMetrics {
+  durationMs: number;
+  tokens: { input: number; output: number; total: number };
+  cost: number;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+export interface ApiAgent {
+  name: string;
+  role: string;
+  runtimeConfig: { model?: string; effort?: string };
+  tools: string[];
+}
+
+export interface ApiProject {
+  id: string;
+  name: string;
+  description: string;
+  taskIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ApiSettings {
+  appearance: {
+    theme: 'light' | 'dark' | 'system';
+    language: string;
+  };
+  providers: ApiProviderConfig[];
+  advanced: {
+    maxConcurrency: number;
+    runTimeoutMs: number;
+    maxTaskDepth: number;
+    maxSubtasksPerTask: number;
+    maxRetries: number;
+    maxTechnicalRetries: number;
+    dataDir: string;
+  };
+}
+
+export interface ApiProviderConfig {
+  name: string;
+  provider: string;
+  modelId: string;
+  apiKey: string;
+  enabled: boolean;
+}
+
+export interface ApiHealth {
+  status: string;
+  uptime: number;
+  version: string;
+}
+
+// Respostas envelopadas da API
+export interface ApiTaskListResponse {
+  tasks: ApiTask[];
+  total: number;
+}
+
+export interface ApiAgentListResponse {
+  agents: ApiAgent[];
+  total: number;
+}
+
+export interface ApiProjectListResponse {
+  projects: ApiProject[];
+  total: number;
+}

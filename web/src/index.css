@@ -1,0 +1,143 @@
+@import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --color-background: #0f1419;
+  --color-foreground: #e1e4e8;
+  --color-card: #1c2433;
+  --color-card-foreground: #e1e4e8;
+  --color-popover: #1c2433;
+  --color-popover-foreground: #e1e4e8;
+  --color-primary: #7c7cff;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #252d3a;
+  --color-secondary-foreground: #d1d5db;
+  --color-muted: #1f2937;
+  --color-muted-foreground: #9ca3af;
+  --color-accent: #8b7cf6;
+  --color-accent-foreground: #ffffff;
+  --color-destructive: #f87171;
+  --color-destructive-foreground: #ffffff;
+  --color-border: #374151;
+  --color-input: #252d3a;
+  --color-ring: #7c7cff;
+  --color-sidebar-background: #111827;
+  --color-sidebar-foreground: #e1e4e8;
+  --color-sidebar-primary: #7c7cff;
+  --color-sidebar-primary-foreground: #ffffff;
+  --color-sidebar-accent: #1f2937;
+  --color-sidebar-accent-foreground: #d1d5db;
+  --color-sidebar-border: #374151;
+  --color-sidebar-ring: #7c7cff;
+  --color-status-running: #34d399;
+  --color-status-waiting: #60a5fa;
+  --color-status-completed: #10b981;
+  --color-status-failed: #f87171;
+  --color-status-pending: #9ca3af;
+  --color-status-queued: #fbbf24;
+  --color-status-cancelled: #9ca3af;
+}
+
+:root {
+  color-scheme: dark;
+  --radius: 0.75rem;
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+html, body {
+  overflow: hidden;
+}
+
+body {
+  min-height: 100vh;
+  background: #0f1419;
+  color: var(--color-foreground);
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+/* Animated gradient background layers */
+.background {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  isolation: isolate;
+  background:
+    radial-gradient(circle at var(--mouse-x, 50%) var(--mouse-y, 50%), rgba(255, 255, 255, 0.075), transparent 24%),
+    linear-gradient(135deg, #030610 0%, #07091c 38%, #050014 70%, #020617 100%);
+}
+
+.bg-gradient-layer {
+  position: absolute;
+  inset: -55vmax;
+  pointer-events: none;
+  will-change: transform, opacity;
+  transform: translate3d(0, 0, 0);
+  filter: blur(26px) saturate(1.28);
+}
+
+.bg-vignette {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: radial-gradient(circle at center, transparent 0%, rgba(0, 0, 0, 0.12) 58%, rgba(0, 0, 0, 0.46) 100%);
+}
+
+.bg-grain {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0.028;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='256' height='256' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px;
+}
+
+@keyframes driftOne {
+  0% { transform: translate3d(-4%, -3%, 0) scale(1.1); }
+  25% { transform: translate3d(5%, -5%, 0) scale(1.16); }
+  50% { transform: translate3d(6%, 4%, 0) scale(1.13); }
+  75% { transform: translate3d(-3%, 6%, 0) scale(1.18); }
+  100% { transform: translate3d(-4%, -3%, 0) scale(1.1); }
+}
+
+@keyframes driftTwo {
+  0% { transform: translate3d(3%, 4%, 0) scale(1.08); }
+  25% { transform: translate3d(-5%, 2%, 0) scale(1.14); }
+  50% { transform: translate3d(-2%, -5%, 0) scale(1.1); }
+  75% { transform: translate3d(4%, -3%, 0) scale(1.15); }
+  100% { transform: translate3d(3%, 4%, 0) scale(1.08); }
+}
+
+@keyframes driftThree {
+  0% { transform: translate3d(2%, -4%, 0) scale(1.06); }
+  25% { transform: translate3d(-4%, -2%, 0) scale(1.12); }
+  50% { transform: translate3d(-3%, 5%, 0) scale(1.09); }
+  75% { transform: translate3d(5%, 3%, 0) scale(1.14); }
+  100% { transform: translate3d(2%, -4%, 0) scale(1.06); }
+}
+
+@keyframes driftFour {
+  0% { transform: translate3d(-3%, 2%, 0) scale(1.04); }
+  25% { transform: translate3d(4%, 5%, 0) scale(1.1); }
+  50% { transform: translate3d(5%, -3%, 0) scale(1.07); }
+  75% { transform: translate3d(-4%, -4%, 0) scale(1.12); }
+  100% { transform: translate3d(-3%, 2%, 0) scale(1.04); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bg-gradient-layer {
+    animation: none !important;
+  }
+}
+
+::selection {
+  background: rgba(124, 124, 255, 0.28);
+  color: var(--color-foreground);
+}

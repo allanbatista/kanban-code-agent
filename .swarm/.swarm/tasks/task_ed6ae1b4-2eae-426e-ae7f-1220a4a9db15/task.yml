@@ -1,0 +1,47 @@
+{
+  "options": {
+    "taskId": "task_ed6ae1b4-2eae-426e-ae7f-1220a4a9db15",
+    "title": "diga oi",
+    "assignedTo": "Manager",
+    "depth": 0,
+    "runtimeConfig": {
+      "model": "fast",
+      "effort": "off"
+    }
+  },
+  "status": "COMPLETED",
+  "subtaskIds": [],
+  "resultMessages": [
+    {
+      "ts": "2026-06-23T15:37:06.189Z",
+      "role": "assistant",
+      "type": "text",
+      "text": "The task is simple: \"diga oi\" (say hi). Let me respond with the structured JSON output as requested.\n\n```json\n{\n  \"runId\": \"run_28f52d5b-579b-4589-97ae-b4e518bd47a7\",\n  \"status\": \"COMPLETED\",\n  \"userMessages\": [],\n  \"resultMessages\": [\n    {\n      \"type\": \"text\",\n      \"text\": \"Olá! 👋 Tudo bem? Como posso ajudar você hoje?\"\n    }\n  ],\n  \"subtasks\": [],\n  \"artifacts\": [],\n  \"reasoning\": \"O usuário pediu 'diga oi' - uma saudação simples. Respondo com um 'olá' amigável em português e pergunto se posso ajudar em algo mais.\"\n}\n```"
+    }
+  ],
+  "runs": [
+    {
+      "runId": "run_28f52d5b-579b-4589-97ae-b4e518bd47a7",
+      "status": "COMPLETED",
+      "waitGroups": [],
+      "resultMessages": [],
+      "createdAt": "2026-06-23T15:36:51.525Z",
+      "startedAt": "2026-06-23T15:36:51.525Z",
+      "completedAt": "2026-06-23T15:37:06.189Z"
+    }
+  ],
+  "artifacts": [],
+  "retryCount": 0,
+  "technicalRetryCount": 0,
+  "metrics": {
+    "startedAt": "2026-06-23T15:36:51.525Z",
+    "finishedAt": "2026-06-23T15:37:06.189Z",
+    "durationMs": 14664,
+    "tokens": {
+      "input": 6193,
+      "output": 694,
+      "total": 11751
+    },
+    "cost": 0.0007795699999999999
+  }
+}
