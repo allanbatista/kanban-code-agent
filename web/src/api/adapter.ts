@@ -45,6 +45,42 @@ export function apiTaskToTask(api: ApiTask): Task {
   };
 }
 
+// Flat TaskMetadata (as delivered on WS event/state messages) → UI Task.
+// Same shape as apiTaskToTask but reads the flattened fields directly.
+export function metadataToTask(meta: any): Task {
+  return {
+    id: meta.taskId,
+    title: meta.title,
+    assignedTo: agentSlug(meta.assignedTo),
+    parentId: meta.parentId,
+    status: meta.status as TaskStatus,
+    depth: meta.depth,
+    subtaskIds: meta.subtaskIds,
+    runtimeConfig: {
+      model: meta.runtimeConfig?.model ?? 'balanced',
+      effort: meta.runtimeConfig?.effort ?? 'medium',
+    },
+    chat: (meta.taskChat ?? []).map(apiChatToChat),
+    artifacts: (meta.artifacts ?? []).map(apiArtifactToArtifact),
+    attachments: [],
+    metrics: {
+      startedAt: meta.metrics?.startedAt ?? undefined,
+      finishedAt: meta.metrics?.finishedAt ?? undefined,
+      durationMs: meta.metrics?.durationMs ?? 0,
+      waitingMs: 0,
+      tokens: {
+        input: meta.metrics?.tokens?.input ?? 0,
+        output: meta.metrics?.tokens?.output ?? 0,
+        total: meta.metrics?.tokens?.total ?? 0,
+        cache: 0,
+      },
+      cost: meta.metrics?.cost ?? 0,
+    },
+    retryCount: meta.retryCount ?? 0,
+    runs: (meta.runs ?? []).map(apiRunToRun),
+  };
+}
+
 function apiChatToChat(msg: ApiChatMessage): ChatMessage {
   return {
     ts: msg.ts,

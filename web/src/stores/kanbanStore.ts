@@ -18,9 +18,13 @@ interface KanbanState {
     execute?: boolean;
   }) => Promise<Task>;
   cancelTask: (taskId: string) => Promise<void>;
+  completeTask: (taskId: string) => Promise<void>;
   moveTask: (taskId: string, newAgent: string) => Promise<void>;
+  sendMessage: (taskId: string, message: string) => Promise<void>;
+  archiveColumn: (status: string) => Promise<void>;
 
   setTasks: (tasks: Task[]) => void;
+  upsertTask: (task: Task) => void;
   updateTaskStatus: (taskId: string, status: TaskStatus) => void;
   addTask: (task: Task) => void;
   removeTask: (taskId: string) => void;
@@ -147,6 +151,40 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     }
   },
 
+  completeTask: async (taskId) => {
+    // Optimistic: flip to COMPLETED, restore the previous status on failure.
+    const prev = get().tasks.find((t) => t.id === taskId)?.status;
+    set((state) => ({
+      tasks: state.tasks.map((t) =>
+        t.id === taskId ? { ...t, status: 'COMPLETED' as TaskStatus } : t,
+      ),
+      error: null,
+    }));
+    try {
+      await api.updateTask(taskId, { status: 'COMPLETED' });
+    } catch (err) {
+      set((state) => ({
+        tasks: state.tasks.map((t) =>
+          t.id === taskId && prev ? { ...t, status: prev } : t,
+        ),
+        error: errorMessage(err),
+      }));
+      throw err;
+    }
+  },
+
+  sendMessage: async (taskId, message) => {
+    const result = await api.sendMessage(taskId, message);
+    get().upsertTask(apiTaskToTask(result));
+  },
+
+  archiveColumn: async (status) => {
+    await api.archiveColumn(status);
+    set((state) => ({
+      tasks: state.tasks.filter((t) => !(!t.parentId && t.status === status)),
+    }));
+  },
+
   moveTask: async (taskId, newAgent) => {
     // Users may only park (inbox) or execute (manager). Other drops are ignored.
     if (newAgent !== 'inbox' && newAgent !== 'manager') return;
@@ -172,6 +210,13 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
   },
 
   setTasks: (tasks) => set({ tasks }),
+
+  upsertTask: (task) =>
+    set((state) => ({
+      tasks: state.tasks.some((t) => t.id === task.id)
+        ? state.tasks.map((t) => (t.id === task.id ? task : t))
+        : [...state.tasks, task],
+    })),
 
   updateTaskStatus: (taskId, status) =>
     set((state) => ({

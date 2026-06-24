@@ -8,6 +8,10 @@ import { TaskCard } from './TaskCard';
 import { TaskDrawer } from './TaskDrawer';
 import { CreateTaskDialog } from './CreateTaskDialog';
 import { Button } from '@/components/ui/button';
+import {
+  AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogFooter,
+  AlertDialogTitle, AlertDialogDescription, AlertDialogAction, AlertDialogCancel,
+} from '@/components/ui/alert-dialog';
 import { Plus } from 'lucide-react';
 import type { Task } from '@/types/task';
 
@@ -17,14 +21,17 @@ const COLUMN_CONFIGS = [
   { id: 'produto-generic', name: 'Produto', icon: 'Puzzle', color: '#a78bfa', isMulti: true, topKey: 'produto', bottomKey: 'generic' },
   { id: 'architecture-engineer', name: 'Architecture', icon: 'Building2', color: '#f472b6', isMulti: true, topKey: 'architecture', bottomKey: 'engineer' },
   { id: 'code-reviewer-qa', name: 'Code Reviewer', icon: 'SearchCode', color: '#2dd4bf', isMulti: true, topKey: 'code-reviewer', bottomKey: 'qa' },
+  { id: 'review', name: 'Revisão', icon: 'Eye', color: '#a78bfa' },
   { id: 'done', name: 'Done', icon: 'CheckCircle2', color: '#34d399' },
+  { id: 'cancel', name: 'Cancel', icon: 'Ban', color: '#f87171' },
 ];
 
 export function KanbanBoard() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const { tasks, agents, fetchTasks, fetchAgents, loading, error, moveTask } = useKanbanStore();
+  const { tasks, agents, fetchTasks, fetchAgents, loading, error, moveTask, cancelTask, completeTask, archiveColumn } = useKanbanStore();
   const [createOpen, setCreateOpen] = useState(false);
   const [activeTask, setActiveTask] = useState<Task | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<null | 'COMPLETED' | 'CANCELLED'>(null);
 
   useEffect(() => {
     fetchTasks();
@@ -36,7 +43,11 @@ export function KanbanBoard() {
   );
 
   const { handleDragStart, handleDragEnd } = useDragAndDrop({
-    onMove: (taskId, newAgent) => moveTask(taskId, newAgent),
+    onMove: (taskId, target) => {
+      if (target === 'cancel') cancelTask(taskId);
+      else if (target === 'done') completeTask(taskId);
+      else moveTask(taskId, target);
+    },
   });
 
   const openTaskId = searchParams.get('task');
@@ -60,7 +71,9 @@ export function KanbanBoard() {
     if (columnId === 'produto-generic') return { top: byAgent('produto'), bottom: byAgent('generic') };
     if (columnId === 'architecture-engineer') return { top: byAgent('architecture'), bottom: byAgent('engineer') };
     if (columnId === 'code-reviewer-qa') return { top: byAgent('code-reviewer'), bottom: byAgent('qa') };
-    if (columnId === 'done') return { top: tasks.filter(t => t.status === 'COMPLETED') };
+    if (columnId === 'review') return { top: tasks.filter(t => t.status === 'REVIEW' && !t.parentId) };
+    if (columnId === 'done') return { top: tasks.filter(t => t.status === 'COMPLETED' && !t.parentId) };
+    if (columnId === 'cancel') return { top: tasks.filter(t => t.status === 'CANCELLED' && !t.parentId) };
     return { top: [] };
   };
 
@@ -119,6 +132,11 @@ export function KanbanBoard() {
                     icon={agent?.icon ?? col.icon}
                     color={agent?.color ?? col.color}
                     tasks={columnTasks.top ?? []}
+                    onArchive={
+                      col.id === 'done' ? () => setArchiveTarget('COMPLETED')
+                      : col.id === 'cancel' ? () => setArchiveTarget('CANCELLED')
+                      : undefined
+                    }
                   />
                 );
               })}
@@ -140,6 +158,28 @@ export function KanbanBoard() {
       </Button>
 
       <CreateTaskDialog open={createOpen} onOpenChange={setCreateOpen} />
+
+      <AlertDialog open={archiveTarget !== null} onOpenChange={(open) => { if (!open) setArchiveTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Arquivar tasks</AlertDialogTitle>
+            <AlertDialogDescription>
+              Esta ação arquiva todas as tasks desta coluna. Deseja continuar?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (archiveTarget) archiveColumn(archiveTarget);
+                setArchiveTarget(null);
+              }}
+            >
+              Arquivar
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {openTaskId && (
         <TaskDrawer

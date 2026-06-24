@@ -1,16 +1,17 @@
 import {
   Clock, ListOrdered, LoaderCircle, PauseCircle,
-  CheckCircle, XCircle, Ban,
+  CheckCircle, XCircle, Ban, Eye,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-export type TaskStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+export type TaskStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'REVIEW' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 
 const STATUS_CONFIG: Record<TaskStatus, { icon: React.ComponentType<{ className?: string }>; label: string; cls: string }> = {
   PENDING:    { icon: Clock,         label: 'Pendente',   cls: 'bg-muted/60 text-muted-foreground border-muted-foreground/20' },
   QUEUED:     { icon: ListOrdered,   label: 'Na fila',    cls: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30' },
   RUNNING:    { icon: LoaderCircle,  label: 'Executando', cls: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 animate-pulse' },
   WAITING:    { icon: PauseCircle,   label: 'Aguardando', cls: 'bg-blue-500/10 text-blue-400 border-blue-500/30' },
+  REVIEW:     { icon: Eye,           label: 'Revisão',    cls: 'bg-purple-500/10 text-purple-400 border-purple-500/30' },
   COMPLETED:  { icon: CheckCircle,   label: 'Concluída',  cls: 'bg-emerald-600/10 text-emerald-500 border-emerald-600/30' },
   FAILED:     { icon: XCircle,       label: 'Falhou',     cls: 'bg-destructive/10 text-destructive border-destructive/30' },
   CANCELLED:  { icon: Ban,           label: 'Cancelada',  cls: 'bg-muted/40 text-muted-foreground/60 border-muted-foreground/15 line-through' },

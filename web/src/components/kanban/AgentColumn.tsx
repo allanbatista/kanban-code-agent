@@ -2,7 +2,7 @@ import { useDroppable } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { forwardRef, useState } from 'react';
 import * as LucideIcons from 'lucide-react';
-import { Settings2 } from 'lucide-react';
+import { Settings2, Archive } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { TaskCard } from './TaskCard';
@@ -21,9 +21,10 @@ interface AgentColumnProps {
   subAgentName?: string;
   subAgentColor?: string;
   subAgentTasks?: Task[];
+  onArchive?: () => void;
 }
 
-function ColumnHeader({ name, icon, color, tasks, onConfig }: { name: string; icon: string; color: string; tasks: Task[]; onConfig?: () => void }) {
+function ColumnHeader({ name, icon, color, tasks, onConfig, onArchive }: { name: string; icon: string; color: string; tasks: Task[]; onConfig?: () => void; onArchive?: () => void }) {
   const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string; style?: React.CSSProperties }>>)[icon] ?? LucideIcons.Bot;
   const runningCount = tasks.filter(t => t.status === 'RUNNING').length;
 
@@ -38,6 +39,14 @@ function ColumnHeader({ name, icon, color, tasks, onConfig }: { name: string; ic
             className="ml-1 rounded-md p-1 text-muted-foreground/50 opacity-0 transition-all hover:bg-white/5 hover:text-muted-foreground group-hover/header:opacity-100"
           >
             <Settings2 className="h-3.5 w-3.5" />
+          </button>
+        )}
+        {onArchive && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onArchive(); }}
+            className="ml-1 rounded-md p-1 text-muted-foreground/50 opacity-0 transition-all hover:bg-white/5 hover:text-muted-foreground group-hover/header:opacity-100"
+          >
+            <Archive className="h-3.5 w-3.5" />
           </button>
         )}
       </div>
@@ -74,10 +83,11 @@ interface AgentPanelProps {
   tasks: Task[];
   className?: string;
   onConfig?: () => void;
+  onArchive?: () => void;
 }
 
 const AgentPanel = forwardRef<HTMLDivElement, AgentPanelProps>(function AgentPanel(
-  { droppableId, name, icon, color, tasks, className, onConfig },
+  { droppableId, name, icon, color, tasks, className, onConfig, onArchive },
   _ref
 ) {
   const { setNodeRef, isOver } = useDroppable({ id: droppableId });
@@ -86,7 +96,7 @@ const AgentPanel = forwardRef<HTMLDivElement, AgentPanelProps>(function AgentPan
     <div
       className={cn('flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border/60 shadow-xl shadow-black/20 backdrop-blur-sm', className)}
     >
-      <ColumnHeader name={name} icon={icon} color={color} tasks={tasks} onConfig={onConfig} />
+      <ColumnHeader name={name} icon={icon} color={color} tasks={tasks} onConfig={onConfig} onArchive={onArchive} />
       <div ref={setNodeRef} className="min-h-0 flex-1 flex flex-col overflow-hidden">
         <ColumnBody taskIds={tasks.map(t => t.id)} isOver={isOver}>
           {tasks.length === 0 ? (
@@ -101,7 +111,7 @@ const AgentPanel = forwardRef<HTMLDivElement, AgentPanelProps>(function AgentPan
 });
 AgentPanel.displayName = 'AgentPanel';
 
-export function AgentColumn({ id, name, icon, color, tasks, isMulti, subAgentName, subAgentColor, subAgentTasks }: AgentColumnProps) {
+export function AgentColumn({ id, name, icon, color, tasks, isMulti, subAgentName, subAgentColor, subAgentTasks, onArchive }: AgentColumnProps) {
   const [configAgent, setConfigAgent] = useState<Agent | null>(null);
 
   if (isMulti && subAgentName !== undefined && subAgentTasks !== undefined) {
@@ -149,6 +159,7 @@ export function AgentColumn({ id, name, icon, color, tasks, isMulti, subAgentNam
         tasks={tasks}
         className="h-full min-w-[280px]"
         onConfig={() => setConfigAgent({ id, name, icon, color })}
+        onArchive={onArchive}
       />
       {configAgent && (
         <AgentConfigDialog

@@ -66,6 +66,20 @@ export const api = {
     });
   },
 
+  sendMessage(taskId: string, message: string): Promise<ApiTask> {
+    return request<ApiTask>(`/api/tasks/${encodeURIComponent(taskId)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    });
+  },
+
+  archiveColumn(status: string): Promise<{ archived: string[]; total: number }> {
+    return request<{ archived: string[]; total: number }>('/api/tasks/archive', {
+      method: 'POST',
+      body: JSON.stringify({ status }),
+    });
+  },
+
   // --- Agents ---
 
   getAgents(): Promise<ApiAgentListResponse> {

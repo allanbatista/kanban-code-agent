@@ -25,6 +25,7 @@ export interface WsEvent {
     processedByTaskIds?: string[];
     payload?: Record<string, unknown>;
   };
+  task?: Record<string, unknown>;
   tasks?: Array<{
     taskId: string;
     title: string;
@@ -90,7 +91,7 @@ export interface WsEvent {
   }>;
 }
 
-type EventHandler = (event: WsEvent['event'] & object) => void;
+type EventHandler = (event: WsEvent['event'] & object, task?: Record<string, unknown>) => void;
 type StateHandler = (tasks: WsEvent['tasks'] & object) => void;
 
 export interface WsClient {
@@ -129,7 +130,7 @@ export function createWsClient(options?: { taskId?: string }): WsClient {
 
         if (message.type === 'event' && message.event) {
           for (const handler of eventHandlers) {
-            handler(message.event as WsEvent['event'] & object);
+            handler(message.event as WsEvent['event'] & object, message.task);
           }
         }
 

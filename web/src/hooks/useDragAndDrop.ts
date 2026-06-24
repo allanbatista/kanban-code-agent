@@ -9,7 +9,9 @@ const DROP_AGENT_MAP: Record<string, string> = {
   // Single columns
   'drop-inbox': 'inbox',
   'drop-manager': 'manager',
+  'drop-review': 'review',
   'drop-done': 'done',
+  'drop-cancel': 'cancel',
   // Multi columns: top/bottom pairs
   'drop-produto-generic-top': 'produto',
   'drop-produto-generic-bottom': 'generic',

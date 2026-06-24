@@ -1,6 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { Send } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { useKanbanStore } from '@/stores/kanbanStore';
 import { cn } from '@/lib/utils';
 import type { Task } from '@/types/task';
 
@@ -10,6 +14,7 @@ interface TaskChatPanelProps {
 
 export function TaskChatPanel({ task }: TaskChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [text, setText] = useState('');
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -17,8 +22,16 @@ export function TaskChatPanel({ task }: TaskChatPanelProps) {
     }
   }, [task.chat.length]);
 
+  const handleSend = () => {
+    const value = text.trim();
+    if (!value) return;
+    useKanbanStore.getState().sendMessage(task.id, value);
+    setText('');
+  };
+
   return (
-    <ScrollArea className="h-full p-4">
+    <div className="flex h-full flex-col">
+    <ScrollArea className="flex-1 p-4">
       <div ref={scrollRef} className="space-y-3">
         {task.chat.length === 0 && (
           <p className="rounded-2xl border border-dashed border-border/60 bg-card/40 px-4 py-10 text-center text-sm text-muted-foreground/70">
@@ -68,5 +81,17 @@ export function TaskChatPanel({ task }: TaskChatPanelProps) {
         ))}
       </div>
     </ScrollArea>
+    <div className="flex items-center gap-2 border-t border-border/50 p-3">
+      <Input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+        placeholder="Enviar mensagem..."
+      />
+      <Button size="icon" onClick={handleSend} disabled={!text.trim()}>
+        <Send className="h-4 w-4" />
+      </Button>
+    </div>
+    </div>
   );
 }

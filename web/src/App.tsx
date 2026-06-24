@@ -5,7 +5,7 @@ import { Navbar } from '@/components/layout/Navbar';
 import { AnimatedGradientBackground } from '@/components/background/AnimatedGradientBackground';
 import { useKanbanStore } from '@/stores/kanbanStore';
 import { createWsClient } from '@/api/ws-client';
-import { apiTaskToTask } from '@/api/adapter';
+import { metadataToTask } from '@/api/adapter';
 
 export function App() {
   const { fetchTasks, fetchAgents, setTasks } = useKanbanStore();
@@ -25,16 +25,20 @@ export function App() {
     ws.onState((stateTasks) => {
       if (Array.isArray(stateTasks)) {
         const tasks = (stateTasks as Array<Record<string, unknown>>).map((t) =>
-          apiTaskToTask(t as unknown as Parameters<typeof apiTaskToTask>[0]),
+          metadataToTask(t),
         );
         setTasks(tasks);
       }
     });
 
-    ws.onEvent((event) => {
-      // Re-fetch tasks on any swarm event to stay in sync
-      fetchTasks();
-      void event; // keep reference without unused warning
+    ws.onEvent((event, task) => {
+      if (!event) return;
+      if (event.type === 'TASK_ARCHIVED') {
+        const ids = (event.payload?.archivedTaskIds as string[] | undefined) ?? (event.taskId ? [event.taskId] : []);
+        ids.forEach((id) => useKanbanStore.getState().removeTask(id));
+        return;
+      }
+      if (task) useKanbanStore.getState().upsertTask(metadataToTask(task));
     });
 
     return () => ws.close();
