@@ -711,7 +711,7 @@ export class Orquestrator extends EventEmitter {
 
     if (this.options.stopWhenWaiting) return;
     const candidateTaskIds = new Set<string>();
-    for (const waiters of (this.scheduler as any).waitingByDependency?.values?.() ?? []) {
+    for (const waiters of this.scheduler.waitingByDependency.values()) {
       for (const tid of waiters) candidateTaskIds.add(tid);
     }
     for (const tid of candidateTaskIds) {
@@ -730,7 +730,15 @@ export class Orquestrator extends EventEmitter {
     if (task.assignedTo === INBOX_AGENT) return;
 
     this.mergePendingTriggerEvents(taskId, triggerEvents);
-    if (!this.queuedTaskIds.has(taskId) && !this.runningTaskIds.has(taskId)) {
+    // Self-reschedule guard: when a task re-schedules itself from inside its own
+    // run (retry / coerced wait), runningTaskIds still holds it, so the enqueue
+    // below would be skipped and the task would stall in PENDING forever. Defer
+    // until the current run has torn down (finally clears runningTaskIds).
+    if (this.runningTaskIds.has(taskId)) {
+      setTimeout(() => this.scheduleTask(taskId, [], 0), Math.max(delayMs, 10));
+      return;
+    }
+    if (!this.queuedTaskIds.has(taskId)) {
       this.queuedTaskIds.add(taskId);
       this.taskQueue.push(taskId);
       if (task.status !== TASK_STATUS.QUEUED) {
@@ -767,6 +775,9 @@ export class Orquestrator extends EventEmitter {
 
     const controller = new AbortController();
     this.runAbortControllers.set(taskId, controller);
+    // Subtasks created during this run mean the parent now depends on them and
+    // must wait + re-consolidate from their real results (see applyDecision).
+    const subtasksBefore = task.subtaskIds.length;
     try {
       this.taskFileStore.ensureTaskDir(task.taskId);
       const result = await this.piClient.run(agent, task, this, triggerEvents, controller.signal);
@@ -781,13 +792,13 @@ export class Orquestrator extends EventEmitter {
       this.assertWithinBudget();
       const decision = parseDecision(result.output);
       task.technicalRetryCount = 0;
-      this.applyDecision(task, run, decision, triggerEvents);
+      this.applyDecision(task, run, decision, triggerEvents, task.subtaskIds.slice(subtasksBefore));
     } catch (error) {
       // A cancelled run (pause/move/cancel) must not be retried or failed.
       if (error instanceof RunCancelledError || controller.signal.aborted || task.activeRunId !== run.runId) {
         return;
       }
-      this.handleRunFailure(task, run, error, triggerEvents, startedAt);
+      this.handleRunFailure(task, run, error, triggerEvents, startedAt, task.subtaskIds.slice(subtasksBefore));
     } finally {
       this.runAbortControllers.delete(taskId);
       this.runningTaskIds.delete(taskId);
@@ -842,7 +853,21 @@ export class Orquestrator extends EventEmitter {
       taskChat: task.chat,
       artifacts: task.artifacts,
       metrics: task.metrics,
+      subtaskSummary: this.buildSubtaskSummary(task),
     };
+  }
+
+  /** One line per direct subtask: id, title, agent, status and last result. */
+  buildSubtaskSummary(task: Task): string {
+    const subtasks = this.getSubtasks(task);
+    if (subtasks.length === 0) return 'Sem subtasks.';
+    return subtasks
+      .map(
+        (st) =>
+          `- ${st.taskId} ${st.options.title} (${st.options.assignedTo}) [${st.status}]: ` +
+          `${formatMessages(st.resultMessages) || 'sem mensagens'}`,
+      )
+      .join('\n');
   }
 
   buildTaskMetadataBlock(task: Task, metadata?: TaskMetadata): string {
@@ -1130,6 +1155,7 @@ export class Orquestrator extends EventEmitter {
     run: TaskRun,
     decision: AgentDecision,
     triggerEvents: SwarmEvent[],
+    newSubtaskIds: string[] = [],
   ): void {
     if (decision.status === 'retry') {
       this.markEventsProcessed(task, triggerEvents);
@@ -1182,10 +1208,29 @@ export class Orquestrator extends EventEmitter {
         payload: { waitGroups },
       });
       this.persist();
+      this.resumeIfWaitSatisfied(task);
       return;
     }
 
     // completed
+    // Structural guard: an agent cannot finish while its own subtasks are still
+    // pending. Creating a subtask means depending on it, so a premature
+    // `completed` is coerced into WAITING (WAIT_ALL over the unfinished subtasks).
+    // The parent re-runs with their results once they settle — that is what the
+    // workflow exists for, and it stops the root reaching REVIEW too early.
+    // A same-turn consolidation cannot have the subtasks' real results (those
+    // arrive as events on the NEXT run), so any subtask created this run — or
+    // still pending — forces WAITING. The parent re-runs and consolidates from
+    // the delivered results; if they already finished, resume is immediate.
+    const pendingSubtasks = this.getSubtasks(task)
+      .filter((st) => !isTerminalTaskStatus(st.status))
+      .map((st) => st.taskId);
+    const waitTaskIds = uniqueStrings([...newSubtaskIds, ...pendingSubtasks]);
+    if (waitTaskIds.length > 0) {
+      this.coerceToWait(task, run, decision.messages, waitTaskIds, triggerEvents);
+      return;
+    }
+
     this.markEventsProcessed(task, triggerEvents);
     task.resultMessages = task.appendAgentMessages(decision.messages);
     this.completeActiveRun(task, run);
@@ -1217,12 +1262,43 @@ export class Orquestrator extends EventEmitter {
     this.persist();
   }
 
+  // Parks the task in WAITING on the given subtask ids (WAIT_ALL), retaining the
+  // current messages. If the deps already settled, resumes immediately so the
+  // parent re-runs and consolidates from the real, delivered results.
+  private coerceToWait(
+    task: Task,
+    run: TaskRun,
+    messages: AgentOutputMessage[],
+    waitTaskIds: string[],
+    triggerEvents: SwarmEvent[],
+    reason?: string,
+  ): void {
+    const waitGroups = this.normalizeWaitGroups(task, {
+      status: 'waiting',
+      messages,
+      waitGroups: [{ waitId: 'auto', mode: WAIT_GROUP_MODE.WAIT_ALL, taskIds: uniqueStrings(waitTaskIds) }],
+    });
+    this.markEventsProcessed(task, triggerEvents);
+    if (messages.length > 0) task.resultMessages = task.appendAgentMessages(messages);
+    this.startOrUpdateWaitRun(task, run, waitGroups, task.resultMessages);
+    task.status = TASK_STATUS.WAITING;
+    this.markTaskDirty(task);
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_WAITING, {
+      task,
+      runId: run.runId,
+      payload: { waitGroups, coerced: true, ...(reason ? { reason } : {}) },
+    });
+    this.persist();
+    this.resumeIfWaitSatisfied(task);
+  }
+
   private handleRunFailure(
     task: Task,
     run: TaskRun,
     error: unknown,
     triggerEvents: SwarmEvent[],
     startedAt: string,
+    newSubtaskIds: string[] = [],
   ): void {
     const finishedAt = new Date().toISOString();
     task.metrics.finishedAt = finishedAt;
@@ -1250,6 +1326,25 @@ export class Orquestrator extends EventEmitter {
     }
     if (isBudget) {
       this.recordEvent(SWARM_EVENT_TYPE.BUDGET_EXCEEDED, { task, runId: run.runId, payload: { error: message } });
+    }
+
+    // Resilience: if the agent already created subtasks this run but failed to
+    // emit a valid waiting decision (model non-compliance), park in WAITING on
+    // the still-unfinished subtasks instead of retrying/failing. Creating a
+    // subtask means depending on it — the parent must await and consolidate.
+    if (!isBudget && !isTimeout) {
+      const pendingSubtasks = this.getSubtasks(task)
+        .filter((st) => !isTerminalTaskStatus(st.status))
+        .map((st) => st.taskId);
+      const waitTaskIds = uniqueStrings([...newSubtaskIds, ...pendingSubtasks]);
+      if (waitTaskIds.length > 0) {
+        try {
+          this.coerceToWait(task, run, [], waitTaskIds, triggerEvents, message);
+          return;
+        } catch {
+          // Coercion failed (e.g. no valid subtask deps) — fall through to retry.
+        }
+      }
     }
 
     if (!isBudget && task.technicalRetryCount < MAX_TECHNICAL_RETRIES) {
@@ -1386,6 +1481,13 @@ export class Orquestrator extends EventEmitter {
     return false;
   }
 
+  // Handles the race where dependencies already settled before the wait was
+  // registered (very fast subtasks, or replay): re-evaluate now and resume.
+  private resumeIfWaitSatisfied(task: Task): void {
+    const ready = this.getReadyEvents(task);
+    if (ready.length > 0) this.scheduleTask(task.taskId, ready);
+  }
+
   private getReadyEvents(task: Task): SwarmEvent[] {
     const run = this.getActiveRun(task);
     if (!run || run.status !== 'WAITING') return [];
@@ -1498,9 +1600,12 @@ export class Orquestrator extends EventEmitter {
   }
 
   private scheduleWaitersForEvent(event: SwarmEvent): void {
-    this.scheduler.scheduleWaitersForEvent(event, this.tasks, (taskId, events) => {
-      this.scheduleTask(taskId, events);
-    });
+    this.scheduler.scheduleWaitersForEvent(
+      event,
+      this.tasks,
+      (waiter) => this.getReadyEvents(waiter),
+      (taskId, events) => this.scheduleTask(taskId, events),
+    );
   }
 
   // -----------------------------------------------------------------------

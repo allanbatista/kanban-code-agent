@@ -147,6 +147,31 @@ describe("kanban-store (T04)", () => {
     );
   });
 
+  it("createTask dedupes when the WS stream already inserted the real task", async () => {
+    mockCreateTask.mockResolvedValueOnce({
+      taskId: "task_22",
+      title: "Race task",
+      assignedTo: "manager",
+      status: "PENDING",
+      depth: 0,
+      subtaskIds: [],
+      runtimeConfig: {},
+      createdAt: null,
+      updatedAt: null,
+    });
+
+    const { useKanbanStore } = await import("@/stores/kanbanStore");
+    useKanbanStore.setState({ tasks: [], loading: false, error: null });
+
+    const promise = useKanbanStore.getState().createTask({ message: "Race task" });
+    // Simulate the WS event landing before the POST resolves.
+    useKanbanStore.getState().upsertTask(makeTask({ id: "task_22" }));
+    await promise;
+
+    const ids = useKanbanStore.getState().tasks.map((t) => t.id);
+    expect(ids.filter((id) => id === "task_22")).toHaveLength(1);
+  });
+
   it("moveTask to inbox parks the task and calls the API", async () => {
     mockUpdateTask.mockResolvedValueOnce({});
     const { useKanbanStore } = await import("@/stores/kanbanStore");

@@ -122,7 +122,11 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
     try {
       const apiTask = await api.createTask(data);
       const task = apiTaskToTask(apiTask);
-      set((state) => ({ tasks: state.tasks.map((t) => (t.id === tempId ? task : t)) }));
+      // Drop the temp card and any copy the WS stream may have already inserted,
+      // then append once — prevents duplicate keys when both races land.
+      set((state) => ({
+        tasks: [...state.tasks.filter((t) => t.id !== tempId && t.id !== task.id), task],
+      }));
       return task;
     } catch (err) {
       set((state) => ({

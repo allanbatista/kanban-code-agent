@@ -88,8 +88,9 @@ describe('buildPrompt', () => {
       expect(prompt).toContain('Hello World');
     });
 
-    it('contains subtask section when canCreateSubtasks=true', () => {
-      metadata.canCreateSubtasks = true;
+    it('contains subtask section when subtasks exist', () => {
+      task.subtaskIds.push('task_sub-1');
+      metadata.subtaskSummary = '- task_sub-1 Sub (agent-1) [RUNNING]: sem mensagens';
       const prompt = buildPrompt(task, metadata, [], 60);
       expect(prompt).toContain('Subtasks:');
     });
@@ -266,10 +267,13 @@ describe('buildPrompt', () => {
   });
 
   describe('subtask lines', () => {
-    it('shows subtask IDs when subtaskIds exist', () => {
+    it('shows subtask summary from metadata when subtasks exist', () => {
       task.subtaskIds.push('task_sub-1', 'task_sub-2');
+      metadata.subtaskSummary = [
+        '- task_sub-1 Sub A (agent-1) [COMPLETED]: assistant/text: ok',
+        '- task_sub-2 Sub B (agent-1) [RUNNING]: sem mensagens',
+      ].join('\n');
       const prompt = buildPrompt(task, metadata, [], 60);
-      // The prompt includes subtask IDs in the subtask section
       expect(prompt).toContain('task_sub-1');
       expect(prompt).toContain('task_sub-2');
     });

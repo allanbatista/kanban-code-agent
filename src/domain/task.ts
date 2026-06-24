@@ -123,6 +123,8 @@ export interface TaskMetadata {
   taskChat: TaskChatMessage[];
   artifacts: TaskArtifact[];
   metrics: TaskMetrics;
+  /** Human-readable status + results of direct subtasks (built by Orquestrator). */
+  subtaskSummary?: string;
 }
 
 // --- Task Class ---

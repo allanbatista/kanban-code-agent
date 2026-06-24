@@ -36,9 +36,11 @@ const DEFAULTS: SwarmConfig = {
   maxConcurrency: 3,
   runTimeoutMs: 300_000,
   models: {
-    fast: { provider: 'openrouter', modelId: 'openai/gpt-5.4-nano' },
-    balanced: { provider: 'openrouter', modelId: 'deepseek/deepseek-v4-flash' },
-    deep: { provider: 'openrouter', modelId: 'deepseek/deepseek-v4-pro' },
+    // Pi SDK native providers (provider name + bare model id). The deepseek
+    // provider auto-uses DEEPSEEK_API_KEY. Override via swarm.yml / env.
+    fast: { provider: 'deepseek', modelId: 'deepseek-v4-flash' },
+    balanced: { provider: 'deepseek', modelId: 'deepseek-v4-flash' },
+    deep: { provider: 'deepseek', modelId: 'deepseek-v4-pro' },
   },
 };
 

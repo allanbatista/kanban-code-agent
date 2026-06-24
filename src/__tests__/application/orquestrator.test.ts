@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // Set env vars before module imports (they are read at module init time)
@@ -17,7 +17,7 @@ import { PathSandbox } from '../../infrastructure/filesystem/sandbox.js';
 import { Task } from '../../domain/task.js';
 import { TASK_STATUS, SWARM_EVENT_TYPE, WAIT_GROUP_MODE, WAIT_GROUP_STATUS } from '../../domain/types.js';
 import type { Agent } from '../../domain/agent.js';
-import type { AgentRunResult, AgentRunner } from '../../application/pi-client.js';
+import type { AgentRunResult, AgentRunner, AgentRunConfig } from '../../application/pi-client.js';
 import type { SwarmEvent } from '../../domain/events.js';
 import type { TaskMetadata, AgentDecision } from '../../domain/task.js';
 import type { OrquestratorDeps } from '../../application/orquestrator.js';
@@ -84,6 +84,35 @@ function makeDecisionRunner(decisions: AgentDecision[]): AgentRunner {
       };
     },
   };
+}
+
+// Routes canned decisions per taskId (taken from cwd) and can block a task's run
+// on a gate promise, so subtasks stay deterministically "pending".
+function makeRoutedRunner(
+  byTask: Record<string, string[]>,
+  gates: Record<string, Promise<unknown>> = {},
+): AgentRunner {
+  const idx: Record<string, number> = {};
+  return {
+    async run(config: AgentRunConfig): Promise<AgentRunResult> {
+      const taskId = basename(String(config.cwd));
+      if (taskId in gates) await gates[taskId];
+      const i = idx[taskId] ?? 0;
+      idx[taskId] = i + 1;
+      const output = (byTask[taskId] ?? [])[i] ?? completedDecision();
+      return { output, stats: { tokens: { input: 10, output: 5, total: 15 }, cost: 0.001 } };
+    },
+  };
+}
+
+function waitForStatus(orc: Orquestrator, task: Task, status: string): Promise<void> {
+  return new Promise((resolve) => {
+    const check = (): void => {
+      if (task.status === status) return resolve();
+      orc.once('state:changed', check);
+    };
+    check();
+  });
 }
 
 function throwingRunner(error: Error): AgentRunner {
@@ -336,61 +365,70 @@ describe('Orquestrator', () => {
   // WAIT_ALL
   // -------------------------------------------------------------------
   describe('WAIT_ALL', () => {
-    it('parent waits until all subtasks complete, then resumes', async () => {
-      // Parent creates subtasks, then waits. Subtasks complete.
-      const client = createPiClient([
-        waitingDecision([
-          { waitId: 'wg1', mode: WAIT_GROUP_MODE.WAIT_ALL, taskIds: ['PLACEHOLDER'] },
-        ]),
-        completedDecision('parent done'),
-      ]);
-      const deps = createDeps(dir, client);
-      const orc = new Orquestrator(deps);
-
+    it('parent stays WAITING until all subtasks complete, then resumes to COMPLETED', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      // task_1 = parent, task_2/task_3 = subtasks (gated so they stay pending).
+      const runner = makeRoutedRunner(
+        {
+          task_1: [
+            waitingDecision([
+              { waitId: 'wg1', mode: WAIT_GROUP_MODE.WAIT_ALL, taskIds: ['task_2', 'task_3'] },
+            ]),
+            completedDecision('parent done'),
+          ],
+          task_2: [completedDecision('A done')],
+          task_3: [completedDecision('B done')],
+        },
+        { task_2: gate, task_3: gate },
+      );
+      const orc = new Orquestrator(createDeps(dir, createPiClientWithRunner(runner)));
       const parent = orc.createRootTask('Parent WAIT_ALL', 'agent-tester');
       const subA = orc.spawnSubtask(parent, 'agent-tester', 'Sub A', 'msg A');
       const subB = orc.spawnSubtask(parent, 'agent-tester', 'Sub B', 'msg B');
 
-      // Manually fix up the waitingDecision's taskIds to actual subtask IDs
-      // (The agent runtime actually builds these, but in test we need to run subtasks first)
-      // We'll run the parent first. It will get the placeholder taskIds.
-      // This test validates the WAIT_ALL lifecycle with a simpler setup.
+      await waitForStatus(orc, parent, TASK_STATUS.WAITING);
+      expect(subA.status).not.toBe(TASK_STATUS.COMPLETED);
+      expect(subB.status).not.toBe(TASK_STATUS.COMPLETED);
 
-      // Simpler: let's test using a direct waiting with known subtask IDs
-      // Complete both subtasks manually (simulate their agents finishing)
-      subA.status = TASK_STATUS.COMPLETED;
-      subB.status = TASK_STATUS.COMPLETED;
+      release();
+      await orc.waitUntilSettled(parent);
 
-      // The ORC doesn't auto-trigger waiters since the event was not recorded.
-      // We need to use the real flow. Let's use separate Orquestrator instances for subtasks.
-      // Actually, the parent's waitingDecision has placeholder taskIds.
-      // In the real flow, the agent that produced the decision would use actual task IDs.
-      // For testing, we adjust the wait group directly.
-
-      cleanup();
+      expect(subA.status).toBe(TASK_STATUS.COMPLETED);
+      expect(subB.status).toBe(TASK_STATUS.COMPLETED);
+      expect(parent.status).toBe(TASK_STATUS.COMPLETED);
     });
 
-    it('parent resolves after subtasks complete (direct wait group setup)', async () => {
-      const client = createPiClient([
-        // First run: parent creates a waiting decision with correct subtask IDs (entered after creation)
-        waitingDecision([], 'waiting for children'),
-        completedDecision('parent completed after wait'),
-      ]);
-      const deps = createDeps(dir, client);
-      const orc = new Orquestrator(deps);
+    it('coerces a premature completed into WAITING while subtasks are pending', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      // Parent wrongly returns completed first; guard must coerce it to WAITING.
+      const runner = makeRoutedRunner(
+        {
+          task_1: [completedDecision('premature'), completedDecision('final')],
+          task_2: [completedDecision('A')],
+          task_3: [completedDecision('B')],
+        },
+        { task_2: gate, task_3: gate },
+      );
+      const orc = new Orquestrator(createDeps(dir, createPiClientWithRunner(runner)));
+      const parent = orc.createRootTask('Parent guard', 'agent-tester');
+      orc.spawnSubtask(parent, 'agent-tester', 'Sub A', 'A');
+      orc.spawnSubtask(parent, 'agent-tester', 'Sub B', 'B');
 
-      const parent = orc.createRootTask('Parent', 'agent-tester');
-      const subA = orc.spawnSubtask(parent, 'agent-tester', 'Sub A', 'Work on A');
-      const subB = orc.spawnSubtask(parent, 'agent-tester', 'Sub B', 'Work on B');
+      await waitForStatus(orc, parent, TASK_STATUS.WAITING);
+      const coerced = getEvents(orc).find(
+        (e) => e.type === SWARM_EVENT_TYPE.TASK_WAITING && e.payload?.coerced === true,
+      );
+      expect(coerced).toBeDefined();
 
-      // We need the parent to wait for actual subtask IDs.
-      // In the mock, we can fix the decision after-the-fact.
-      // The first run of parent already happened and it created a waiting decision with empty taskIds.
-      // Let's directly manipulate the state for testing purposes.
-      // OR: simpler approach, use separate orchestrator to run subtasks and rely on events.
-
-      // Let's use a different test approach - orchestrate it properly:
-      cleanup();
+      release();
+      await orc.waitUntilSettled(parent);
+      expect(parent.status).toBe(TASK_STATUS.COMPLETED);
     });
   });
 
