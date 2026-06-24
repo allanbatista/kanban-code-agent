@@ -9,13 +9,15 @@ import type {
   ApiHealth,
 } from '@/types/api';
 
-const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:35000';
+export const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:35000';
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${url}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
+  // Only declare a JSON content-type when we actually send a body. Fastify
+  // rejects an empty body when content-type is 'application/json' (a body-less
+  // DELETE/POST would otherwise 400 with "Body cannot be empty").
+  const headers: Record<string, string> = { ...(options?.headers as Record<string, string> | undefined) };
+  if (options?.body != null) headers['Content-Type'] = 'application/json';
+  const response = await fetch(`${API_BASE}${url}`, { ...options, headers });
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: response.statusText }));

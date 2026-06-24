@@ -1,12 +1,11 @@
-// Connect to the same host/port that served the page so the WebSocket always
-// matches the page's origin (avoids localhost IPv4/IPv6 and reverse-proxy
-// mismatches). In Vite dev (port 5173) the API/WS server is on 35000.
+import { API_BASE } from './client';
+
+// The WebSocket server lives on the same host:port as the REST API, which is
+// NOT necessarily the port that served the page (the UI can run on 5173/8888
+// in dev while the API/WS is on 35000). Derive the WS URL from the API base so
+// they always point to the same place. http→ws, https→wss.
 function defaultWsUrl(): string {
-  if (typeof window === 'undefined') return 'ws://localhost:35000/ws';
-  const { protocol, hostname, port } = window.location;
-  const wsProto = protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsPort = port === '5173' ? '35000' : port || (wsProto === 'wss:' ? '443' : '80');
-  return `${wsProto}//${hostname}:${wsPort}/ws`;
+  return API_BASE.replace(/^http/i, 'ws').replace(/\/+$/, '') + '/ws';
 }
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? defaultWsUrl();
