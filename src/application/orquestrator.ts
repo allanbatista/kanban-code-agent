@@ -1727,6 +1727,10 @@ export class Orquestrator extends EventEmitter {
     this.events.push(event);
     this.eventStore.append(event);
     console.log(formatSwarmEvent(event));
+    // Push every recorded event so the UI updates in real time. Relying on
+    // 'state:changed' alone misses most events (it is emitted sparsely and only
+    // ever carries the latest event).
+    this.emit('event', event);
     if (isTerminalTaskEvent(type)) this.scheduleWaitersForEvent(event);
     return event;
   }

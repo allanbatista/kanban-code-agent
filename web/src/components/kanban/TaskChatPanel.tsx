@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Send } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -67,7 +69,11 @@ export function TaskChatPanel({ task }: TaskChatPanelProps) {
                   <span>{msg.text}</span>
                 </div>
               )}
-              {msg.type === 'text' && <p className="whitespace-pre-wrap">{msg.text}</p>}
+              {msg.type === 'text' && (
+                <div className="prose prose-sm dark:prose-invert max-w-none break-words">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+                </div>
+              )}
               <span className="mt-1 block text-[10px] text-muted-foreground/60">
                 {new Date(msg.ts).toLocaleTimeString()}
               </span>

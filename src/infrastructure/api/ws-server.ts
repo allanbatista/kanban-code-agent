@@ -93,17 +93,15 @@ export function registerWebSocket(
     },
   );
 
-  // Broadcast events to subscribed clients on state change
-  orquestrator.on('state:changed', () => {
-    const latestEvent = orquestrator.events[orquestrator.events.length - 1];
-    if (!latestEvent) return;
+  // Broadcast every recorded event to subscribed clients so the board updates
+  // in real time (one push per event, in order).
+  orquestrator.on('event', (event: SwarmEvent) => {
+    if (!event) return;
 
-    const affected = latestEvent.taskId
-      ? orquestrator.tasks.get(latestEvent.taskId)
-      : undefined;
+    const affected = event.taskId ? orquestrator.tasks.get(event.taskId) : undefined;
     const eventMessage: ServerEventMessage = {
       type: 'event',
-      event: latestEvent,
+      event,
       task: affected ? orquestrator.toMetadata(affected) : undefined,
     };
     const data = JSON.stringify(eventMessage);
@@ -117,8 +115,8 @@ export function registerWebSocket(
       // Filter by subscription
       if (
         client.subscribedTaskId &&
-        latestEvent.taskId !== client.subscribedTaskId &&
-        latestEvent.parentId !== client.subscribedTaskId
+        event.taskId !== client.subscribedTaskId &&
+        event.parentId !== client.subscribedTaskId
       ) {
         continue;
       }

@@ -60,13 +60,16 @@ export function KanbanBoard() {
     setSearchParams(params, { replace: true });
   };
 
-  // Completed tasks belong to Done regardless of their assigned agent, so agent
-  // columns only show work still in progress.
+  // Agent columns only show work in progress. REVIEW/COMPLETED/CANCELLED have
+  // their own columns, so they must not also appear under their agent (a REVIEW
+  // task stays assignedTo 'manager', which otherwise duplicates it).
+  const inAgentFlow = (t: Task) =>
+    t.status !== 'COMPLETED' && t.status !== 'REVIEW' && t.status !== 'CANCELLED';
   const byAgent = (agentId: string) =>
-    tasks.filter(t => t.assignedTo === agentId && t.status !== 'COMPLETED');
+    tasks.filter(t => t.assignedTo === agentId && inAgentFlow(t));
 
   const getColumnTasks = (columnId: string): Record<string, Task[]> => {
-    if (columnId === 'inbox') return { top: tasks.filter(t => (t.assignedTo === 'inbox' || t.assignedTo === '') && t.status !== 'COMPLETED') };
+    if (columnId === 'inbox') return { top: tasks.filter(t => (t.assignedTo === 'inbox' || t.assignedTo === '') && inAgentFlow(t)) };
     if (columnId === 'manager') return { top: byAgent('manager') };
     if (columnId === 'produto-generic') return { top: byAgent('produto'), bottom: byAgent('generic') };
     if (columnId === 'architecture-engineer') return { top: byAgent('architecture'), bottom: byAgent('engineer') };
