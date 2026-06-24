@@ -61,7 +61,7 @@ A base é **madura**; o plano **fecha lacunas**, não recomeça. Resumo apurado 
 | L13 | **Registro de modelos inconsistente** — `orquestrator.ALLOWED_MODELS` (openrouter) ≠ `config.ts` (deepseek) | §1.5 | `orquestrator.ts`, `config.ts` |
 | L14 | **`ProjectFileStore` órfão** — não ligado a `routes/projects.ts`; projetos não sobrevivem a restart (US-6 falsa) | — | `routes/projects.ts` |
 | L15 | **Sem e2e real front→backend→agent→filesystem→WS** — testes drivam o Orquestrator direto; a borda HTTP/WS nunca foi exercida | §2.2 | testes |
-| L16 | **`PROJECT.md` e `web/` não versionados** (untracked) | — | git |
+| L16 | ~~`PROJECT.md` e `web/` não versionados~~ — **resolvido**: já versionados e árvore limpa (`git ls-files`). F0.T1 reduz-se a higiene de `.gitignore` | — | git |
 | L17 | **Effort=high sem caminho de configuração explícito** para validação (effort vive em `runtimeConfig`, não em `SwarmConfig`) | §8.2 | `config.ts`, harness |
 | L18 | **Data-root com dois nomes** (`~/.kca` dataDir + subdir `.swarm`) — esclarecer/unificar e documentar | — | `config.ts`, persistence |
 | L19 | **Auth reivindicada (commit 149aeab) mas ausente no servidor** — decidir implementar ou adiar conscientemente | — | API |
@@ -124,10 +124,40 @@ Verificados no código por mapeamento multi-agente; cada um tem dono explícito 
 | **F4** | [`04-per-card-ceilings`](./fases/04-per-card-ceilings.md) | **Tetos por-card** de custo **e** tempo ativo + **budget persistido/reidratado** (sobrevive a restart) + catálogo de condições de parada (§10) (L9) | F0, F1 | `pending` |
 | **F5** | [`05-independent-evaluation-and-dod`](./fases/05-independent-evaluation-and-dod.md) | **Gate de avaliação independente** QA + Code Reviewer (separado do gerador) + **unificação das definições de agente** com guardrails + **imposição da DoD** (§8.2, §11) (L4, L5, L12) | F0, F1, F2 | `pending` |
 | **F6** | [`06-comms-and-human-in-the-loop`](./fases/06-comms-and-human-in-the-loop.md) | **Pergunta filho→pai + escalonamento** em escopo isolado (§9.3) + **pergunta/resposta humana** front↔back↔agent + **timeout-park → `SUSPENDED`** (L8) | F0, F1, F2, F5 | `pending` |
-| **F7** | [`07-heartbeats-telemetry-and-ui`](./fases/07-heartbeats-telemetry-and-ui.md) | **Heartbeats** (§3.6) + **correção SSE↔WS** (L11) + frontend: UI dos novos estados, HITL, telemetria de budget/heartbeat, árvore de subtasks, teste de contrato (L10, L11) | F0, F1, F4, F6 | `pending` |
+| **F7** | [`07-heartbeats-telemetry-and-ui`](./fases/07-heartbeats-telemetry-and-ui.md) | **Heartbeats** (§3.6) + **correção SSE↔WS + catch-up** (L11) + frontend: UI dos novos estados, HITL, telemetria, árvore de subtasks, artefatos, `/health`, smoke Playwright, contrato (L10, L11) | F0, F1, F3, F4, F6 | `pending` |
 | **F8** | [`08-e2e-coverage-and-validation`](./fases/08-e2e-coverage-and-validation.md) | **Cobertura HTTP/WS** + decisão de **auth** (L19) + retry manual + validação de frame WS + **Cenário A completo (§12)** ponta a ponta + **run de validação viva** (deepseek-v4-flash, effort high) | F0–F7 | `pending` |
 
 > Ordem pensada por dependência: o **estado** (F1) e o **SSOT/replay + continuidade** (F2) vêm antes das fases de governança que mudam o shape serializado (F3/F4), reduzindo o risco de divergência de ledger. F5 (avaliação) antes de F6 (HITL) reduz regressões de conclusão prematura. F7 expõe tudo na UI; F8 sela com o cenário completo e a validação viva.
+
+### Grafo de dependências (DAG)
+
+```
+F0 ──┬─► F1 ──┬─► F2 ──┬─► F5 ──► F6 ──┐
+     │        │        │               ├─► F7 ──► F8
+     │        ├─► F3 ───┼───────────────┤
+     │        └─► F4 ───┘               │
+     └────────────────────────────────►┘
+```
+- **F7 depende de F0, F1, F3, F4, F6** (heartbeats usam epochs de **F3**; telemetria de teto usa **F4**; HITL/anexos usam **F6**).
+- **F8 depende de todas** (cenário completo + validação viva).
+- Artefato: o **endpoint HTTP** de artefato é de F7; a DoD de F5 checa só **existência em disco** (sem dep. de F7) — ver F5.T4.
+
+### Semântica de parada: motivo → estado (tabela canônica)
+
+Para remover ambiguidade (um teto vira `FAILED` ou estado estacionado?):
+
+| Condição de parada | `failureReason` | Estado resultante | Terminal? |
+| --- | --- | --- | --- |
+| Sucesso (DoD ok) | — | `COMPLETED` | sim |
+| Exaustão de tentativas (§10.2) | `attempts` | `FAILED` | sim |
+| Estagnação / Δ<θ (§10.3) | `stagnation` | `FAILED` | sim |
+| Max epochs sem completar (§10.3) | `attempts` (subtipo `max_epochs`) | `FAILED` | sim |
+| Limite de profundidade (§10.4) | `blocked` | `FAILED` (recusa de criar nó) | sim |
+| Teto de custo/tempo por-card (§10.5) | `ceiling` | `FAILED` | sim |
+| Timeout de intervenção humana (§10.6) | `human_timeout` | **`SUSPENDED`** (reversível) | não |
+| Cancelamento humano/cascata (§4) | `cancelled_by_user` | `CANCELLED` | sim |
+
+> Regra: **`SUSPENDED` é exclusivo do timeout humano** (estado estacionado, reversível por resposta tardia). Tetos vão para `FAILED(ceiling)` com graceful wrap-up (ver M-graceful em F4). Esta tabela é a fonte única; F1/F3/F4/F6 a implementam.
 
 ---
 
@@ -161,4 +191,69 @@ Toda fase replica este checklist na sua seção *Critérios de saída*:
 - **Catch-up de reconnect incorreto (F7.T5).** Se o replay por `sinceSeq` não bater com o stream ao vivo, o cliente fica em estado inconsistente sem perceber. Exigir teste “desconecta+emite N+reconecta == sempre-conectado” e detecção de gap por `seq`.
 - **Resume de sessão meio-implementado (F2.T6).** Hoje `piSessionFile`/prompt de sessão são andaime morto (regressão vs POC). A decisão reabrir-vs-reidratar deve ser **completa** — implementar o resume real **ou** remover o dead code; não deixar a instrução de prompt mentindo.
 - **Efeitos colaterais duplicados na retomada (F4.T5).** Sem chaves de idempotência, um restart no meio da epoch duplica artefatos/mensagens. Cobrir com teste de crash-após-side-effect + re-run.
+
+---
+
+## 6. Apêndice — Triagem das revisões (REVISION.md)
+
+Registro do que foi **aceito** (e onde), **parcial** (aceito com ajuste) ou **rejeitado** (com motivo, geralmente já coberto ou refutado pelo código). Verificado contra o código.
+
+### Revisão 1 (Pontos de falha PF1–PF12, melhorias M1–M7, guideline G1–G4)
+
+| Item | Veredito | Onde / motivo |
+| --- | --- | --- |
+| PF1 chat não-evented | **Parcial** | Já era de F2.T1; clarificado que o `ask_human` usa `postAgentMessage` (já evented) — F6.T1 |
+| PF2 failureReason incompleto | **Aceito** | `human_timeout`/`cancelled_by_user` + tabela canônica — F1.T3 + §3 PLAN |
+| PF3 deadline sem scheduler | **Aceito** | `DeadlineMonitor` (`setInterval`) — F6.T3 |
+| PF4 max-epochs sem completar | **Aceito** | `maxEpochsWithoutCompletion` no Governance — F3.T2 + F4.T1 |
+| PF5 dedup frágil | **Parcial** | Premissa errada (o dedup **inclui** o corpo, `:1027`), mas a recomendação (chave explícita) foi aceita — F4.T5 |
+| PF6 conflito de revisão dupla | **Aceito** | Contrato de re-revisão (escopo no diff) — F5.T3 |
+| PF7 consolidação de memória | **Aceito** | Operacionalizada (entrada de fechamento no progress-log) — F5.T4 |
+| PF8 match pergunta↔resposta | **Parcial** | Rejeitado `inReplyTo` (over-eng.); match por estado `WAITING(human)` — F6.T3 |
+| PF9 escalonamento recursivo | **Aceito** | Recursão + caso “ninguém sabe” + teste — F6.T1 |
+| PF10 SSE sem catch-up | **Aceito** | `Last-Event-ID` nativo — F7.T1/T5 |
+| PF11 F0.T7 vs F8.T4 redundantes | **Aceito** | F0.T7=smoke, F8.T4=Cenário A completo — ambos |
+| PF12 testes de caos | **Aceito** | F8.T5 (kill/corrupção/perda parcial) |
+| M1 graceful degradation | **Aceito** | Aviso a 80% do teto — F4.T6 |
+| M2 health check | **Parcial** | `/health` **já existe** (`http-server.ts:103`); enriquecido — F7.T7 |
+| M3 config imutável mid-flight | **Aceito** | Snapshot de config no run — F4.T1 |
+| M4 ciclo de vida do Run | **Parcial** | Guardas leves no `TaskRun`, sem máquina separada — F1.T1 nota |
+| M5 limpeza de artefatos | **Aceito** | Retenção via archive — F7.T6 |
+| M6 roteamento Generic | **Aceito** | Heurística no prompt do Manager — F5.T1 |
+| M7 grafo de dependências | **Parcial** | Coluna “Depende de” já existia; adicionado DAG explícito — §3 PLAN |
+| G1–G2–G4 (dup agentes/modelos/ProjectFileStore) | **Já coberto** | F5.T1 / F0.T2 / F0.T4 |
+| G3 zero `ponytail:` comments | **N/A no plano** | É código (ainda não existe); o plano já manda marcar `ponytail:` |
+| Matriz: payload fuzz; replay concorrente | **Aceito** | Fuzz — F8.T1; concorrência — F2.T1 |
+
+### Revisão 2 (falhas F1–F10, melhorias M1–M12)
+
+| Item | Veredito | Onde / motivo |
+| --- | --- | --- |
+| F1/M1 anti-one-shotting | **Parcial** | Guards estruturais já existem (`includeDelegation`/`coerceToWait`); reforço leve — F5.T2 nota |
+| F2/M2 compactação em-sessão | **Aceito** | F2.T7 |
+| F3/M3/F9 roteador de contexto + pré-compactação | **Aceito** | F2.T7 |
+| F4/M4 ciclo micro no prompt | **Aceito** | F2.T7 (e) |
+| F5/M5 cenários B e C | **Aceito** | F8.T6 |
+| F6 memória indexada detalhada | **Aceito** | F2.T7 (c) |
+| F7/M8 cascade-cancel + abort | **Parcial** | Abort **já existe** (`cancelActiveRun`); detalhado o reuso — F1.T3 |
+| F8 deadlock de avaliação | **Aceito** | Quebrado pela convergência (F3) — F5.T3 |
+| F10 SUSPENDED no scheduler | **Aceito** | Não ocupa slot, re-enfileira explícito — F1.T2 |
+| M6 versionamento de evento | **Aceito** | `schemaVersion` — F7.T4 |
+| M9 budget global vs por-card | **Aceito** | Prioridade documentada — F4.T1 |
+| M10 decisões de adiar documentadas | **Aceito** | `plan/DEFERRED.md` — F8.T2 |
+| M11 falha composta e2e | **Aceito** | F8.T5 |
+| M12 backoff de retry | **Rejeitado (já existe)** | `RETRY_BASE_DELAY_MS * technicalRetryCount` (`:1416`); só notado em F3.T3 |
+
+### Revisão 3 (achados Alta/Média/Baixa)
+
+| Item | Veredito | Onde / motivo |
+| --- | --- | --- |
+| Alta: F5→F7 dep. circular (endpoint de artefato) | **Aceito (bug do plano)** | DoD de F5 checa só **existência em disco** — F5.T4 |
+| Alta: F7 sem dep. de F3 (epochs) | **Aceito (bug do plano)** | `depends_on += F3` — F7 |
+| Alta: fold incompleto | **Aceito** | Matriz completa de campos — F2.T1 |
+| Alta: catch-up só em memória | **Aceito** | Replay pelo `EventStore` por `seq` — F7.T5 |
+| Média: semântica de parada ambígua | **Aceito** | Tabela motivo→estado — §3 PLAN |
+| Média: contrato opcional vs scope-spec | **Aceito** | Scope-spec mínimo sempre — F2.T3 |
+| Média: sem validação em browser | **Aceito** | Smoke Playwright — F7.T8 |
+| Baixa: L16 stale | **Aceito (refutado)** | `git ls-files` confirma versionado; L16 marcado resolvido; F0.T1 reduzido |
 </content>

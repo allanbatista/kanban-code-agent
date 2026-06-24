@@ -29,18 +29,19 @@ Hoje `task.status` é um campo público mutável sem guarda; toda a lógica de t
 - **Toca:** `src/domain/task.ts` (ou `src/domain/state-machine.ts` novo), call-sites em `orquestrator.ts`.
 - **Testes (mock):** tabela-verdade de transições válidas/inválidas; transição ilegal rejeitada.
 - **DoD:** transições legais centralizadas e testadas. `ponytail:` tabela const simples, **sem** framework de FSM.
+- **Nota (Rev1-M4):** aplicar guardas leves também às transições de **`TaskRun`** (`RUNNING→WAITING→COMPLETED/FAILED/TIMEOUT`, já em `TASK_RUN_STATUS`) reusando a mesma abordagem — o Run é a unidade de execução/epoch e merece a mesma garantia, **sem** entidade/máquina separada (`ponytail:` mesma tabela const, não duplicar).
 
 ### F1.T2 — `SUSPENDED` + `WAITING` diferenciado  ·  `pending`
-- **O que:** Adicionar `SUSPENDED: 'SUSPENDED'` a `TASK_STATUS` (não-terminal, reversível) + eventos `TASK_SUSPENDED`/retomada. Adicionar `waitingReason: 'subtasks' | 'human'` ao metadata (derivado do run/wait) e `deadline?` ao `WaitGroup` (insumo do timeout de F6). Garantir que `isTerminalTaskStatus` **não** trate `SUSPENDED` como terminal e que `recoverStatusesAfterCrash` o preserve.
-- **Toca:** `src/domain/types.ts`, `src/domain/task.ts`, `src/domain/wait-group.ts`, `src/domain/events.ts`, `orquestrator.ts` (replay/recovery, `toMetadata`).
-- **Testes (mock):** suspender por timeout → retomar volta a executar; replay reconstrói `SUSPENDED`; metadata expõe `waitingReason`.
-- **DoD:** novo estado em todos os enumeradores de status (scheduler, recovery, metadata).
+- **O que:** Adicionar `SUSPENDED: 'SUSPENDED'` a `TASK_STATUS` (não-terminal, reversível) + eventos `TASK_SUSPENDED`/retomada. Adicionar `waitingReason: 'subtasks' | 'human'` ao metadata (derivado do run/wait) e `deadline?` ao `WaitGroup` (insumo do timeout de F6). Garantir que `isTerminalTaskStatus` **não** trate `SUSPENDED` como terminal e que `recoverStatusesAfterCrash` o preserve. **Tratamento no scheduler (PF3/Rev2-F10):** uma task `SUSPENDED` (como `WAITING`) **não ocupa slot de worker** e **não é re-enfileirada automaticamente** — só volta a `PENDING`/`QUEUED` por **re-enfileiramento explícito** (resposta humana em F6) ou cancelamento; `scheduleReadyTasks`/`pumpQueue` ignoram `SUSPENDED`.
+- **Toca:** `src/domain/types.ts`, `src/domain/task.ts`, `src/domain/wait-group.ts`, `src/domain/events.ts`, `orquestrator.ts` (replay/recovery, `toMetadata`), `scheduler.ts`.
+- **Testes (mock):** suspender por timeout → retomar volta a executar; `SUSPENDED` não consome slot nem é re-agendado sozinho; replay reconstrói `SUSPENDED`; metadata expõe `waitingReason`.
+- **DoD:** novo estado em todos os enumeradores de status (scheduler, recovery, metadata); scheduler trata `SUSPENDED` corretamente.
 
 ### F1.T3 — `failureReason` + cascade-cancel  ·  `pending`
-- **O que:** Adicionar `failureReason: 'attempts' | 'stagnation' | 'ceiling' | 'blocked'` a `FAILED` (preenchido nas paradas de F3/F4). Tornar o **cancelamento em cascata** (cancelar pai cancela filhos) um invariante explícito e testado.
-- **Toca:** `src/domain/task.ts`, `orquestrator.ts` (`failTask`, `cancelTask`).
-- **Testes (mock):** falha por cada motivo grava `failureReason`; cancelar pai cancela árvore.
-- **DoD:** motivo de falha auditável; cascade-cancel garantido.
+- **O que:** Adicionar um discriminador de motivo terminal cobrindo **todos** os caminhos da tabela canônica de PLAN.md (*motivo → estado*): `attempts` (subtipo `max_epochs`), `stagnation`, `ceiling`, `blocked`, **`human_timeout`** (→ `SUSPENDED`), **`cancelled_by_user`** (→ `CANCELLED`). Preenchido nas paradas de F3/F4/F6. Tornar o **cancelamento em cascata** (cancelar pai cancela filhos) um invariante explícito — **reusando o mecanismo já existente** (`cancelTask`→`dequeue`→`cancelActiveRun` aborta o worker via `runAbortControllers`, `orquestrator.ts:478,612,621`): em cascata, abortar workers ativos dos filhos, liberar slots e marcar `CANCELLED`.
+- **Toca:** `src/domain/task.ts`, `orquestrator.ts` (`failTask`, `cancelTask`/`collectFamilyIds`).
+- **Testes (mock):** falha por cada motivo grava o discriminador correto + estado da tabela; cancelar pai aborta workers ativos dos filhos e cancela a árvore (sem run órfão).
+- **DoD:** motivo terminal auditável e coerente com a tabela canônica; cascade-cancel aborta execução ativa. `ponytail:` reusar `cancelActiveRun`, sem novo mecanismo de abort.
 
 ### F1.T4 — Round-trip + caracterização de transições  ·  `pending`
 - **O que:** Teste de round-trip `serialize`→`fromSerialized` para o novo shape (compat — Restrição 6). Suíte percorrendo cada transição via mocks (harness F0): pause/move em RUNNING, cancel em WAITING, reopen de REVIEW, crash-recovery de cada estado não-terminal incl. `SUSPENDED`.
@@ -57,8 +58,8 @@ Hoje `task.status` é um campo público mutável sem guarda; toda a lógica de t
 ## Critérios de saída (DoD da fase)
 
 - [ ] F1.T1…F1.T4 em `done`.
-- [ ] Máquina de estados é do domínio (tabela + guardas); transição ilegal lança.
-- [ ] `SUSPENDED` presente e não-terminal; `WAITING` distingue subtask/humano; `failureReason` em `FAILED`.
+- [ ] Máquina de estados é do domínio (tabela + guardas); transição ilegal lança; coerente com a tabela canônica *motivo → estado* do PLAN.md.
+- [ ] `SUSPENDED` presente, não-terminal e tratado pelo scheduler (não ocupa slot, re-enfileira explícito); `WAITING` distingue subtask/humano; `failureReason` cobre todos os motivos (incl. `human_timeout`, `cancelled_by_user`).
 - [ ] Round-trip de serialização e replay-equivalência do novo shape testados.
 - [ ] `npm test` verde (e2e de F0 sem regressão); `typecheck`+`lint` limpos.
 - [ ] **`ponytail-review`** sobre o diff; achados endereçados/justificados.

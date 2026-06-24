@@ -2,7 +2,7 @@
 fase: F7
 slug: 07-heartbeats-telemetry-and-ui
 status: pending
-depends_on: [F0, F1, F4, F6]
+depends_on: [F0, F1, F3, F4, F6]
 ---
 
 # F7 — Heartbeats, Paridade SSE↔WS e Frontend (Observabilidade em Tempo Real)
@@ -24,7 +24,9 @@ O Kanban é a interface visual **e** o SSOT — a UI precisa refletir o ledger f
 | F7.T3 | Frontend: telemetria (budget/teto, cache, heartbeat) + árvore de subtasks | `pending` |
 | F7.T4 | Teste de contrato WS front↔back + 1 cliente WS por mount + unsubscribe/resubscribe | `pending` |
 | F7.T5 | **Catch-up no reconnect (`sinceSeq`) + garantia de ordem por `seq`** | `pending` |
-| F7.T6 | **Endpoint HTTP de artefato + render/download no chat + integridade** | `pending` |
+| F7.T6 | **Endpoint HTTP de artefato + render/download no chat + integridade + retenção** | `pending` |
+| F7.T7 | **`/health` enriquecido (worker pool, fila, disco, tasks ativas)** | `pending` |
+| F7.T8 | **Smoke de UI em browser real (Playwright): board, drawer, chat HITL, anexo, artefato** | `pending` |
 
 ### F7.T1 — Heartbeats + paridade SSE↔WS  ·  `pending`
 - **O que:** Emitir `HEARTBEAT` entre epochs com métricas acumuladas (tokens/custo/tempo); propagar via WS. **Corrigir o SSE** para emitir os mesmos eventos de domínio do WS (assinar o emitter `'event'`, não `slice(-1)` de `state:changed`), via um **serializador de evento compartilhado** entre WS e SSE (fonte única do payload). O serializador deve servir **tanto o emitter ao vivo quanto o replay de catch-up** (de F7.T5).
@@ -45,22 +47,35 @@ O Kanban é a interface visual **e** o SSOT — a UI precisa refletir o ledger f
 - **DoD:** usuário observa consumo, tetos e topologia em tempo real.
 
 ### F7.T4 — Teste de contrato WS + higiene de conexão  ·  `pending`
-- **O que:** Teste de **contrato** com fixture capturada do payload de evento do backend, que **falha no CI** se o shape divergir do que o `client.ts`/`ws-client.ts` espera (anti-drift, risco global). Garantir **um único cliente WS por mount** e wiring 100% real (sem dados mock em runtime). Suportar uma mensagem `unsubscribe` real e **resubscribe por `taskId` sem derrubar o socket**; no reconnect, **resubscribe à task atualmente vista** (não à capturada na criação do client, `ws-client.ts:145`).
+- **O que:** Teste de **contrato** com fixture capturada do payload de evento do backend, que **falha no CI** se o shape divergir do que o `client.ts`/`ws-client.ts` espera (anti-drift, risco global). **Versionar o schema de evento** (`schemaVersion: 1` no envelope WS/SSE, Rev2-M6): o teste de contrato falha se a versão mudar sem migração. Garantir **um único cliente WS por mount** e wiring 100% real (sem dados mock em runtime). Suportar uma mensagem `unsubscribe` real e **resubscribe por `taskId` sem derrubar o socket**; no reconnect, **resubscribe à task atualmente vista** (não à capturada na criação do client, `ws-client.ts:145`).
 - **Toca:** `web/src/**/__tests__/*`, fixture compartilhada de contrato, `web/src/hooks/useWebSocket.ts`, `web/src/api/ws-client.ts`, `src/infrastructure/api/ws-server.ts` (tipo de mensagem `unsubscribe`).
 - **Testes:** contrato; trocar a task assinada e verificar o alvo de subscription pós-reconnect; nenhum dado mock em runtime.
 - **DoD:** contrato front↔back guardado; subscription multiplexável e correta pós-reconnect; 1 cliente WS por mount.
 
 ### F7.T5 — Catch-up no reconnect + ordem por `seq`  ·  `pending`
-- **O que:** Hoje, no reconnect, o servidor só reenvia o **snapshot de estado** — eventos perdidos durante a desconexão (ex.: `TASK_ARCHIVED`, `HEARTBEAT`, deltas de chat) **somem** (o `seq` existe no fio, `ws-client.ts:19`, mas é ignorado). Implementar **cursor de retomada**: o cliente envia `{type:'subscribe', taskId, sinceSeq}` e o servidor **reenvia os eventos com `seq>sinceSeq`** (de `orquestrator.events`, já em memória) antes/no lugar do snapshot — nenhum evento se perde. O cliente rastreia o maior `seq` aplicado, detecta **gaps** e, em gap, pede um resync completo. SSE em paridade via `Last-Event-ID`.
-- **Toca:** `src/infrastructure/api/ws-server.ts`, `src/infrastructure/api/routes/events.ts`, `web/src/api/ws-client.ts`.
-- **Testes (e2e):** matar o socket no meio do fluxo, emitir N eventos com ele caído, reconectar → cliente termina em **estado idêntico** a um que ficou conectado; injeção de gap força resync.
-- **DoD:** zero eventos perdidos no reconnect; ordem garantida por `seq`. `ponytail:` replay a partir do buffer em memória, sem store novo.
+- **O que:** Hoje, no reconnect, o servidor só reenvia o **snapshot de estado** — eventos perdidos durante a desconexão (ex.: `TASK_ARCHIVED`, `HEARTBEAT`, deltas de chat) **somem** (o `seq` existe no fio, `ws-client.ts:19`, mas é ignorado). Implementar **cursor de retomada**: o cliente envia `{type:'subscribe', taskId, sinceSeq}` e o servidor **reenvia os eventos com `seq>sinceSeq`** antes/no lugar do snapshot — nenhum evento se perde. **Fonte do replay = o `EventStore` durável (por `seq`)**, não só o buffer `orquestrator.events` em memória — assim o catch-up funciona **mesmo após restart do servidor** (o buffer em memória é reconstruído na carga, mas o store é a verdade). Se o gap exceder o que o store consegue servir, cair para **snapshot + flag de gap**. O cliente rastreia o maior `seq` aplicado, detecta gaps e pede resync. **SSE em paridade via o mecanismo nativo `Last-Event-ID`** (reconnect do `EventSource` envia o header automaticamente; o servidor faz o mesmo replay por `seq`).
+- **Toca:** `src/infrastructure/api/ws-server.ts`, `src/infrastructure/api/routes/events.ts`, `src/infrastructure/persistence/event-store.ts` (leitura por `seq>cursor`), `web/src/api/ws-client.ts`.
+- **Testes (e2e):** matar o socket no meio do fluxo, emitir N eventos com ele caído, reconectar → cliente termina em **estado idêntico** a um que ficou conectado; **reiniciar o servidor** e reconectar com `sinceSeq` → catch-up vem do store; injeção de gap força resync.
+- **DoD:** zero eventos perdidos no reconnect (incl. pós-restart); ordem garantida por `seq`; SSE usa `Last-Event-ID`. `ponytail:` ler do `EventStore` por `seq`, sem store novo.
 
 ### F7.T6 — Endpoint de artefato + render/download + integridade  ·  `pending`
 - **O que:** O agente já cria artefatos (`create_artifact`→`ARTIFACT_CREATED`), mas **não há como buscar o conteúdo** nem renderizá-lo. (1) Adicionar `GET /api/tasks/:id/artifacts` (lista) e `GET /api/tasks/:id/artifacts/:fileName` (stream do conteúdo) em `routes/tasks.ts`, resolvendo via `task-file-store` contra `.swarm/tasks/:id/artifacts/`, **revalidando o path pelo `PathSandbox`** (bloqueia traversal), com `Content-Type` do `fileType` e `Content-Disposition` para download. (2) **Integridade:** em `createArtifact` (`orquestrator.ts:948-963`), commitar evento/snapshot **só após** o write do arquivo; reconcile no replay que sinaliza/dropa entradas de `artifacts.yaml` sem arquivo. (3) **Frontend:** substituir o placeholder de `TaskChatPanel.tsx:66-71` por um **card de artefato** com link de download e render inline (markdown via ReactMarkdown, código via `SyntaxHighlighter`); lista de artefatos com download no `TaskSummaryPanel`; contador clicável no `TaskDrawer`.
-- **Toca:** `src/infrastructure/api/routes/tasks.ts`, `orquestrator.ts`, `task-file-store.ts`, `web/src/components/kanban/{TaskChatPanel,TaskSummaryPanel,TaskDrawer}.tsx`, `web/src/api/client.ts`.
-- **Testes (integração + e2e):** rotas de artefato (Fastify inject) incl. 200 stream, Content-Type/Disposition corretos, 404 para arquivo inexistente, 400/403 para traversal; UI abre e baixa todo artefato produzido pelo agente.
-- **DoD:** artefatos do agente são buscáveis por HTTP, íntegros e renderizados/baixáveis no chat.
+- **Retenção (M5, database-as-filesystem):** definir política de **limpeza/expiração** — artefatos/anexos de famílias **arquivadas** (via `archiveByStatus`, que já move para `_archived`) podem ser purgados após retenção configurável (`SWARM_ARTIFACT_RETENTION_DAYS`) e/ou limite de tamanho por task; sem cleanup, o disco é o limite.
+- **Toca:** `src/infrastructure/api/routes/tasks.ts`, `orquestrator.ts`, `task-file-store.ts` (purge/retenção), `web/src/components/kanban/{TaskChatPanel,TaskSummaryPanel,TaskDrawer}.tsx`, `web/src/api/client.ts`.
+- **Testes (integração + e2e):** rotas de artefato (Fastify inject) incl. 200 stream, Content-Type/Disposition corretos, 404 para arquivo inexistente, 400/403 para traversal; UI abre e baixa todo artefato; purge respeita a retenção e não toca famílias ativas.
+- **DoD:** artefatos do agente buscáveis por HTTP, íntegros, renderizados/baixáveis no chat; política de retenção aplicada. `ponytail:` retenção = um varredor no archive existente, sem GC novo.
+
+### F7.T7 — `/health` enriquecido + métricas de sistema  ·  `pending`
+- **O que (M2, §10 “falhar de forma observável”):** Já existe `GET /health` (`http-server.ts:103`) mínimo. Enriquecer com status operacional: tamanho do worker pool / slots ocupados, tamanho da fila, tasks ativas/aguardando, uso de disco do dataDir. Hoje o sistema é caixa-preta para o operador — sem isso, problemas só aparecem quando tasks estagnam.
+- **Toca:** `src/infrastructure/api/http-server.ts` (ou `routes/reports.ts`), `orquestrator.ts` (expor contadores).
+- **Testes (integração):** `/health` retorna os campos; reflete fila/slots sob carga simulada.
+- **DoD:** operador enxerga saúde do sistema. `ponytail:` estender o handler existente, sem dashboard novo.
+
+### F7.T8 — Smoke de UI em browser real (Playwright)  ·  `pending`
+- **O que (Rev3-Média-3, §2.2 “verificar exercendo, não inspecionando”):** Os testes de componente (vitest/jsdom) não exercem a UI pesada num browser. Adicionar **um smoke Playwright** contra o servidor real (harness F0 + agentes mock): abrir o board, abrir o `TaskDrawer`, ver o chat, responder uma pergunta HITL, anexar um arquivo, abrir/baixar um artefato. Gated/opt-in se o browser não estiver no CI.
+- **Toca:** `web/e2e/smoke.spec.ts` (novo, Playwright), `web/playwright.config.ts`.
+- **Testes:** este é o teste.
+- **DoD:** fluxo crítico da UI validado num browser real. `ponytail:` 1 spec de smoke, não uma suíte E2E de UI completa.
 
 ## Pontos de validação cobertos
 
@@ -70,8 +85,9 @@ O Kanban é a interface visual **e** o SSOT — a UI precisa refletir o ledger f
 
 ## Critérios de saída (DoD da fase)
 
-- [ ] F7.T1…F7.T6 em `done`.
-- [ ] `HEARTBEAT` entre epochs; SSE equivalente ao WS (bug L11 corrigido), inclusive no replay.
+- [ ] F7.T1…F7.T8 em `done`.
+- [ ] `HEARTBEAT` entre epochs; SSE equivalente ao WS (bug L11 corrigido), inclusive no replay; envelope com `schemaVersion`.
+- [ ] `/health` enriquecido; smoke Playwright do fluxo crítico verde; retenção de artefatos aplicada.
 - [ ] **Catch-up no reconnect (`sinceSeq`)**: nenhum evento perdido na desconexão; ordem por `seq`; subscription correta pós-reconnect.
 - [ ] Frontend expõe HITL **pelo chat**, anexos do humano, render/download de artefatos do agente, telemetria budget/teto/cache/heartbeat, lanes `FAILED`/`SUSPENDED`, edição de título persistida e ações de review.
 - [ ] Teste de contrato WS protege contra drift; 1 cliente WS por mount; sem mocks em runtime.

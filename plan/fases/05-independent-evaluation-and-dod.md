@@ -28,27 +28,28 @@ QA e Code Reviewer **existem** em `agents/index.ts` mas **nunca são invocados**
 | F5.T5 | Testes mock (approve/reject/iterate) + e2e do gate | `pending` |
 
 ### F5.T1 — Fonte única de agentes com guardrails  ·  `pending`
-- **O que:** Eliminar a duplicação (L12): uma única definição (`agents/index.ts`) consumida em runtime, com `mustNot`/tool allow-list por papel (§8.3): Manager não escreve código; Produto não decide arquitetura; QA não corrige código; Code Reviewer não reescreve; Generic não cria subtasks autônomas. `orquestrator-factory.ts` passa a importar daí.
-- **Toca:** `src/infrastructure/agents/index.ts`, `src/cli/orquestrator-factory.ts`.
-- **Testes (mock):** cada papel expõe tools/guardrails corretos; factory usa a fonte única.
-- **DoD:** zero duplicação; guardrails codificados e testados.
+- **O que:** Eliminar a duplicação (L12): uma única definição (`agents/index.ts`) consumida em runtime, com `mustNot`/tool allow-list por papel (§8.3): Manager não escreve código; Produto não decide arquitetura; QA não corrige código; Code Reviewer não reescreve; Generic não cria subtasks autônomas. `orquestrator-factory.ts` passa a importar daí. **Heurística de roteamento (M6, §8.3/§12):** documentar no prompt do Manager quando rotear para **Generic** (apoio de baixa complexidade: formatação de docs, i18n, limpeza de logs, ajustes tipográficos) vs **Engineer** (código/lógica), para não sobre-alocar Engineer em tarefas triviais.
+- **Toca:** `src/infrastructure/agents/index.ts`, `src/cli/orquestrator-factory.ts`, prompt do Manager.
+- **Testes (mock):** cada papel expõe tools/guardrails corretos; factory usa a fonte única; tarefa trivial roteia para Generic.
+- **DoD:** zero duplicação; guardrails + heurística de roteamento codificados e testados.
 
 ### F5.T2 — Gate de dupla aprovação  ·  `pending`
 - **O que:** Ao final do trabalho de execução, o Manager cria subtasks de **Code Reviewer** e **QA** sobre o artefato, em escopo **segregado** (não o mesmo agente/subárvore que produziu). Reusa subtask + wait group (event-driven, sem deadlock — já existe). Ambos precisam aprovar para seguir. Rota conforme §12 (A: Engineer→Code Reviewer→QA; B/C com menos camadas). **Os avaliadores recebem os `TaskArtifact` produzidos (caminho + conteúdo) como entrada explícita de review** — o crivo inspeciona o deliverável real, não só o scope-spec.
 - **Toca:** `orquestrator.ts` (gating antes de REVIEW/COMPLETED), prompts dos avaliadores.
 - **Testes (mock):** Manager delega QA+CR; ambos aprovam → segue; eventos `SUBTASK_CREATED` para ambos.
 - **DoD:** avaliação independente é etapa real, separada do gerador.
+- **Nota anti-one-shotting (Rev2-F1, §2.2):** o sistema **já** desencoraja resolver tudo numa epoch — só o Manager tem a tool de delegação (`includeDelegation`), executores são folhas, e `coerceToWait` coage `completed` prematuro a `WAITING`. Reforço **leve**: se o scope-spec (F2) tem >1 item não-atendido e o agente tentou fechar sem decompor/avançar item a item, injetar uma instrução de decomposição incremental. `ponytail:` nudge no prompt + reusar `coerceToWait`, sem detector novo.
 
-### F5.T3 — Veredito graduável + loop de correção  ·  `pending`
-- **O que:** Estender o contrato de decisão para o avaliador retornar `verdict: 'approved'|'rejected'` + `criteria:[{name,passed,note}]` + `feedback`. Critérios subjetivos viram graduáveis (§8.2) com limiar duro: qualquer critério reprovado ⇒ falha. Reprovação reabre a execução com o feedback injetado (mecânica de reopen existente), incrementando epoch — integra com o monitor de convergência de F3.
+### F5.T3 — Veredito graduável + loop de correção + protocolo de conflito  ·  `pending`
+- **O que:** Estender o contrato de decisão para o avaliador retornar `verdict: 'approved'|'rejected'` + `criteria:[{name,passed,note}]` + `feedback`. Critérios subjetivos viram graduáveis (§8.2) com limiar duro: qualquer critério reprovado ⇒ falha. Reprovação reabre a execução com o feedback injetado (mecânica de reopen existente), incrementando epoch. **Contrato de re-revisão (PF6):** rejeição de **qualquer** avaliador → reabre execução com feedback; ao corrigir, **ambos** re-executam, mas com **escopo no diff** (não full scan), exceto se o diff afetar **contratos públicos** (aí full). `ponytail:` o estado `REVIEW` com reabertura já cobre o fluxo; basta **documentar** o contrato de escopo — sem novo estado `REVIEW_FAILED`. **Anti-deadlock de avaliação (Rev2-F8):** o ciclo “QA reprova → Engineer corrige → quebra o que o Code Reviewer aprovara → CR reprova…” é **quebrado pelo monitor de convergência (F3.T2)** — rejeições cruzadas que não convergem disparam `FAILED(stagnation)`/`max_epochs`, com alerta ao supervisor. Integra com F3.
 - **Toca:** `src/application/decision-parser.ts`, `src/domain/task.ts` (tipos), `orquestrator.ts`, prompts (avaliador **cético**).
-- **Testes (mock):** parse approved/rejected; critério reprovado força rejection; reject→feedback→2ª tentativa aprova.
-- **DoD:** veredito estruturado e validado por schema; feedback acionável e auditável.
+- **Testes (mock):** parse approved/rejected; critério reprovado força rejection; reject→feedback→2ª tentativa aprova; **rejeições cruzadas que não convergem terminam em FAILED via F3** (não loop infinito).
+- **DoD:** veredito estruturado e validado por schema; contrato de re-revisão documentado; deadlock de avaliação tem saída (convergência). Feedback acionável e auditável.
 
 ### F5.T4 — Imposição da DoD (§11)  ·  `pending`
-- **O que:** Antes de `COMPLETED`, checar cumulativamente: (1) objetivo atendido (scope-spec de F2 todo atendido + dupla aprovação); (2) **sem regressão** — gate de suíte estável; (3) **fechamento de árvore** — nenhuma subtask aberta (formalizar a guarda, base via `coerceToWait`); (4) **consolidação de memória** — gravar resumo estruturado de lições/mudanças na memória durável do projeto; (5) **sanidade orçamentária** — dentro dos tetos (F4); (6) **integridade de artefatos** — todo artefato declarado no resultado **existe em disco e é buscável** pelo endpoint de artefato (F7) antes de concluir. Falha em qualquer um ⇒ não conclui.
-- **Toca:** `orquestrator.ts` (guarda de DoD na transição), persistence (memória do projeto — `.swarm/memory/*` ou `project-file-store`).
-- **Testes (mock):** árvore com subtask aberta não conclui; sem dupla aprovação não conclui; **artefato declarado com arquivo ausente bloqueia conclusão**; conclusão grava memória.
+- **O que:** Antes de `COMPLETED`, checar cumulativamente: (1) objetivo atendido (scope-spec de F2 todo atendido + dupla aprovação); (2) **sem regressão** — gate de suíte estável; (3) **fechamento de árvore** — nenhuma subtask aberta (formalizar a guarda, base via `coerceToWait`); (4) **consolidação de memória** *(operacionalizada, PF7)* — o agente atualiza o **progress-log** (de F2.T2) com uma **entrada de fechamento** (resumo final de lições/mudanças) e limpa artefatos temporários; a DoD verifica que o progress-log tem a entrada de fechamento; o resumo também vai à memória durável do projeto; (5) **sanidade orçamentária** — dentro dos tetos (F4); (6) **integridade de artefatos** — todo artefato declarado no resultado **existe em disco** (checado via `task-file-store`, **sem** dependência do endpoint HTTP de F7) antes de concluir. Falha em qualquer um ⇒ não conclui.
+- **Toca:** `orquestrator.ts` (guarda de DoD na transição), `task-file-store.ts` (checagem de existência), persistence (memória do projeto — `.swarm/memory/*` ou `project-file-store`).
+- **Testes (mock):** árvore com subtask aberta não conclui; sem dupla aprovação não conclui; **artefato declarado com arquivo ausente em disco bloqueia conclusão**; conclusão grava entrada de fechamento no progress-log + memória.
 - **DoD:** transição a COMPLETED só com todos os critérios; cada um auditável.
 
 ### F5.T5 — Testes mock + e2e  ·  `pending`

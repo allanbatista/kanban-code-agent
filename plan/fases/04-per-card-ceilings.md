@@ -24,12 +24,13 @@ depends_on: [F0, F1]
 | F4.T3 | Persistir + reidratar budget acumulado (sobrevive a restart) | `pending` |
 | F4.T4 | Catálogo das 6 condições de parada (§10) observável + testes | `pending` |
 | F4.T5 | **Idempotência de efeitos colaterais na retomada (§3.6)** | `pending` |
+| F4.T6 | **Graceful degradation: aviso ao aproximar tetos (wrap-up limpo)** | `pending` |
 
 ### F4.T1 — Governança no domínio  ·  `pending`
-- **O que:** Value object `Governance` (em `domain`) com `maxCost`, `maxActiveMs`, `maxDepth`, `maxRetries` — defaults configuráveis (env/file) e override por task. Mover a **comparação de guarda** (counter ≥ ceiling) para perto do domínio, em vez de só no metadata derivado.
-- **Toca:** `src/domain/task.ts` (ou `domain/governance.ts` novo), `src/infrastructure/config.ts` (defaults).
-- **Testes (mock):** guarda de profundidade vira invariante de domínio; tetos default vêm da config/env.
-- **DoD:** governança modelada no domínio; `ponytail:` value object simples, sem framework de regras.
+- **O que:** Value object `Governance` (em `domain`) com `maxCost`, `maxActiveMs`, `maxDepth`, `maxRetries` e **`maxEpochsWithoutCompletion`** (usado em F3.T2) — defaults configuráveis (env/file) e override por task. Mover a **comparação de guarda** (counter ≥ ceiling) para perto do domínio, em vez de só no metadata derivado. **Imutabilidade mid-flight (M3, §1.5):** a task em execução usa o `Governance`/runtimeConfig **capturado no início do run** (snapshot no run), não a config global atual — mudar a config global não quebra a coerência de execuções em andamento. **Prioridade de budget (M9):** documentar que o **teto por-card é o gate primário** e o teto **global é a rede de segurança** (o global só dispara se o por-card falhar).
+- **Toca:** `src/domain/task.ts` (ou `domain/governance.ts` novo), `src/domain/run.ts` (snapshot de config no run), `src/infrastructure/config.ts` (defaults).
+- **Testes (mock):** guarda de profundidade vira invariante de domínio; tetos default vêm da config/env; **mudar a config global mid-run não altera o gate do run em andamento** (usa o snapshot).
+- **DoD:** governança modelada no domínio com config imutável por run; prioridade por-card>global documentada; `ponytail:` value object simples, sem framework de regras.
 
 ### F4.T2 — Tetos por-card  ·  `pending`
 - **O que:** Ao acumular métricas por task (`task.metrics.cost`/`durationMs`), checar **por card**: excedeu `maxCost` ou `maxActiveMs` ⇒ suspender imediatamente aquele card (→ `FAILED`/`SUSPENDED` com `failureReason='ceiling'`), emitir `BUDGET_EXCEEDED` com escopo do card. Irmãos seguem. Teto global permanece como rede.
@@ -50,10 +51,16 @@ depends_on: [F0, F1]
 - **DoD:** todas as condições cobertas por evento/estado e teste.
 
 ### F4.T5 — Idempotência de efeitos colaterais na retomada  ·  `pending`
-- **O que:** §3.6 exige que “uma retomada após falha não duplique o efeito”. Hoje só há **um** guard: dedup em-memória de `create_subtask` por `(assignedTo,title,message)` (`orquestrator.ts:1022-1029`); `create_artifact` (`:1048`) e `post_message` (`:991`) **não** são idempotentes — re-rodar uma epoch após crash **duplica** artefatos/mensagens. Introduzir **chaves de idempotência** para tools com efeito colateral (generalizar o dedup existente) e estender o dedup de `recordEvent` (`:1898-1912`, hoje só eventos terminais) para os não-terminais re-emitidos no re-run, de modo que a re-execução produza zero duplicatas.
-- **Toca:** `src/application/orquestrator.ts` (`execute` das tools + `recordEvent`).
-- **Testes (mock):** força crash-após-side-effect + re-run da mesma epoch → contagem estável de artefatos/mensagens/eventos (zero duplicatas).
-- **DoD:** retomada idempotente; nenhum efeito colateral duplicado. `ponytail:` reusar o padrão de dedup já existente, sem framework de idempotência.
+- **O que:** §3.6 exige que “uma retomada após falha não duplique o efeito”. Hoje só há **um** guard: dedup em-memória de `create_subtask` por `(assignedTo,title,message)` (`orquestrator.ts:1022-1029`) — **funciona** (inclui o corpo da mensagem), mas casar por conteúdo **não é determinístico o bastante** para o contrato de replay (PF5). Trocar por **chave de idempotência explícita por tool-call** (id gerado pelo harness no momento da invocação, **armazenado no run**), e aplicá-la a `create_subtask`, `create_artifact` (`:1048`) e `post_message` (`:991`) — re-rodar a epoch após crash reusa a chave e **não duplica**. Estender o dedup de `recordEvent` (`:1898-1912`, hoje só eventos terminais) para os não-terminais re-emitidos no re-run.
+- **Toca:** `src/application/orquestrator.ts` (`execute` das tools + `recordEvent`), `src/domain/run.ts` (registro de chaves usadas).
+- **Testes (mock):** força crash-após-side-effect + re-run da mesma epoch → contagem estável de artefatos/mensagens/eventos (zero duplicatas), inclusive com subtasks de mesmo título e **corpos diferentes** (não colidem) e mesmo corpo (idempotente pela chave).
+- **DoD:** retomada idempotente por chave explícita; nenhum efeito colateral duplicado. `ponytail:` chave = id no run, sem framework de idempotência.
+
+### F4.T6 — Graceful degradation ao aproximar tetos  ·  `pending`
+- **O que (M1, §10.5 “falhar de forma limpa”):** Morte súbita por teto deixa artefatos pela metade. Avisar o agente quando atinge um **threshold** (ex.: 80%) do teto de custo/tempo do card, via uma mensagem de sistema (ou tool `budget_warning` consultável), dando chance de **wrap-up limpo** (gravar progresso/artefatos parciais, deixar handoff) antes do `FAILED(ceiling)` abrupto.
+- **Toca:** `orquestrator.ts` (checagem de threshold no acúmulo de métricas), `prompt-builder.ts`/tools.
+- **Testes (mock):** ao cruzar 80% do teto, o agente recebe o aviso antes do corte; um wrap-up registra progresso antes do `FAILED(ceiling)`.
+- **DoD:** aviso de aproximação de teto entregue; corte por teto não deixa estado órfão. `ponytail:` um aviso no prompt no cruzamento do threshold, sem subsistema.
 
 ## Pontos de validação cobertos
 
@@ -63,8 +70,9 @@ depends_on: [F0, F1]
 
 ## Critérios de saída (DoD da fase)
 
-- [ ] F4.T1…F4.T5 em `done`.
-- [ ] Tetos por-card de custo **e** tempo ativo; profundidade como invariante.
+- [ ] F4.T1…F4.T6 em `done`.
+- [ ] Tetos por-card de custo **e** tempo ativo; profundidade como invariante; config imutável por run; `maxEpochsWithoutCompletion` no Governance.
+- [ ] Aviso de aproximação de teto (graceful wrap-up) antes do corte abrupto.
 - [ ] Budget persiste e reidrata; estado sobre-teto sobrevive a restart; aborta só o infrator.
 - [ ] As 6 condições do §10 explícitas, observáveis e testadas.
 - [ ] Tools com efeito colateral idempotentes na retomada (sem duplicar artefatos/mensagens/eventos).
