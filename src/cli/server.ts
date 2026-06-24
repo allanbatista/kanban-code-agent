@@ -65,7 +65,19 @@ export async function runServer(config: SwarmConfig): Promise<void> {
   };
 
   // startServer creates and returns the Fastify instance after listening
-  const server = await startServer(orquestrator, logger, serverOptions);
+  let server;
+  try {
+    server = await startServer(orquestrator, logger, serverOptions);
+  } catch (error) {
+    if ((error as { code?: string }).code === 'EADDRINUSE') {
+      logger.error(
+        `Porta ${config.port} ja esta em uso. Provavelmente ha um servidor antigo rodando. ` +
+          `Finalize-o (ex.: "fuser -k ${config.port}/tcp" ou "lsof -ti:${config.port} | xargs -r kill -9") e tente novamente.`,
+      );
+      process.exit(1);
+    }
+    throw error;
+  }
 
   // Graceful shutdown
   let shuttingDown = false;
