@@ -1,16 +1,14 @@
-// Same-origin by default so the WebSocket matches the page's origin: in dev the
-// Vite server proxies /ws to the API (see vite.config.ts), and in production the
-// API server serves the page. This avoids cross-origin WS (which browsers like
-// Firefox refuse) and localhost IPv4/IPv6 mismatches. Override with VITE_WS_URL,
-// or set VITE_API_URL to derive the WS from an absolute API host.
+declare const __DEV_WS_URL__: string;
+
 function defaultWsUrl(): string {
   const apiBase = import.meta.env.VITE_API_URL;
   if (apiBase) return apiBase.replace(/^http/i, 'ws').replace(/\/+$/, '') + '/ws';
+  if (import.meta.env.DEV) return __DEV_WS_URL__;
   if (typeof window !== 'undefined' && window.location?.host) {
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${wsProto}//${window.location.host}/ws`;
   }
-  return 'ws://localhost:35000/ws';
+  return 'ws://127.0.0.1:35000/ws';
 }
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? defaultWsUrl();

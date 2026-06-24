@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { Outlet } from 'react-router-dom';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Navbar } from '@/components/layout/Navbar';
@@ -9,12 +9,8 @@ import { metadataToTask } from '@/api/adapter';
 
 export function App() {
   const { fetchTasks, fetchAgents, setTasks } = useKanbanStore();
-  const initialized = useRef(false);
 
   useEffect(() => {
-    if (initialized.current) return;
-    initialized.current = true;
-
     // Fetch initial data
     fetchTasks();
     fetchAgents();

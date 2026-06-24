@@ -19,7 +19,7 @@ export function apiTaskToTask(api: ApiTask): Task {
     parentId: api.parentId,
     status: api.status as TaskStatus,
     depth: api.depth,
-    subtaskIds: api.subtaskIds,
+    subtaskIds: Array.isArray(api.subtaskIds) ? api.subtaskIds : [],
     runtimeConfig: {
       model: api.runtimeConfig?.model ?? 'balanced',
       effort: api.runtimeConfig?.effort ?? 'medium',
@@ -55,7 +55,7 @@ export function metadataToTask(meta: any): Task {
     parentId: meta.parentId,
     status: meta.status as TaskStatus,
     depth: meta.depth,
-    subtaskIds: meta.subtaskIds,
+    subtaskIds: Array.isArray(meta.subtaskIds) ? meta.subtaskIds : [],
     runtimeConfig: {
       model: meta.runtimeConfig?.model ?? 'balanced',
       effort: meta.runtimeConfig?.effort ?? 'medium',

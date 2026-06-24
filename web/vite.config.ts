@@ -4,10 +4,14 @@ import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 
 const port = process.env.PORT ? Number(process.env.PORT) : 8888
-const apiPort = process.env.API_PORT ? Number(process.env.API_PORT) : 35000
+const apiPort = process.env.API_PORT ?? process.env.SWARM_PORT ?? "35000"
+const apiTarget = `http://127.0.0.1:${apiPort}`
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  define: {
+    __DEV_WS_URL__: JSON.stringify(`ws://127.0.0.1:${apiPort}/ws`),
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
@@ -16,9 +20,9 @@ export default defineConfig({
   server: {
     port,
     proxy: {
-      "/api": `http://localhost:${apiPort}`,
+      "/api": apiTarget,
       "/ws": {
-        target: `ws://localhost:${apiPort}`,
+        target: apiTarget.replace(/^http/, "ws"),
         ws: true,
       },
     },
