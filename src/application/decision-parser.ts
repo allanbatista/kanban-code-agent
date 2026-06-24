@@ -110,8 +110,9 @@ export function parseDecision(rawOutput: string): AgentDecision {
     obj.messages = [{ type: 'text', text: obj.text || rawOutput }];
   }
 
-  for (let i = 0; i < obj.messages.length; i++) {
-    const msg = obj.messages[i];
+  const messages = obj.messages as unknown[];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
     if (!msg || typeof msg !== 'object' || typeof (msg as Record<string, unknown>).type !== 'string') {
       throw new AgentOutputInvalidError(
         `messages[${i}] missing required "type" field`,

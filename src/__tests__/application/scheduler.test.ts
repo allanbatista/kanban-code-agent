@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { Scheduler } from '../../application/scheduler.js';
 import { Task } from '../../domain/task.js';
 import { TASK_STATUS, SWARM_EVENT_TYPE, WAIT_GROUP_MODE, WAIT_GROUP_STATUS } from '../../domain/types.js';
+import type { TaskStatus } from '../../domain/types.js';
 import type { SwarmEvent } from '../../domain/events.js';
 import type { TaskRun } from '../../domain/run.js';
 import type { WaitGroup } from '../../domain/wait-group.js';
@@ -39,7 +40,7 @@ function makeEvent(overrides: Partial<SwarmEvent> = {}): SwarmEvent {
   };
 }
 
-function makeTask(id: string, status = 'WAITING' as string, run?: TaskRun): Task {
+function makeTask(id: string, status: TaskStatus = 'WAITING', run?: TaskRun): Task {
   const task = new Task({ taskId: id, title: `Task ${id}`, assignedTo: 'agent-1', depth: 0 }, false);
   task.status = status;
   if (run) {

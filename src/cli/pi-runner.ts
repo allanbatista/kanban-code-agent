@@ -204,7 +204,6 @@ export class PiSdkAgentRunner implements AgentRunner {
 
   private async importPiSdk(): Promise<any> {
     try {
-      // @ts-expect-error - optional runtime dependency, not installed for typecheck
       return await import('@earendil-works/pi-coding-agent');
     } catch {
       throw new Error(
