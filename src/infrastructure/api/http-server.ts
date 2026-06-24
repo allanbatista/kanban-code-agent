@@ -75,8 +75,6 @@ export function createServer(
     methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   });
 
-  fastify.register(websocket);
-
   if (opts.staticDir) {
     fastify.register(fastifyStatic, {
       root: opts.staticDir,
@@ -116,7 +114,15 @@ export function createServer(
   registerSettingsRoutes(fastify);
   registerEventRoutes(fastify, orquestrator);
   registerReportRoutes(fastify, orquestrator);
-  registerWebSocket(fastify, orquestrator);
+
+  // The @fastify/websocket onRoute hook only tags routes registered AFTER the
+  // plugin has loaded. Registering the plugin and the /ws route together in an
+  // awaited encapsulated scope guarantees the route is recognized as a
+  // websocket route (otherwise the handler is invoked as a plain HTTP GET).
+  fastify.register(async (instance) => {
+    await instance.register(websocket);
+    registerWebSocket(instance, orquestrator);
+  });
 
   // --- SPA fallback ---
   // Serve index.html for non-API routes so client-side routing works

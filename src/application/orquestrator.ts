@@ -425,6 +425,8 @@ export class Orquestrator extends EventEmitter {
   private async generateTaskTitle(task: Task, message: string): Promise<void> {
     try {
       const title = sanitizeTitle(await this.piClient.generateTitle(message));
+      // The task may have been archived/removed while the title was generated.
+      if (!this.tasks.has(task.taskId)) return;
       if (!title || task.options.title === title) return;
       task.options.title = title;
       this.markTaskDirty(task);
