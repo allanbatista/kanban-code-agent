@@ -40,6 +40,9 @@ export function App() {
         return;
       }
       if (task) useKanbanStore.getState().upsertTask(metadataToTask(task));
+      if (event.type === 'SUBTASK_CREATED' && event.parentId && event.taskId) {
+        useKanbanStore.getState().linkSubtask(event.parentId, event.taskId);
+      }
     });
 
     return () => ws.close();

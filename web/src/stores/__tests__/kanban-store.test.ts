@@ -107,6 +107,17 @@ describe("kanban-store (T04)", () => {
     expect(mockGetTasks).toHaveBeenCalled();
   });
 
+  it("linkSubtask attaches a new subtask to its parent (idempotent)", async () => {
+    const { useKanbanStore } = await import("@/stores/kanbanStore");
+    useKanbanStore.setState({ tasks: [makeTask({ id: "p1", subtaskIds: [] })] });
+
+    useKanbanStore.getState().linkSubtask("p1", "c1");
+    expect(useKanbanStore.getState().tasks[0].subtaskIds).toEqual(["c1"]);
+
+    useKanbanStore.getState().linkSubtask("p1", "c1");
+    expect(useKanbanStore.getState().tasks[0].subtaskIds).toEqual(["c1"]);
+  });
+
   it("fetchTasks sets error on failure", async () => {
     mockGetTasks.mockRejectedValueOnce(new Error("API down"));
 

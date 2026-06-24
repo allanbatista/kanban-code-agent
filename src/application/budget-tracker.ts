@@ -29,6 +29,49 @@ export interface BudgetSummary {
 }
 
 /**
+ * Per-card ceiling configuration.
+ */
+export interface CardCeiling {
+  maxCost?: number;
+  maxActiveMs?: number;
+}
+
+/**
+ * Check if a task's metrics exceed its per-card ceiling.
+ * Returns the reason if exceeded, null otherwise.
+ */
+export function checkCardCeiling(
+  metrics: { cost: number; durationMs: number },
+  ceiling: CardCeiling,
+): 'ceiling' | null {
+  if (ceiling.maxCost !== undefined && ceiling.maxCost > 0 && metrics.cost > ceiling.maxCost) {
+    return 'ceiling';
+  }
+  if (ceiling.maxActiveMs !== undefined && ceiling.maxActiveMs > 0 && metrics.durationMs > ceiling.maxActiveMs) {
+    return 'ceiling';
+  }
+  return null;
+}
+
+/**
+ * Check if a task's metrics are approaching the ceiling (80% threshold).
+ * Returns true if warning threshold reached.
+ */
+export function isApproachingCeiling(
+  metrics: { cost: number; durationMs: number },
+  ceiling: CardCeiling,
+  warningRatio = 0.8,
+): boolean {
+  if (ceiling.maxCost !== undefined && ceiling.maxCost > 0 && metrics.cost > ceiling.maxCost * warningRatio) {
+    return true;
+  }
+  if (ceiling.maxActiveMs !== undefined && ceiling.maxActiveMs > 0 && metrics.durationMs > ceiling.maxActiveMs * warningRatio) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Tracks token usage and cost across all tasks in a swarm run.
  *
  * Thread-safe for callers that sequence calls (no internal locks needed).

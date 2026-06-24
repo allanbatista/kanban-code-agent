@@ -111,7 +111,7 @@ describe('TASK_MESSAGE_TYPE', () => {
 describe('SWARM_EVENT_TYPE', () => {
   it('has all event types', () => {
     const keys = Object.keys(SWARM_EVENT_TYPE);
-    expect(keys).toHaveLength(27);
+    expect(keys).toHaveLength(29);
     expect(SWARM_EVENT_TYPE.TASK_REVIEW).toBe('TASK_REVIEW');
     expect(SWARM_EVENT_TYPE.TASK_ARCHIVED).toBe('TASK_ARCHIVED');
     expect(SWARM_EVENT_TYPE.TASK_CREATED).toBe('TASK_CREATED');
@@ -119,6 +119,8 @@ describe('SWARM_EVENT_TYPE', () => {
     expect(SWARM_EVENT_TYPE.TASK_QUEUED).toBe('TASK_QUEUED');
     expect(SWARM_EVENT_TYPE.TASK_STARTED).toBe('TASK_STARTED');
     expect(SWARM_EVENT_TYPE.TASK_WAITING).toBe('TASK_WAITING');
+    expect(SWARM_EVENT_TYPE.TASK_SUSPENDED).toBe('TASK_SUSPENDED');
+    expect(SWARM_EVENT_TYPE.HEARTBEAT).toBe('HEARTBEAT');
     expect(SWARM_EVENT_TYPE.TASK_RESUMED).toBe('TASK_RESUMED');
     expect(SWARM_EVENT_TYPE.TASK_COMPLETED).toBe('TASK_COMPLETED');
     expect(SWARM_EVENT_TYPE.TASK_FAILED).toBe('TASK_FAILED');

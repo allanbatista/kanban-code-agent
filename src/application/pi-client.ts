@@ -3,6 +3,7 @@ import type { Task } from '../domain/task.js';
 import type { SwarmEvent } from '../domain/events.js';
 import type { Orquestrator } from './orquestrator.js';
 import { buildPrompt } from './prompt-builder.js';
+import type { ScopeSpecItem, ProgressLogEntry, EnvResume } from '../infrastructure/persistence/task-file-store.js';
 
 /**
  * Minimal interface for what we need from Pi SDK.
@@ -77,6 +78,11 @@ export class PiAgentClient {
     orquestrator: Orquestrator,
     triggerEvents: SwarmEvent[],
     signal?: AbortSignal,
+    continuity?: {
+      scopeSpec?: ScopeSpecItem[];
+      progressLog?: ProgressLogEntry[];
+      envResume?: EnvResume | null;
+    },
   ): Promise<AgentRunResult> {
     const runtimeConfig = orquestrator.resolveRuntimeConfig(task, agent);
     const modelConfig = this.allowedModels[runtimeConfig.model];
@@ -143,12 +149,13 @@ export class PiAgentClient {
 
     const systemPrompt = [...commonHeader, ...roleBlock, ...outputBlock].join('\n');
 
-    const prompt = buildPrompt(task, metadata, triggerEvents, this.maxPromptChatMessages);
+    const prompt = buildPrompt(task, metadata, triggerEvents, this.maxPromptChatMessages, continuity);
 
     // post_message + create_artifact go to every agent; create_subtask only to a
     // delegating orchestrator with remaining budget.
     const customTools = orquestrator.buildAgentTools(task, canDelegate);
-    const tools = [...this.tools, ...customTools.map((tool) => tool.name)];
+    // Use agent-specific tools (from definition) + custom orchestration tools
+    const tools = [...agent.tools, ...customTools.map((tool) => tool.name)];
 
     return this.runner.run({
       cwd: taskDir,

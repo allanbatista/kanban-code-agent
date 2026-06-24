@@ -1,5 +1,7 @@
 import type { Task, TaskChatMessage, TaskMetadata } from '../domain/task.js';
 import type { SwarmEvent } from '../domain/events.js';
+import type { ScopeSpecItem, ProgressLogEntry, EnvResume } from '../infrastructure/persistence/task-file-store.js';
+import { MICRO_CYCLE_INSTRUCTION, chooseContextStrategy } from './context-router.js';
 
 /**
  * Idempotent prompt builder — pure function, same input produces same output.
@@ -11,6 +13,11 @@ export function buildPrompt(
   metadata: TaskMetadata,
   triggerEvents: SwarmEvent[],
   maxPromptChatMessages: number,
+  continuity?: {
+    scopeSpec?: ScopeSpecItem[];
+    progressLog?: ProgressLogEntry[];
+    envResume?: EnvResume | null;
+  },
 ): string {
   const eventSummary = triggerEvents.length
     ? triggerEvents
@@ -36,26 +43,53 @@ export function buildPrompt(
                 `${group.waitId}/${group.mode}/${group.status} tasks=${group.taskIds.join(',')} processed=${group.processedEventIds.join(',')}`,
             )
             .join(' ; ');
-          return `- ${run.runId} [${run.status}]: ${groups}`;
+          return `- ${run.runId} (epoch ${run.epoch}) [${run.status}]: ${groups}`;
         })
         .join('\n')
     : 'Sem runs.';
 
   const chatTail = task.chat.slice(-maxPromptChatMessages);
 
-  return [
+  const sections = [
     `Tarefa: ${task.options.title}`,
     `Eventos recebidos:\n${eventSummary}`,
     task.subtaskIds.length > 0
       ? `Subtasks:\n${metadata.subtaskSummary ?? 'Sem subtasks.'}`
       : 'Sem subtasks.',
     `Runs:\n${runSummary}`,
+  ];
+
+  // Continuity artifacts (selective rehydration)
+  if (continuity?.scopeSpec?.length) {
+    const specLines = continuity.scopeSpec.map(
+      (item) => `- [${item.satisfied ? 'x' : ' '}] ${item.id}: ${item.description}`,
+    );
+    sections.push(`Scope-Spec (checklist de escopo):\n${specLines.join('\n')}`);
+  }
+
+  if (continuity?.progressLog?.length) {
+    const logLines = continuity.progressLog.slice(-5).map(
+      (entry) => `- ${entry.ts} epoch=${entry.epoch ?? '-'} ${entry.action}: ${entry.detail ?? ''}`,
+    );
+    sections.push(`Progresso recente:\n${logLines.join('\n')}`);
+  }
+
+  if (continuity?.envResume) {
+    const resume = continuity.envResume;
+    const parts = [];
+    if (resume.testCommand) parts.push(`Teste: ${resume.testCommand}`);
+    if (resume.buildCommand) parts.push(`Build: ${resume.buildCommand}`);
+    if (resume.notes) parts.push(`Notas: ${resume.notes}`);
+    sections.push(`Ambiente:\n${parts.join('\n')}`);
+  }
+
+  sections.push(
     `Task chat:\n${chatTail.map(formatChatMessage).join('\n')}`,
-    task.piSessionFile
-      ? `Sessao Pi persistida: ${task.piSessionFile}`
-      : 'Sem sessao Pi persistida.',
-    'Continue a partir do historico anterior da sessao, decida o proximo passo e retorne somente o JSON estruturado.',
-  ].join('\n\n');
+    MICRO_CYCLE_INSTRUCTION,
+    'Decida o proximo passo e retorne somente o JSON estruturado.',
+  );
+
+  return sections.join('\n\n');
 }
 
 function formatChatMessage(message: TaskChatMessage): string {

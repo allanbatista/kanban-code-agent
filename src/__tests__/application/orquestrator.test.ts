@@ -9,167 +9,32 @@ process.env.SWARM_MAX_TASK_RETRIES = '2';
 process.env.SWARM_MAX_TECHNICAL_RETRIES = '1';
 
 import { Orquestrator } from '../../application/orquestrator.js';
-import { PiAgentClient } from '../../application/pi-client.js';
-import { EventStore } from '../../infrastructure/persistence/event-store.js';
-import { SnapshotStore } from '../../infrastructure/persistence/snapshot-store.js';
-import { TaskFileStore } from '../../infrastructure/persistence/task-file-store.js';
-import { PathSandbox } from '../../infrastructure/filesystem/sandbox.js';
 import { Task } from '../../domain/task.js';
 import { TASK_STATUS, SWARM_EVENT_TYPE, WAIT_GROUP_MODE, WAIT_GROUP_STATUS } from '../../domain/types.js';
 import type { Agent } from '../../domain/agent.js';
-import type { AgentRunResult, AgentRunner, AgentRunConfig } from '../../application/pi-client.js';
+import type { AgentRunResult, AgentRunner, AgentRunConfig, PiAgentClient } from '../../application/pi-client.js';
 import type { SwarmEvent } from '../../domain/events.js';
 import type { TaskMetadata, AgentDecision } from '../../domain/task.js';
 import type { OrquestratorDeps } from '../../application/orquestrator.js';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-const testAgent: Agent = {
-  name: 'agent-tester',
-  role: 'Voce e um agente de teste.',
-  runtimeConfig: { model: 'fast', effort: 'off' },
-  tools: ['read', 'grep'],
-};
-
-function completedDecision(text = 'Tarefa concluida com sucesso.'): string {
-  return JSON.stringify({
-    status: 'completed',
-    messages: [{ type: 'text', text }],
-  });
-}
-
-function waitingDecision(
-  waitGroups: Array<{ waitId: string; mode: 'WAIT_ALL' | 'ON_DEMAND'; taskIds: string[] }>,
-  text = 'Aguardando subtasks.',
-): string {
-  return JSON.stringify({ status: 'waiting', messages: [{ type: 'text', text }], waitGroups });
-}
-
-function retryDecision(instructions = 'Tente novamente com novo modelo', model?: string, effort?: string): string {
-  const base: Record<string, unknown> = {
-    status: 'retry',
-    messages: [{ type: 'text', text: 'Precisa retry' }],
-    instructions,
-  };
-  if (model) base.model = model;
-  if (effort) base.effort = effort;
-  return JSON.stringify(base);
-}
-
-function makeRunner(responses: string[]): AgentRunner {
-  let index = 0;
-  return {
-    async run(): Promise<AgentRunResult> {
-      const output = responses[index] ?? completedDecision();
-      index++;
-      return {
-        output,
-        stats: { tokens: { input: 100, output: 50, total: 150 }, cost: 0.001 },
-      };
-    },
-  };
-}
-
-function makeDecisionRunner(decisions: AgentDecision[]): AgentRunner {
-  let index = 0;
-  return {
-    async run(): Promise<AgentRunResult> {
-      const decision = decisions[index] ?? { status: 'completed', messages: [{ type: 'text', text: 'done' }] };
-      index++;
-      return {
-        output: JSON.stringify(decision),
-        stats: { tokens: { input: 100, output: 50, total: 150 }, cost: 0.001 },
-      };
-    },
-  };
-}
-
-// Routes canned decisions per taskId (taken from cwd) and can block a task's run
-// on a gate promise, so subtasks stay deterministically "pending".
-function makeRoutedRunner(
-  byTask: Record<string, string[]>,
-  gates: Record<string, Promise<unknown>> = {},
-): AgentRunner {
-  const idx: Record<string, number> = {};
-  return {
-    async run(config: AgentRunConfig): Promise<AgentRunResult> {
-      const taskId = basename(String(config.cwd));
-      if (taskId in gates) await gates[taskId];
-      const i = idx[taskId] ?? 0;
-      idx[taskId] = i + 1;
-      const output = (byTask[taskId] ?? [])[i] ?? completedDecision();
-      return { output, stats: { tokens: { input: 10, output: 5, total: 15 }, cost: 0.001 } };
-    },
-  };
-}
-
-function waitForStatus(orc: Orquestrator, task: Task, status: string): Promise<void> {
-  return new Promise((resolve) => {
-    const check = (): void => {
-      if (task.status === status) return resolve();
-      orc.once('state:changed', check);
-    };
-    check();
-  });
-}
-
-function throwingRunner(error: Error): AgentRunner {
-  return {
-    async run(): Promise<AgentRunResult> {
-      throw error;
-    },
-  };
-}
-
-function createPiClient(responses: string[]): PiAgentClient {
-  const allowedModels = {
-    fast: { provider: 'openrouter', modelId: 'test-fast' },
-    balanced: { provider: 'openrouter', modelId: 'test-balanced' },
-    deep: { provider: 'openrouter', modelId: 'test-deep' },
-  };
-  return new PiAgentClient(makeRunner(responses), '', ['read'], allowedModels, 60);
-}
-
-function createPiClientWithRunner(runner: AgentRunner): PiAgentClient {
-  const allowedModels = {
-    fast: { provider: 'openrouter', modelId: 'test-fast' },
-    balanced: { provider: 'openrouter', modelId: 'test-balanced' },
-    deep: { provider: 'openrouter', modelId: 'test-deep' },
-  };
-  return new PiAgentClient(runner, '', ['read'], allowedModels, 60);
-}
-
-function createDeps(
-  dir: string,
-  piClient: PiAgentClient,
-): OrquestratorDeps {
-  const sandbox = new PathSandbox(dir);
-  return {
-    eventStore: new EventStore(sandbox),
-    snapshotStore: new SnapshotStore(sandbox),
-    taskFileStore: new TaskFileStore(sandbox),
-    sandbox,
-    agents: [testAgent],
-    piClient,
-  };
-}
-
-function findEvent(events: SwarmEvent[], type: string, taskId?: string): SwarmEvent | undefined {
-  return events.find((e) => {
-    if (e.type !== type) return false;
-    if (taskId !== undefined && e.taskId !== taskId) return false;
-    return true;
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Helper to access private fields for assertions
-// ---------------------------------------------------------------------------
-function getEvents(o: Orquestrator): SwarmEvent[] {
-  return (o as any).events;
-}
+import {
+  completedDecision,
+  waitingDecision,
+  retryDecision,
+  makeRunner,
+  makeDecisionRunner,
+  makeRoutedRunner,
+  throwingRunner,
+  testAgent,
+} from '../_helpers/mock-agent.js';
+import {
+  createPiClient,
+  createPiClientWithRunner,
+  createDeps,
+  waitForStatus,
+  getEvents,
+  findEvent,
+} from '../_helpers/orquestrator-fixture.js';
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -219,6 +84,22 @@ describe('Orquestrator', () => {
       const orc = new Orquestrator(deps);
 
       expect(orc.getAgentNames()).toEqual(['agent-tester']);
+    });
+
+    it('uses injected models from deps instead of hardcoded defaults', () => {
+      const client = createPiClient([]);
+      const customModels = {
+        fast: { provider: 'custom', modelId: 'custom-fast-model', description: 'fast desc' },
+        balanced: { provider: 'custom', modelId: 'custom-balanced-model', description: 'balanced desc' },
+        deep: { provider: 'custom', modelId: 'custom-deep-model', description: 'deep desc' },
+      };
+      const deps = { ...createDeps(dir, client), models: customModels };
+      const orc = new Orquestrator(deps);
+      const task = orc.createRootTask('Test', 'agent-tester');
+      const metadata = orc.toMetadata(task);
+
+      expect(metadata.allowedModels).toEqual(customModels);
+      expect(metadata.allowedModels.fast.provider).toBe('custom');
     });
   });
 
@@ -548,6 +429,14 @@ describe('Orquestrator', () => {
       expect(meta.allowedEfforts).toBeDefined();
     });
 
+    it('includes subtaskIds so the UI can rebuild the subtask tree over WS', () => {
+      const orc = new Orquestrator(createDeps(dir, createPiClient([])));
+      const parent = orc.createRootTask('Parent', 'agent-tester');
+      const sub = orc.spawnSubtask(parent, 'agent-tester', 'Sub', 'msg');
+
+      expect(orc.toMetadata(parent).subtaskIds).toContain(sub.taskId);
+    });
+
     it('with depth=maxDepth shows canCreateSubtasks=false', () => {
       const client = createPiClient([]);
       const deps = createDeps(dir, client);
@@ -759,7 +648,7 @@ describe('Orquestrator', () => {
       // Actually we can test the waitGraphReachable method
       // Set up A's activeRun with a waitGroup for B
       const runA = {
-        runId: 'run_a',
+        runId: 'run_a', epoch: 1,
         status: 'WAITING' as const,
         waitGroups: [{
           waitId: 'wg_a',
@@ -775,7 +664,7 @@ describe('Orquestrator', () => {
       taskA.activeRunId = runA.runId;
 
       const runB = {
-        runId: 'run_b',
+        runId: 'run_b', epoch: 1,
         status: 'WAITING' as const,
         waitGroups: [{
           waitId: 'wg_b',
@@ -1164,15 +1053,7 @@ describe('Orquestrator user lifecycle', () => {
   };
 
   function managerDeps(piClient: PiAgentClient): OrquestratorDeps {
-    const sandbox = new PathSandbox(dir);
-    return {
-      eventStore: new EventStore(sandbox),
-      snapshotStore: new SnapshotStore(sandbox),
-      taskFileStore: new TaskFileStore(sandbox),
-      sandbox,
-      agents: [managerAgent],
-      piClient,
-    };
+    return createDeps(dir, piClient, [managerAgent]);
   }
 
   function settle(task: Task): Promise<void> {

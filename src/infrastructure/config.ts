@@ -30,7 +30,9 @@ export interface SwarmConfig {
 
 const DEFAULTS: SwarmConfig = {
   port: 35000,
-  // Persistência fora do projeto, no diretório do usuário (~/.kca).
+  // Data root: ~/.kca — all swarm persistence lives under ~/.kca/.swarm/
+  // Override via SWARM_DATA_DIR envvar or data_dir in swarm.yml.
+  // Structure: .swarm/{events,tasks,state.snapshot.json}
   dataDir: resolve(homedir(), '.kca'),
   logLevel: 'info',
   maxConcurrency: 3,

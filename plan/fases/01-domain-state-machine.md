@@ -1,7 +1,7 @@
 ---
 fase: F1
 slug: 01-domain-state-machine
-status: pending
+status: done
 depends_on: [F0]
 ---
 

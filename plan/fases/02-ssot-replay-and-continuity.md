@@ -1,7 +1,7 @@
 ---
 fase: F2
 slug: 02-ssot-replay-and-continuity
-status: pending
+status: done
 depends_on: [F0, F1]
 ---
 

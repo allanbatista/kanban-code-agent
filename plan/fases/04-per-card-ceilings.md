@@ -1,7 +1,7 @@
 ---
 fase: F4
 slug: 04-per-card-ceilings
-status: pending
+status: done
 depends_on: [F0, F1]
 ---
 

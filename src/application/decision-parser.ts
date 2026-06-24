@@ -113,11 +113,29 @@ export function parseDecision(rawOutput: string): AgentDecision {
   const messages = obj.messages as unknown[];
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
-    if (!msg || typeof msg !== 'object' || typeof (msg as Record<string, unknown>).type !== 'string') {
+    if (!msg || typeof msg !== 'object') {
       throw new AgentOutputInvalidError(
-        `messages[${i}] missing required "type" field`,
+        `messages[${i}] is not a valid object`,
         rawOutput,
       );
+    }
+    const msgObj = msg as Record<string, unknown>;
+    // Normalize: DeepSeek sometimes returns {role, content} instead of {type, text}
+    if (msgObj.role && msgObj.content && !msgObj.type) {
+      msgObj.type = msgObj.role === 'user' ? 'text' : 'text';
+      msgObj.text = msgObj.content;
+      delete msgObj.role;
+      delete msgObj.content;
+    }
+    if (typeof msgObj.type !== 'string') {
+      // Default to 'text' if type is missing
+      msgObj.type = 'text';
+    }
+    if (!msgObj.text && typeof msgObj.content === 'string') {
+      msgObj.text = msgObj.content;
+    }
+    if (!msgObj.text) {
+      msgObj.text = JSON.stringify(msgObj);
     }
   }
 

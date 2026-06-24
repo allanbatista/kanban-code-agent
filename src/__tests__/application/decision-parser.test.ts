@@ -137,9 +137,17 @@ describe('parseDecision', () => {
       expect(Array.isArray(result.messages)).toBe(true);
     });
 
-    it('throws when message lacks type field', () => {
+    it('defaults to text when message lacks type field', () => {
       const output = '{"status":"completed","messages":[{}]}';
-      expect(() => parseDecision(output)).toThrow(AgentOutputInvalidError);
+      const decision = parseDecision(output);
+      expect(decision.messages[0].type).toBe('text');
+    });
+
+    it('normalizes {role, content} to {type, text}', () => {
+      const output = '{"status":"completed","messages":[{"role":"system","content":"Hello"}]}';
+      const decision = parseDecision(output);
+      expect(decision.messages[0].type).toBe('text');
+      expect(decision.messages[0].text).toBe('Hello');
     });
 
     it('throws when waitGroups is not an array', () => {

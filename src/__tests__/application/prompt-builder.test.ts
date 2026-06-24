@@ -16,7 +16,7 @@ function makeBaseMetadata(overrides: Partial<TaskMetadata> = {}): TaskMetadata {
     depth: 0,
     maxDepth: 5,
     canCreateSubtasks: true,
-    sessionFile: '.swarm/tasks/task_test-1/session.jsonl',
+    subtaskIds: [],
     chatFile: '.swarm/tasks/task_test-1/chat.jsonl',
     attachmentsDir: '.swarm/tasks/task_test-1/attachments',
     artifactsDir: '.swarm/tasks/task_test-1/artifacts',
@@ -101,16 +101,9 @@ describe('buildPrompt', () => {
       expect(prompt).toContain('Sem subtasks.');
     });
 
-    it('contains pi session file info', () => {
-      task.piSessionFile = '/path/to/session';
+    it('contains instruction to return structured JSON', () => {
       const prompt = buildPrompt(task, metadata, [], 60);
-      expect(prompt).toContain('Sessao Pi persistida: /path/to/session');
-    });
-
-    it('says "Sem sessao Pi persistida" when no session file', () => {
-      task.piSessionFile = undefined;
-      const prompt = buildPrompt(task, metadata, [], 60);
-      expect(prompt).toContain('Sem sessao Pi persistida.');
+      expect(prompt).toContain('JSON estruturado');
     });
   });
 
@@ -193,6 +186,7 @@ describe('buildPrompt', () => {
       const run: TaskRun = {
         runId: 'run_1',
         status: 'RUNNING',
+        epoch: 1,
         waitGroups: [],
         resultMessages: [],
         createdAt: '2025-01-01T00:00:00.000Z',
@@ -283,6 +277,7 @@ describe('buildPrompt', () => {
       const run: TaskRun = {
         runId: 'run_1',
         status: 'WAITING',
+        epoch: 1,
         waitGroups: [
           { waitId: 'wg1', mode: 'WAIT_ALL', taskIds: ['task_sub-1'], processedEventIds: [], status: 'WAITING' },
         ],

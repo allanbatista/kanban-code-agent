@@ -1,7 +1,7 @@
 ---
 fase: F7
 slug: 07-heartbeats-telemetry-and-ui
-status: pending
+status: done
 depends_on: [F0, F1, F3, F4, F6]
 ---
 

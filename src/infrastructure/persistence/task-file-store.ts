@@ -5,6 +5,30 @@ import { AtomicWriter } from '../filesystem/atomic-writer.js';
 import { PathSandbox } from '../filesystem/sandbox.js';
 import type { TaskChatMessage, TaskArtifact, SerializedTask } from '../../domain/task.js';
 
+// ---------------------------------------------------------------------------
+// Continuity artifact types
+// ---------------------------------------------------------------------------
+
+export interface ScopeSpecItem {
+  id: string;
+  description: string;
+  satisfied: boolean;
+  verifiedAt?: string;
+}
+
+export interface ProgressLogEntry {
+  ts: string;
+  epoch?: number;
+  action: string;
+  detail?: string;
+}
+
+export interface EnvResume {
+  testCommand?: string;
+  buildCommand?: string;
+  notes?: string;
+}
+
 /**
  * Per-task file management under `.swarm/tasks/{taskId}/`.
  *
@@ -99,6 +123,52 @@ export class TaskFileStore {
     const path = this.sandbox.resolveSubpath('.swarm', 'tasks', taskId, 'artifacts', fileName);
     AtomicWriter.write(path, content);
     return this.sandbox.relativeTo(path);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Continuity Artifacts (F2.T2)
+  // ---------------------------------------------------------------------------
+
+  /** Save the scope-spec (verifiable checklist of capabilities). */
+  saveScopeSpec(taskId: string, spec: ScopeSpecItem[]): void {
+    this.assertSandbox();
+    const path = this.taskPath(taskId, 'scope-spec.json');
+    AtomicWriter.writeJson(path, spec);
+  }
+
+  /** Load the scope-spec. Returns empty array if missing. */
+  loadScopeSpec(taskId: string): ScopeSpecItem[] {
+    this.assertSandbox();
+    const path = this.taskPath(taskId, 'scope-spec.json');
+    return this.readJsonFile<ScopeSpecItem[]>(path) ?? [];
+  }
+
+  /** Append an entry to the progress-log. */
+  appendProgressLog(taskId: string, entry: ProgressLogEntry): void {
+    this.assertSandbox();
+    const path = this.taskPath(taskId, 'progress-log.jsonl');
+    AtomicWriter.appendLine(path, JSON.stringify(entry));
+  }
+
+  /** Load the full progress-log. */
+  loadProgressLog(taskId: string): ProgressLogEntry[] {
+    this.assertSandbox();
+    const path = this.taskPath(taskId, 'progress-log.jsonl');
+    return this.readJsonlFile<ProgressLogEntry>(path);
+  }
+
+  /** Save environment resume instructions. */
+  saveEnvResume(taskId: string, resume: EnvResume): void {
+    this.assertSandbox();
+    const path = this.taskPath(taskId, 'env-resume.json');
+    AtomicWriter.writeJson(path, resume);
+  }
+
+  /** Load environment resume. Returns null if missing. */
+  loadEnvResume(taskId: string): EnvResume | null {
+    this.assertSandbox();
+    const path = this.taskPath(taskId, 'env-resume.json');
+    return this.readJsonFile<EnvResume>(path);
   }
 
   // ---------------------------------------------------------------------------

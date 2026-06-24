@@ -1,7 +1,7 @@
 ---
 fase: F3
 slug: 03-convergence-and-epochs
-status: pending
+status: done
 depends_on: [F0, F1]
 ---
 

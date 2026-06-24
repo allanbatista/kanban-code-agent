@@ -1,7 +1,7 @@
 ---
 fase: F0
 slug: 00-baseline-and-harness
-status: pending
+status: done
 depends_on: []
 ---
 

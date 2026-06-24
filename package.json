@@ -16,6 +16,7 @@
     "dev:all": "trap 'kill 0' EXIT; npm run start:server & (cd web && npm run dev) & wait",
     "test": "vitest run",
     "test:watch": "vitest",
+    "validate:live": "SWARM_VALIDATION=1 vitest run src/__tests__/validation/",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "typecheck": "tsc --noEmit",

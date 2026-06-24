@@ -8,56 +8,19 @@ import { TaskFileStore } from '../infrastructure/persistence/task-file-store.js'
 import type { SwarmConfig } from '../infrastructure/config.js';
 import { loadConfig } from '../infrastructure/config.js';
 import { PiSdkAgentRunner } from './pi-runner.js';
+import { AGENTS } from '../infrastructure/agents/index.js';
 
 // ---------------------------------------------------------------------------
-// Default agents (matches PoC)
+// Agents from unified source
 // ---------------------------------------------------------------------------
 
 function createAgents(): Agent[] {
-  return [
-    {
-      name: 'Manager',
-      role: 'Voce e o Gerente de projetos Senior focado em orquestracao macro. Siga instrucoes e entregue task de forma objetiva.',
-      runtimeConfig: { model: 'fast', effort: 'minimal' },
-      tools: ['read', 'write', 'bash', 'edit', 'grep', 'find'],
-    },
-    {
-      name: 'Produto',
-      role: 'Voce e o Product Owner Senior, focado em regras de negocio e requisitos.',
-      runtimeConfig: { model: 'fast', effort: 'low' },
-      tools: ['read', 'write', 'bash', 'edit', 'grep', 'find'],
-    },
-    {
-      name: 'Architecture',
-      role: 'Voce e o Arquiteto de Software Senior, focado em design de sistemas, padroes arquiteturais e qualidade tecnica.',
-      runtimeConfig: { model: 'balanced', effort: 'medium' },
-      tools: ['read', 'write', 'bash', 'edit', 'grep', 'find'],
-    },
-    {
-      name: 'Engineer',
-      role: 'Voce e o Principal Engenheiro de Software, focado em arquitetura e codigo.',
-      runtimeConfig: { model: 'fast', effort: 'medium' },
-      tools: ['read', 'write', 'bash', 'edit', 'grep', 'find'],
-    },
-    {
-      name: 'Code Reviewer',
-      role: 'Voce e o Revisor de Codigo Senior, focado em qualidade, boas praticas e deteccao de problemas.',
-      runtimeConfig: { model: 'balanced', effort: 'medium' },
-      tools: ['read', 'grep', 'find'],
-    },
-    {
-      name: 'QA',
-      role: 'Voce e o Analista de Qualidade Senior, focado em testes, validacao e garantia de qualidade.',
-      runtimeConfig: { model: 'balanced', effort: 'low' },
-      tools: ['read', 'bash', 'grep', 'find'],
-    },
-    {
-      name: 'Generic',
-      role: 'Voce e um executor de tarefas gerais de apoio.',
-      runtimeConfig: { model: 'fast', effort: 'off' },
-      tools: ['read', 'write', 'bash', 'edit', 'grep', 'find'],
-    },
-  ];
+  return AGENTS.map((def) => ({
+    name: def.name,
+    role: def.role,
+    runtimeConfig: def.runtimeConfig,
+    tools: def.tools,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +65,11 @@ export async function createOrquestrator(
     sandbox,
     agents,
     piClient,
+    models: {
+      fast: { ...resolvedConfig.models.fast, description: 'tarefas simples e baixo custo' },
+      balanced: { ...resolvedConfig.models.balanced, description: 'uso geral equilibrado' },
+      deep: { ...resolvedConfig.models.deep, description: 'tarefas complexas ou criticas' },
+    },
   };
 
   return new Orquestrator(deps, options ?? {});

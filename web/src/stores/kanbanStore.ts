@@ -27,6 +27,7 @@ interface KanbanState {
 
   setTasks: (tasks: Task[]) => void;
   upsertTask: (task: Task) => void;
+  linkSubtask: (parentId: string, subtaskId: string) => void;
   updateTaskStatus: (taskId: string, status: TaskStatus) => void;
   addTask: (task: Task) => void;
   removeTask: (taskId: string) => void;
@@ -224,6 +225,17 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
       tasks: state.tasks.some((t) => t.id === task.id)
         ? state.tasks.map((t) => (t.id === task.id ? task : t))
         : [...state.tasks, task],
+    })),
+
+  // Attach a freshly-created subtask to its parent so the workflow/summary show
+  // it at creation — the parent won't re-broadcast until it next emits an event.
+  linkSubtask: (parentId, subtaskId) =>
+    set((state) => ({
+      tasks: state.tasks.map((t) =>
+        t.id === parentId && !t.subtaskIds.includes(subtaskId)
+          ? { ...t, subtaskIds: [...t.subtaskIds, subtaskId] }
+          : t,
+      ),
     })),
 
   updateTaskStatus: (taskId, status) =>

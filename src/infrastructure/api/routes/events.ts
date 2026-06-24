@@ -25,13 +25,10 @@ export function registerEventRoutes(
 
     reply.raw.write('event: connected\ndata: {}\n\n');
 
-    const onStateChanged = () => {
-      const latest = orquestrator.events.slice(-1)[0];
-      if (latest) {
-        const data = JSON.stringify(latest);
-        if (!reply.raw.destroyed) {
-          reply.raw.write(`event: event\ndata: ${data}\n\n`);
-        }
+    const onEvent = (event: SwarmEvent) => {
+      if (!reply.raw.destroyed) {
+        const data = JSON.stringify(event);
+        reply.raw.write(`event: event\ndata: ${data}\nid: ${event.seq}\n\n`);
       }
     };
 
@@ -42,10 +39,10 @@ export function registerEventRoutes(
       reply.raw.write(`event: state\ndata: ${stateData}\n\n`);
     }
 
-    orquestrator.on('state:changed', onStateChanged);
+    orquestrator.on('event', onEvent);
 
     request.raw.on('close', () => {
-      orquestrator.off('state:changed', onStateChanged);
+      orquestrator.off('event', onEvent);
     });
 
     // Keep connection alive
@@ -91,25 +88,18 @@ export function registerEventRoutes(
       }
     }
 
-    const onStateChanged = () => {
+    const onEvent = (event: SwarmEvent) => {
       if (reply.raw.destroyed) return;
-      // Filter events relevant to this task
-      const relevant = orquestrator.events.filter(
-        (e) => e.taskId === taskId || e.parentId === taskId,
-      );
-      const latest = relevant.slice(-1)[0];
-      if (latest) {
-        const data = JSON.stringify(latest);
-        if (!reply.raw.destroyed) {
-          reply.raw.write(`event: event\ndata: ${data}\n\n`);
-        }
+      if (event.taskId === taskId || event.parentId === taskId) {
+        const data = JSON.stringify(event);
+        reply.raw.write(`event: event\ndata: ${data}\nid: ${event.seq}\n\n`);
       }
     };
 
-    orquestrator.on('state:changed', onStateChanged);
+    orquestrator.on('event', onEvent);
 
     request.raw.on('close', () => {
-      orquestrator.off('state:changed', onStateChanged);
+      orquestrator.off('event', onEvent);
     });
 
     const keepAlive = setInterval(() => {

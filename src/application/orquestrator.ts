@@ -24,7 +24,8 @@ import {
   WAIT_GROUP_STATUS,
 } from '../domain/types.js';
 import { AgentOutputInvalidError, parseDecision } from './decision-parser.js';
-import { BudgetTracker, BudgetExceededError } from './budget-tracker.js';
+import { BudgetTracker, BudgetExceededError, checkCardCeiling } from './budget-tracker.js';
+import { checkStagnation, type RunSignal } from './convergence.js';
 import { Scheduler } from './scheduler.js';
 import { WorkerPool, RunTimeoutError } from './worker-pool.js';
 import { RunCancelledError, type PiAgentClient, type CustomToolSpec } from './pi-client.js';
@@ -49,11 +50,60 @@ const ALLOWED_MODELS: Record<ModelAlias, { provider: string; modelId: string; de
 };
 
 const ALLOWED_EFFORTS: EffortLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+
+// Model escalation ladder: fast → balanced → deep
+const MODEL_LADDER: ModelAlias[] = ['fast', 'balanced', 'deep'];
+const EFFORT_LADDER: EffortLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 const DEFAULT_RUNTIME_CONFIG: Required<RuntimeConfig> = { model: DEFAULT_MODEL_ALIAS, effort: DEFAULT_EFFORT };
 
 // Sentinel agent for tasks that sit in the Inbox awaiting user action (never scheduled).
 export const INBOX_AGENT = 'inbox';
 // Agent that orchestrates user-created tasks once they are sent to execution.
+/** Sanitize agent messages: remove raw technical errors before showing to user. */
+function sanitizeMessages(messages: import('../domain/task.js').AgentOutputMessage[]): import('../domain/task.js').AgentOutputMessage[] {
+  const ERROR_PATTERNS = [
+    /ERROR:\s*Cannot read/i,
+    /Error:\s*clipboard/i,
+    /model does not support/i,
+    /__vite_ssr/i,
+    /import\.meta\.resolve/i,
+    /stack trace/i,
+    /at\s+\S+\.\w+:\d+:\d+/i, // stack frames
+  ];
+
+  return messages.map((msg) => {
+    if (!msg.text) return msg;
+    let text = msg.text;
+
+    // Remove lines matching error patterns
+    const lines = text.split('\n');
+    const filtered = lines.filter((line) => !ERROR_PATTERNS.some((p) => p.test(line)));
+
+    // If everything was filtered, provide a friendly fallback
+    if (filtered.length === 0 || filtered.every((l) => l.trim() === '')) {
+      return { ...msg, text: 'Tarefa concluída. Verifique os resultados.' };
+    }
+
+    // Clean up markdown-wrapped JSON blocks
+    text = filtered.join('\n').trim();
+    text = text.replace(/^```json\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+
+    return { ...msg, text };
+  });
+}
+
+/** Sanitize a technical error message for user display. */
+function sanitizeErrorMessage(message: string): string {
+  if (/clipboard/i.test(message)) return 'Erro ao processar entrada do modelo.';
+  if (/import\.meta|__vite/i.test(message)) return 'Erro interno de configuração do runner.';
+  if (/timeout/i.test(message)) return 'A execução excedeu o tempo limite.';
+  if (/budget/i.test(message)) return 'O orçamento de tokens foi excedido.';
+  if (/model does not support/i.test(message)) return 'O modelo não suporta esta operação.';
+  // Generic fallback: keep first 100 chars, remove stack traces
+  const clean = message.split('\n')[0]?.slice(0, 100) ?? 'Erro desconhecido';
+  return clean;
+}
+
 const MANAGER_AGENT = 'Manager';
 const MAX_TITLE_LENGTH = 80;
 
@@ -66,9 +116,21 @@ function deriveProvisionalTitle(message: string): string {
 
 // Cleans an LLM-generated title: single line, no surrounding quotes, bounded length.
 function sanitizeTitle(raw: string): string {
-  const oneLine = raw.trim().split('\n')[0]?.trim() ?? '';
+  let oneLine = raw.trim().split('\n')[0]?.trim() ?? '';
+  // Strip JSON blocks from title generation
+  oneLine = oneLine.replace(/^```json\s*/i, '').replace(/\s*```$/i, '');
+  // If it looks like JSON, try to extract a meaningful title
+  if (oneLine.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(oneLine);
+      if (parsed.title) return parsed.title.slice(0, MAX_TITLE_LENGTH);
+      if (parsed.messages?.[0]?.text) return parsed.messages[0].text.slice(0, MAX_TITLE_LENGTH);
+    } catch { /* not valid JSON, use as-is */ }
+    // Strip JSON syntax
+    oneLine = oneLine.replace(/[{}"',:[\]]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
   const unquoted = oneLine.replace(/^["'`]+|["'`]+$/g, '').trim();
-  if (unquoted.length <= MAX_TITLE_LENGTH) return unquoted;
+  if (unquoted.length <= MAX_TITLE_LENGTH) return unquoted || 'Nova tarefa';
   return unquoted.slice(0, MAX_TITLE_LENGTH - 1).trimEnd() + '…';
 }
 
@@ -94,6 +156,7 @@ export interface OrquestratorDeps {
   sandbox: PathSandbox;
   agents: Agent[];
   piClient: PiAgentClient;
+  models?: Record<ModelAlias, { provider: string; modelId: string; description: string }>;
 }
 
 export interface OrquestratorOptions {
@@ -142,19 +205,25 @@ function terminalEventVerb(type: string): string {
   return type.toLowerCase();
 }
 
-function isModelAlias(value: unknown): value is ModelAlias {
-  return typeof value === 'string' && value in ALLOWED_MODELS;
+function isModelAlias(
+  value: unknown,
+  models: Record<string, unknown> = ALLOWED_MODELS,
+): value is ModelAlias {
+  return typeof value === 'string' && value in models;
 }
 
 function isEffortLevel(value: unknown): value is EffortLevel {
   return typeof value === 'string' && ALLOWED_EFFORTS.includes(value as EffortLevel);
 }
 
-function normalizeRuntimeConfig(config?: RuntimeConfig): RuntimeConfig | undefined {
+function normalizeRuntimeConfig(
+  config?: RuntimeConfig,
+  models?: Record<ModelAlias, { provider: string; modelId: string }>,
+): RuntimeConfig | undefined {
   if (!config) return undefined;
   const normalized: RuntimeConfig = {};
   if (config.model !== undefined) {
-    if (!isModelAlias(config.model)) throw new Error(`Modelo alias invalido: ${config.model}`);
+    if (!isModelAlias(config.model, models ?? ALLOWED_MODELS)) throw new Error(`Modelo alias invalido: ${config.model}`);
     normalized.model = config.model;
   }
   if (config.effort !== undefined) {
@@ -169,6 +238,22 @@ function mergeRuntimeConfig(...configs: (RuntimeConfig | undefined)[]): Required
     (merged, config) => ({ ...merged, ...normalizeRuntimeConfig(config) }),
     { ...DEFAULT_RUNTIME_CONFIG },
   );
+}
+
+/** Auto-escalate model/effort on repeated failures. Returns upgraded config. */
+function escalateConfig(current: Required<RuntimeConfig>): RuntimeConfig {
+  const modelIdx = MODEL_LADDER.indexOf(current.model);
+  const effortIdx = EFFORT_LADDER.indexOf(current.effort);
+
+  // Try escalating effort first (cheaper)
+  if (effortIdx < EFFORT_LADDER.length - 1) {
+    return { model: current.model, effort: EFFORT_LADDER[effortIdx + 1] };
+  }
+  // Then escalate model
+  if (modelIdx < MODEL_LADDER.length - 1) {
+    return { model: MODEL_LADDER[modelIdx + 1], effort: current.effort };
+  }
+  return current;
 }
 
 function mergeWaitGroups(existing: WaitGroup[], next: WaitGroup[]): WaitGroup[] {
@@ -333,6 +418,7 @@ export class Orquestrator extends EventEmitter {
   readonly taskFileStore: TaskFileStore;
   readonly sandbox: PathSandbox;
   readonly piClient: PiAgentClient;
+  private readonly allowedModels: Record<ModelAlias, { provider: string; modelId: string; description: string }>;
 
   private options: OrquestratorOptions;
 
@@ -344,6 +430,7 @@ export class Orquestrator extends EventEmitter {
     this.taskFileStore = deps.taskFileStore;
     this.sandbox = deps.sandbox;
     this.piClient = deps.piClient;
+    this.allowedModels = deps.models ?? ALLOWED_MODELS;
 
     for (const agent of deps.agents) {
       this.agents.set(agent.name, agent);
@@ -404,7 +491,7 @@ export class Orquestrator extends EventEmitter {
     if (agentName !== INBOX_AGENT) this.assertAgentExists(agentName);
     const taskId = this.nextId('task');
     const attachments = this.copyTaskAttachments(taskId, attachmentPaths);
-    const normalizedConfig = normalizeRuntimeConfig(runtimeConfig);
+    const normalizedConfig = normalizeRuntimeConfig(runtimeConfig, this.allowedModels);
     const task = new TaskImpl(
       { taskId, title, assignedTo: agentName, depth: 0, runtimeConfig: normalizedConfig },
       false,
@@ -481,6 +568,7 @@ export class Orquestrator extends EventEmitter {
     if (isTerminalTaskStatus(task.status)) return task;
     this.dequeue(taskId);
     task.status = TASK_STATUS.CANCELLED;
+    task.failureReason = 'cancelled_by_user';
     task.activeRunId = undefined;
     task.metrics.finishedAt = new Date().toISOString();
     this.markTaskDirty(task);
@@ -529,6 +617,18 @@ export class Orquestrator extends EventEmitter {
     });
     const reopenable =
       task.status === TASK_STATUS.REVIEW || isTerminalTaskStatus(task.status);
+    // Resume from WAITING(human) on user response
+    if (task.status === TASK_STATUS.WAITING && task.waitingReason === 'human') {
+      task.status = TASK_STATUS.PENDING;
+      task.waitingReason = undefined;
+      task.activeRunId = undefined;
+      this.markTaskDirty(task);
+      this.recordEvent(SWARM_EVENT_TYPE.TASK_RESUMED, { task });
+      this.persist();
+      this.emit('state:changed');
+      this.scheduleTask(taskId);
+      return task;
+    }
     if (reopenable && !task.options.parentId) {
       task.options.assignedTo = MANAGER_AGENT;
       task.status = TASK_STATUS.PENDING;
@@ -551,7 +651,7 @@ export class Orquestrator extends EventEmitter {
     if (!task) throw new Error(`Task ${taskId} não encontrada`);
     task.options.runtimeConfig = {
       ...(task.options.runtimeConfig ?? {}),
-      ...(normalizeRuntimeConfig(runtimeConfig) ?? {}),
+      ...(normalizeRuntimeConfig(runtimeConfig, this.allowedModels) ?? {}),
     };
     this.markTaskDirty(task);
     this.recordEvent(SWARM_EVENT_TYPE.TASK_UPDATED, {
@@ -657,7 +757,7 @@ export class Orquestrator extends EventEmitter {
         assignedTo: agentName,
         parentId: parentTask.taskId,
         depth: parentTask.depth + 1,
-        runtimeConfig: normalizeRuntimeConfig(runtimeConfig),
+        runtimeConfig: normalizeRuntimeConfig(runtimeConfig, this.allowedModels),
       },
       true,
     );
@@ -790,7 +890,13 @@ export class Orquestrator extends EventEmitter {
     const subtasksBefore = task.subtaskIds.length;
     try {
       this.taskFileStore.ensureTaskDir(task.taskId);
-      const result = await this.piClient.run(agent, task, this, triggerEvents, controller.signal);
+      this.ensureScopeSpec(task);
+      const continuity = {
+        scopeSpec: this.taskFileStore.loadScopeSpec(task.taskId),
+        progressLog: this.taskFileStore.loadProgressLog(task.taskId),
+        envResume: this.taskFileStore.loadEnvResume(task.taskId),
+      };
+      const result = await this.piClient.run(agent, task, this, triggerEvents, controller.signal, continuity);
       // If the run was cancelled or the task was moved/superseded mid-flight,
       // discard the result so no phantom output is applied after a pause.
       if (controller.signal.aborted || task.activeRunId !== run.runId || task.status !== TASK_STATUS.RUNNING) {
@@ -800,7 +906,15 @@ export class Orquestrator extends EventEmitter {
       task.metrics = addSessionStats(task.metrics, result.stats, startedAt, finishedAt);
       this.budget.trackUsage(task.taskId, result.stats.tokens?.input ?? 0, result.stats.tokens?.output ?? 0, result.stats.cost ?? 0);
       this.assertWithinBudget();
+      this.assertWithinCardCeiling(task);
       const decision = parseDecision(result.output);
+      // Check for stagnation before applying decision
+      const stagnationReason = this.checkForStagnation(task, result.output);
+      if (stagnationReason) {
+        this.failTask(task, run, 'Estagnação detectada: outputs muito similares entre epochs', 'stagnation');
+        this.persist();
+        return;
+      }
       task.technicalRetryCount = 0;
       this.applyDecision(task, run, decision, triggerEvents, task.subtaskIds.slice(subtasksBefore));
     } catch (error) {
@@ -844,13 +958,15 @@ export class Orquestrator extends EventEmitter {
       depth: task.depth,
       maxDepth: MAX_TASK_DEPTH,
       canCreateSubtasks: task.depth < MAX_TASK_DEPTH && task.subtaskIds.length < MAX_SUBTASKS_PER_TASK,
-      sessionFile: task.piSessionFile ?? this.getTaskRelativePath(task.taskId, 'session.jsonl'),
+      // Carried over WS so the UI can rebuild the subtask tree (workflow/summary).
+      // Omitting it made every WS-delivered task look childless.
+      subtaskIds: [...task.subtaskIds],
       chatFile: this.getTaskRelativePath(task.taskId, 'chat.jsonl'),
       attachmentsDir: this.getTaskRelativePath(task.taskId, 'attachments'),
       artifactsDir: this.getTaskRelativePath(task.taskId, 'artifacts'),
       artifactsFile: this.getTaskRelativePath(task.taskId, 'artifacts.yaml'),
       runtimeConfig: this.resolveRuntimeConfig(task, agent),
-      allowedModels: ALLOWED_MODELS,
+      allowedModels: this.allowedModels,
       allowedEfforts: ALLOWED_EFFORTS,
       retryCount: task.retryCount,
       technicalRetryCount: task.technicalRetryCount,
@@ -952,9 +1068,13 @@ export class Orquestrator extends EventEmitter {
     description: string,
     fileType: string,
   ): TaskArtifact {
+    // Idempotent: skip if artifact with same path already exists
+    const existingPath = this.taskFileStore.writeArtifactFile(task.taskId, fileName, content);
+    const existing = task.artifacts.find((a) => a.path === existingPath);
+    if (existing) return existing;
+
     const sizeBytes = Buffer.byteLength(content, 'utf8');
-    const path = this.taskFileStore.writeArtifactFile(task.taskId, fileName, content);
-    const artifact: TaskArtifact = { description, fileType, path, sizeBytes };
+    const artifact: TaskArtifact = { description, fileType, path: existingPath, sizeBytes };
     task.artifacts.push(artifact);
     task.appendChat('assistant', 'artifact', description, undefined, undefined, [artifact]);
     this.recordArtifactCreated(task, artifact);
@@ -1005,7 +1125,7 @@ export class Orquestrator extends EventEmitter {
             assignedTo: { type: 'string', enum: delegatable, description: 'Agente destino.' },
             title: { type: 'string', description: 'Titulo curto da subtask.' },
             message: { type: 'string', description: 'Instrucao objetiva e auto-contida da subtask.' },
-            model: { type: 'string', enum: Object.keys(ALLOWED_MODELS) },
+            model: { type: 'string', enum: Object.keys(this.allowedModels) },
             effort: { type: 'string', enum: ALLOWED_EFFORTS },
           },
           required: ['assignedTo', 'title', 'message'],
@@ -1018,7 +1138,7 @@ export class Orquestrator extends EventEmitter {
           const runtimeConfig = normalizeRuntimeConfig({
             model: params.model === undefined ? undefined : (params.model as ModelAlias),
             effort: params.effort === undefined ? undefined : (params.effort as EffortLevel),
-          });
+          }, this.allowedModels);
           // Idempotent: re-issuing the same subtask (replay/retry) reuses it.
           const existing = this.getSubtasks(task).find(
             (subtask) =>
@@ -1055,6 +1175,39 @@ export class Orquestrator extends EventEmitter {
           );
           return JSON.stringify(artifact);
         },
+    });
+    // ask_human: write question to chat and park in WAITING(human)
+    tools.push({
+      name: 'ask_human',
+      description: 'Faz uma pergunta ao humano. A pergunta vai ao chat e a task fica aguardando resposta.',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: { type: 'string', description: 'Pergunta clara e objetiva ao humano.' },
+        },
+        required: ['question'],
+        additionalProperties: false,
+      },
+      execute: async (params: Record<string, unknown>) => {
+        const question = String(params.question);
+        task.appendChat('assistant', 'text', question);
+        this.markTaskDirty(task);
+        this.recordEvent(SWARM_EVENT_TYPE.MESSAGE_APPENDED, {
+          task,
+          messages: [task.chat[task.chat.length - 1]],
+        });
+        // Park task in WAITING(human)
+        task.status = TASK_STATUS.WAITING;
+        task.waitingReason = 'human';
+        this.markTaskDirty(task);
+        this.recordEvent(SWARM_EVENT_TYPE.TASK_WAITING, {
+          task,
+          payload: { waitingReason: 'human' },
+        });
+        this.persist();
+        this.emit('state:changed');
+        return JSON.stringify({ status: 'waiting', question });
+      },
     });
     return tools;
   }
@@ -1213,10 +1366,13 @@ export class Orquestrator extends EventEmitter {
         return;
       }
 
-      const rc = normalizeRuntimeConfig({ model: decision.model, effort: decision.effort });
+      const rc = normalizeRuntimeConfig({ model: decision.model, effort: decision.effort }, this.allowedModels);
       task.retryCount += 1;
       task.status = TASK_STATUS.PENDING;
-      task.options.runtimeConfig = { ...(task.options.runtimeConfig ?? {}), ...(rc ?? {}) };
+      // Auto-escalate if agent didn't explicitly request a change
+      const currentConfig = this.resolveRuntimeConfig(task, this.agents.get(task.options.assignedTo));
+      const effectiveRc = rc ?? escalateConfig(currentConfig);
+      task.options.runtimeConfig = { ...(task.options.runtimeConfig ?? {}), ...effectiveRc };
       task.appendChat(
         'user',
         'text',
@@ -1276,8 +1432,43 @@ export class Orquestrator extends EventEmitter {
       return;
     }
 
+    // Manager delegation guard: if the Manager is a root task that CAN delegate
+    // but returned completed without creating ANY subtasks, force a retry with
+    // stronger delegation instructions. Simple one-liner tasks are exempt.
+    const isManagerRoot = !task.options.parentId && task.options.assignedTo === MANAGER_AGENT;
+    if (isManagerRoot && task.subtaskIds.length === 0 && task.runs.length <= 1) {
+      const firstUserMsg = task.chat.find((m) => m.role === 'user')?.text ?? '';
+      const isSimpleTask = firstUserMsg.length < 60 && !firstUserMsg.includes('\n');
+      if (!isSimpleTask) {
+        // Force retry with delegation instruction
+        task.retryCount += 1;
+        task.status = TASK_STATUS.PENDING;
+        task.appendChat(
+          'user', 'text',
+          'Voce e o ORQUESTRADOR. NAO faca o trabalho diretamente. ' +
+          'Crie subtasks via create_subtask para cada parte do trabalho, delegue aos agentes especializados, ' +
+          'e retorne status waiting com waitGroups. So responda completed depois de consolidar os resultados das subtasks.',
+        );
+        this.markTaskDirty(task);
+        this.recordEvent(SWARM_EVENT_TYPE.TASK_RETRY_REQUESTED, {
+          task, runId: run.runId,
+          payload: { reason: 'Manager completou sem delegar - forçando retry com instrução de delegação' },
+        });
+        this.recordEvent(SWARM_EVENT_TYPE.TASK_RETRIED, {
+          task, runId: run.runId,
+          payload: { retryCount: task.retryCount },
+        });
+        this.persist();
+        this.scheduleTask(task.taskId);
+        return;
+      }
+    }
+
+    // Sanitize result messages: remove raw technical errors before showing to user
+    const sanitizedMessages = sanitizeMessages(decision.messages);
+
     this.markEventsProcessed(task, triggerEvents);
-    task.resultMessages = task.appendAgentMessages(decision.messages);
+    task.resultMessages = task.appendAgentMessages(sanitizedMessages);
     this.completeActiveRun(task, run);
     this.markTaskDirty(task);
     this.recordEvent(SWARM_EVENT_TYPE.RUN_COMPLETED, {
@@ -1288,7 +1479,6 @@ export class Orquestrator extends EventEmitter {
     // A Manager root task is not finished until the user reviews it: the Manager
     // hands it off to Revisão (REVIEW); the user later completes or reopens it.
     // Subtasks (and non-Manager roots) complete normally so wait groups resolve.
-    const isManagerRoot = !task.options.parentId && task.options.assignedTo === MANAGER_AGENT;
     if (isManagerRoot) {
       task.status = TASK_STATUS.REVIEW;
       this.recordEvent(SWARM_EVENT_TYPE.TASK_REVIEW, {
@@ -1305,6 +1495,36 @@ export class Orquestrator extends EventEmitter {
       });
     }
     this.persist();
+  }
+
+  /** Check Definition of Done before allowing REVIEW/COMPLETED. */
+  private checkDoD(task: Task): { passed: boolean; failures: string[] } {
+    const failures: string[] = [];
+
+    // 1. Scope-spec all satisfied
+    const scopeSpec = this.taskFileStore.loadScopeSpec(task.taskId);
+    if (scopeSpec.length > 0) {
+      const unsatisfied = scopeSpec.filter((item) => !item.satisfied);
+      if (unsatisfied.length > 0) {
+        failures.push(`Scope-spec incompleto: ${unsatisfied.length} itens nao atendidos`);
+      }
+    }
+
+    // 2. No open subtasks
+    const openSubtasks = task.subtaskIds.filter((id) => {
+      const st = this.tasks.get(id);
+      return st && !isTerminalTaskStatus(st.status);
+    });
+    if (openSubtasks.length > 0) {
+      failures.push(`${openSubtasks.length} subtasks ainda abertas`);
+    }
+
+    // 3. Within budget
+    if (!this.budget.isWithinBudget()) {
+      failures.push('Budget global excedido');
+    }
+
+    return { passed: failures.length === 0, failures };
   }
 
   // Parks the task in WAITING on the given subtask ids (WAIT_ALL), retaining the
@@ -1399,7 +1619,7 @@ export class Orquestrator extends EventEmitter {
       task.appendChat(
         'user',
         'text',
-        `A execucao anterior falhou tecnicamente: ${message}. Reexecute mantendo o objetivo original. Retorne somente JSON puro valido no contrato especificado.`,
+        `A execucao anterior falhou: ${sanitizeErrorMessage(message)}. Reexecute mantendo o objetivo original. Retorne somente JSON puro valido no contrato especificado.`,
       );
       this.markTaskDirty(task);
       this.recordEvent(SWARM_EVENT_TYPE.TASK_RETRY_REQUESTED, {
@@ -1418,14 +1638,15 @@ export class Orquestrator extends EventEmitter {
     }
 
     task.resultMessages = task.appendAgentMessages([
-      { type: 'text', text: `Falha ao executar task: ${message}` },
+      { type: 'text', text: `Falha ao executar task. ${sanitizeErrorMessage(message)}` },
     ]);
     this.failTask(task, run, message);
     this.persist();
   }
 
-  private failTask(task: Task, run: TaskRun, reason: string): void {
+  private failTask(task: Task, run: TaskRun, reason: string, failureReason?: import('../domain/task.js').FailureReason): void {
     task.status = TASK_STATUS.FAILED;
+    task.failureReason = failureReason;
     task.metrics.finishedAt = new Date().toISOString();
     run.status = 'FAILED';
     run.completedAt = run.completedAt ?? new Date().toISOString();
@@ -1593,7 +1814,20 @@ export class Orquestrator extends EventEmitter {
             payload: { reason: 'WAIT_ALL' },
           });
         }
-        return terminalEvents;
+        if (terminalEvents.length > 0) return terminalEvents;
+        // The group is satisfied but every completion was already consumed — the
+        // agent re-emitted `waiting` on subtasks that had already settled (common
+        // with weaker models). An empty return would leave the parent stuck in
+        // WAITING forever; re-deliver the known completions so it resumes and
+        // consolidates. Pathological re-wait loops are bounded by the card ceiling.
+        return this.events
+          .filter(
+            (event) =>
+              isTerminalTaskEvent(event.type) &&
+              Boolean(event.taskId) &&
+              group.taskIds.includes(event.taskId as string),
+          )
+          .map((event) => ({ ...event, runId: run.runId, waitId: group.waitId }));
       }
     }
 
@@ -1668,6 +1902,7 @@ export class Orquestrator extends EventEmitter {
     const run: TaskRun = {
       runId: this.nextId('run'),
       status: 'RUNNING',
+      epoch: task.runs.length + 1,
       waitGroups: [],
       resultMessages: [],
       createdAt: startedAt,
@@ -1731,6 +1966,7 @@ export class Orquestrator extends EventEmitter {
   private completeActiveRun(task: Task, run: TaskRun): void {
     run.status = 'COMPLETED';
     run.completedAt = new Date().toISOString();
+    run.checkpointSeq = this.nextSeq - 1; // last event seq
     for (const group of run.waitGroups) group.status = WAIT_GROUP_STATUS.PROCESSED;
     task.activeRunId = undefined;
     this.scheduler.rebuildWaitIndex(this.tasks);
@@ -1770,6 +2006,21 @@ export class Orquestrator extends EventEmitter {
     this.repairDepths();
     this.deriveIdCounters();
     this.recoverStatusesAfterCrash();
+    this.reseedBudget();
+  }
+
+  /** Re-seed BudgetTracker from persisted task.metrics so post-restart gate matches live state. */
+  private reseedBudget(): void {
+    for (const task of this.tasks.values()) {
+      if (task.metrics.cost > 0 || task.metrics.tokens.total > 0) {
+        this.budget.trackUsage(
+          task.taskId,
+          task.metrics.tokens.input,
+          task.metrics.tokens.output,
+          task.metrics.cost,
+        );
+      }
+    }
   }
 
   // Resumes sequential id counters from the highest suffix already persisted,
@@ -1812,13 +2063,38 @@ export class Orquestrator extends EventEmitter {
       if (event.taskId) {
         const task = this.tasks.get(event.taskId);
         if (!task) continue;
+        // Status transitions
         if (event.type === SWARM_EVENT_TYPE.TASK_QUEUED) task.status = TASK_STATUS.QUEUED;
         if (event.type === SWARM_EVENT_TYPE.TASK_STARTED) task.status = TASK_STATUS.RUNNING;
         if (event.type === SWARM_EVENT_TYPE.TASK_WAITING) task.status = TASK_STATUS.WAITING;
+        if (event.type === SWARM_EVENT_TYPE.TASK_SUSPENDED) task.status = TASK_STATUS.SUSPENDED;
         if (event.type === SWARM_EVENT_TYPE.TASK_COMPLETED) task.status = TASK_STATUS.COMPLETED;
-        if (event.type === SWARM_EVENT_TYPE.TASK_FAILED) task.status = TASK_STATUS.FAILED;
-        if (event.type === SWARM_EVENT_TYPE.TASK_CANCELLED) task.status = TASK_STATUS.CANCELLED;
+        if (event.type === SWARM_EVENT_TYPE.TASK_FAILED) {
+          task.status = TASK_STATUS.FAILED;
+          task.failureReason = (event.payload?.failureReason as import('../domain/task.js').FailureReason) ?? undefined;
+        }
+        if (event.type === SWARM_EVENT_TYPE.TASK_CANCELLED) {
+          task.status = TASK_STATUS.CANCELLED;
+          task.failureReason = 'cancelled_by_user';
+        }
         if (event.type === SWARM_EVENT_TYPE.TASK_REVIEW) task.status = TASK_STATUS.REVIEW;
+        // Chat reconstruction from events
+        if (event.type === SWARM_EVENT_TYPE.MESSAGE_APPENDED && event.messages) {
+          for (const msg of event.messages) {
+            const exists = task.chat.some((c) => c.ts === msg.ts && c.role === msg.role && c.text === msg.text);
+            if (!exists) task.chat.push(msg);
+          }
+        }
+        // Artifact reconstruction
+        if (event.type === SWARM_EVENT_TYPE.ARTIFACT_CREATED && event.payload?.artifact) {
+          const artifact = event.payload.artifact as import('../domain/task.js').TaskArtifact;
+          const exists = task.artifacts.some((a) => a.path === artifact.path);
+          if (!exists) task.artifacts.push(artifact);
+        }
+        // Failure reason from TASK_FAILED payload
+        if (event.type === SWARM_EVENT_TYPE.TASK_FAILED && event.payload?.failureReason) {
+          task.failureReason = event.payload.failureReason as import('../domain/task.js').FailureReason;
+        }
       }
     }
     // Drop archived families so replay-only recovery matches snapshot recovery.
@@ -1878,6 +2154,32 @@ export class Orquestrator extends EventEmitter {
           return Boolean(dependency && dependency.options.parentId === task.taskId);
         }),
     );
+  }
+
+  /** Generate a minimal scope-spec from the task's objective if one doesn't exist. */
+  private ensureScopeSpec(task: Task): void {
+    const existing = this.taskFileStore.loadScopeSpec(task.taskId);
+    if (existing.length > 0) return;
+
+    const firstUserMsg = task.chat.find((m) => m.role === 'user');
+    const objective = firstUserMsg?.text ?? task.title;
+    this.taskFileStore.saveScopeSpec(task.taskId, [
+      { id: 'obj', description: objective, satisfied: false },
+    ]);
+  }
+
+  /** Check if task has stagnated across consecutive runs. */
+  private checkForStagnation(task: Task, currentOutput: string): 'stagnation' | null {
+    if (task.runs.length < 2) return null;
+    const signals: RunSignal[] = task.runs
+      .filter((r) => r.resultMessages.length > 0)
+      .map((r) => ({
+        output: r.resultMessages.map((m) => m.text ?? '').join(' '),
+        epoch: r.epoch,
+      }));
+    // Add current output
+    signals.push({ output: currentOutput, epoch: task.runs.length + 1 });
+    return checkStagnation(signals);
   }
 
   // -----------------------------------------------------------------------
@@ -1943,6 +2245,20 @@ export class Orquestrator extends EventEmitter {
       });
       throw new BudgetExceededError(
         `Budget excedido: tokens=${summary.totalTokens}/${MAX_TOTAL_TOKENS} cost=${summary.totalCost}/${MAX_TOTAL_COST}`,
+      );
+    }
+  }
+
+  private assertWithinCardCeiling(task: Task): void {
+    const ceiling = { maxCost: MAX_TOTAL_COST, maxActiveMs: RUN_TIMEOUT_MS * MAX_TASK_RETRIES };
+    const reason = checkCardCeiling(task.metrics, ceiling);
+    if (reason) {
+      this.recordEvent(SWARM_EVENT_TYPE.BUDGET_EXCEEDED, {
+        task,
+        payload: { scope: 'card', cost: task.metrics.cost, durationMs: task.metrics.durationMs },
+      });
+      throw new BudgetExceededError(
+        `Card ceiling excedido: cost=${task.metrics.cost} duration=${task.metrics.durationMs}ms`,
       );
     }
   }

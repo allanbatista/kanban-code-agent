@@ -65,6 +65,7 @@ export interface TaskMetrics {
 export interface SerializedTask {
   options: TaskOptions;
   status: TaskStatus;
+  failureReason?: FailureReason;
   subtaskIds: string[];
   resultMessages?: TaskChatMessage[];
   activeRunId?: string;
@@ -106,7 +107,7 @@ export interface TaskMetadata {
   depth: number;
   maxDepth: number;
   canCreateSubtasks: boolean;
-  sessionFile: string;
+  subtaskIds: string[];
   chatFile: string;
   attachmentsDir: string;
   artifactsDir: string;
@@ -129,10 +130,21 @@ export interface TaskMetadata {
   subtaskSummary?: string;
 }
 
+// --- Failure Reason ---
+export type FailureReason =
+  | 'attempts'       // max retries/epochs exceeded
+  | 'stagnation'     // no progress detected
+  | 'ceiling'        // cost/time ceiling hit
+  | 'blocked'        // depth limit or other structural block
+  | 'human_timeout'  // human intervention timeout (→ SUSPENDED, not FAILED)
+  | 'cancelled_by_user'; // user cancelled
+
 // --- Task Class ---
 export class Task {
   options: TaskOptions;
   status: TaskStatus = 'PENDING';
+  failureReason?: FailureReason;
+  waitingReason?: 'subtasks' | 'human';
   subtaskIds: string[] = [];
   resultMessages: TaskChatMessage[] = [];
   activeRunId?: string;
@@ -179,6 +191,7 @@ export class Task {
     return {
       options: this.options,
       status: this.status,
+      failureReason: this.failureReason,
       subtaskIds: this.subtaskIds,
       resultMessages: this.resultMessages,
       activeRunId: this.activeRunId,
@@ -194,6 +207,7 @@ export class Task {
   static fromSerialized(serialized: SerializedTask): Task {
     const task = new Task(serialized.options, false);
     task.status = serialized.status;
+    task.failureReason = serialized.failureReason;
     task.subtaskIds = [...(serialized.subtaskIds ?? [])];
     task.resultMessages = serialized.resultMessages ?? [];
     task.activeRunId = serialized.activeRunId;

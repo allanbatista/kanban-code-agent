@@ -9,6 +9,7 @@ import type { TaskStatus } from './StatusBadge';
 
 interface TaskSummaryPanelProps {
   task: Task;
+  onRowClick?: (taskId: string) => void;
 }
 
 interface SummaryRow {
@@ -27,7 +28,7 @@ interface SummaryRow {
   agent: string;
 }
 
-export function TaskSummaryPanel({ task }: TaskSummaryPanelProps) {
+export function TaskSummaryPanel({ task, onRowClick }: TaskSummaryPanelProps) {
   const { tasks } = useKanbanStore();
   const [agentFilter, setAgentFilter] = useState<string[]>([]);
   const [titleSearch, setTitleSearch] = useState('');
@@ -150,6 +151,7 @@ export function TaskSummaryPanel({ task }: TaskSummaryPanelProps) {
             <thead className="sticky top-0 z-10">
               <tr className="bg-card/95 backdrop-blur-sm text-left text-muted-foreground/80 shadow-[0_1px_0_0_var(--color-border)]">
                 <th className="py-2 pl-3 pr-2 font-medium w-full">Título</th>
+                <th className="px-2 py-2 font-medium w-px whitespace-nowrap">ID</th>
                 <th className="px-2 py-2 font-medium w-px whitespace-nowrap text-center">Depth</th>
                 <th className="px-2 py-2 font-medium w-px whitespace-nowrap">Status</th>
                 <th className="px-2 py-2 font-medium w-px whitespace-nowrap text-right">Tempo</th>
@@ -164,7 +166,7 @@ export function TaskSummaryPanel({ task }: TaskSummaryPanelProps) {
             <tbody>
               {filteredRows.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="py-10 text-center text-muted-foreground/50">
+                  <td colSpan={11} className="py-10 text-center text-muted-foreground/50">
                     Nenhuma task encontrada com os filtros atuais.
                   </td>
                 </tr>
@@ -172,7 +174,8 @@ export function TaskSummaryPanel({ task }: TaskSummaryPanelProps) {
                 filteredRows.map((row) => (
                   <tr
                     key={row.id}
-                    className="border-t border-border/20 hover:bg-muted/20 transition-colors"
+                    onClick={() => onRowClick?.(row.id)}
+                    className={`border-t border-border/20 transition-colors ${onRowClick ? 'cursor-pointer hover:bg-primary/10' : 'hover:bg-muted/20'}`}
                   >
                     <td className="py-1.5 pl-3 pr-2 w-full">
                       <span className="font-medium" style={{ paddingLeft: row.depth * 16 }}>
@@ -180,6 +183,7 @@ export function TaskSummaryPanel({ task }: TaskSummaryPanelProps) {
                         {row.title}
                       </span>
                     </td>
+                    <td className="px-2 py-1.5 font-mono text-muted-foreground/60 whitespace-nowrap">{row.id}</td>
                     <td className="px-2 py-1.5 text-center text-muted-foreground/70 whitespace-nowrap">{row.depth}</td>
                     <td className="px-2 py-1.5 whitespace-nowrap">
                       <StatusBadge status={row.status} />
@@ -198,6 +202,7 @@ export function TaskSummaryPanel({ task }: TaskSummaryPanelProps) {
             <tfoot className="sticky bottom-0 z-10">
               <tr className="border-t-2 border-border/40 bg-card/95 backdrop-blur-sm font-semibold shadow-[0_-1px_0_0_var(--color-border)]">
                 <td className="py-2 pl-3 pr-2">Total ({filteredRows.length} tasks)</td>
+                <td className="px-2 py-2 whitespace-nowrap">-</td>
                 <td className="px-2 py-2 text-center whitespace-nowrap">-</td>
                 <td className="px-2 py-2 whitespace-nowrap">-</td>
                 <td className="px-2 py-2 text-right font-mono whitespace-nowrap">{formatMs(totals.durationMs)}</td>

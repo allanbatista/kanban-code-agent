@@ -131,6 +131,7 @@ function buildDag(rootTask: Task, allTasks: Task[], familyColors: Record<string,
       type: 'taskNode',
       position: { x: node.x, y: node.y },
       data: {
+        id: node.id,
         label: node.title,
         status: node.status as TaskStatus,
         agent: node.assignedTo,

@@ -11,6 +11,7 @@ function makeRun(runId: string, waitGroups: WaitGroup[] = []): TaskRun {
   return {
     runId,
     status: 'WAITING',
+    epoch: 1,
     waitGroups,
     resultMessages: [],
     createdAt: new Date().toISOString(),

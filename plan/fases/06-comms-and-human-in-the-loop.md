@@ -1,7 +1,7 @@
 ---
 fase: F6
 slug: 06-comms-and-human-in-the-loop
-status: pending
+status: done
 depends_on: [F0, F1, F2, F5]
 ---
 

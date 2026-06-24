@@ -108,6 +108,28 @@ PromptBuilder é uma função pura: mesmo input produz mesmo output. O chat só 
 
 Prioridade: envvar > arquivo (`swarm.yml`) > defaults. Permite override por ambiente sem modificar arquivos.
 
+### Data Root
+
+A persistência do swarm vive fora do projeto, no diretório do usuário:
+
+```
+~/.kca/                          ← dataDir (configurável via SWARM_DATA_DIR)
+  └── .swarm/                    ← subdiretório do swarm
+      ├── events/
+      │   └── current.jsonl      ← event log append-only (SSOT)
+      ├── tasks/
+      │   ├── {taskId}/
+      │   │   ├── chat.jsonl     ← log de chat da task
+      │   │   ├── artifacts/     ← artefatos gerados pelo agente
+      │   │   └── attachments/   ← anexos do humano
+      │   └── _archived/         ← tasks arquivadas
+      └── state.snapshot.json    ← snapshot do estado
+```
+
+- **`dataDir`** (default `~/.kca`): raiz de toda persistência. Override com `SWARM_DATA_DIR` envvar ou `data_dir` em `swarm.yml`.
+- **`.swarm/`**: subdiretório fixo para dados do swarm (eventos, tasks, snapshot).
+- Projetos ficam em `.kanban-data/projects/` dentro do `dataDir`.
+
 ## Stack
 
 | Camada | Tecnologia |

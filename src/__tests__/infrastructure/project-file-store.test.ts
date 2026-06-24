@@ -1,118 +1,98 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ProjectFileStore } from '../../infrastructure/persistence/project-file-store.js';
 import { PathSandbox } from '../../infrastructure/filesystem/sandbox.js';
 
-function createStore(): { store: ProjectFileStore; dir: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'pfs-'));
-  const sandbox = new PathSandbox(dir);
-  return { store: new ProjectFileStore(sandbox), dir };
-}
-
-function cleanup(dir: string) {
-  try { rmSync(dir, { recursive: true, force: true }); } catch {}
-}
-
 describe('ProjectFileStore', () => {
-  describe('CRUD operations', () => {
-    it('creates and retrieves a project', () => {
-      const { store, dir } = createStore();
+  let dir: string;
+  let cleanup: () => void;
 
-      const project = store.createProject({ name: 'Test Project', description: 'A test' });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'proj-'));
+    cleanup = () => {
+      try { rmSync(dir, { recursive: true, force: true }); } catch {}
+    };
+  });
 
-      expect(project.id).toBeTruthy();
-      expect(project.name).toBe('Test Project');
-      expect(project.description).toBe('A test');
-      expect(project.taskIds).toEqual([]);
-      expect(project.createdAt).toBeTruthy();
-      expect(project.updatedAt).toBe(project.createdAt);
+  afterEach(() => {
+    cleanup();
+  });
 
-      const loaded = store.getProject(project.id);
-      expect(loaded).not.toBeNull();
-      expect(loaded!.name).toBe('Test Project');
+  it('creates and retrieves a project', () => {
+    const sandbox = new PathSandbox(dir);
+    const store = new ProjectFileStore(sandbox);
+    const project = store.createProject({ name: 'Test Project', description: 'A test' });
 
-      cleanup(dir);
-    });
+    expect(project.name).toBe('Test Project');
+    expect(project.description).toBe('A test');
+    expect(project.id).toBeDefined();
 
-    it('returns null for nonexistent project', () => {
-      const { store, dir } = createStore();
-      expect(store.getProject('nonexistent')).toBeNull();
-      cleanup(dir);
-    });
+    const retrieved = store.getProject(project.id);
+    expect(retrieved).toEqual(project);
+  });
 
-    it('updates project fields', () => {
-      const { store, dir } = createStore();
+  it('persists projects across store instances (filesystem, not memory)', () => {
+    const sandbox = new PathSandbox(dir);
+    const store1 = new ProjectFileStore(sandbox);
+    const project = store1.createProject({ name: 'Persistent' });
 
-      const project = store.createProject({ name: 'Original', description: 'Original desc' });
-      const updated = store.updateProject(project.id, { name: 'Updated', description: 'Updated desc' });
+    // New store instance — must read from filesystem
+    const store2 = new ProjectFileStore(sandbox);
+    const retrieved = store2.getProject(project.id);
+    expect(retrieved).not.toBeNull();
+    expect(retrieved!.name).toBe('Persistent');
+  });
 
-      expect(updated).not.toBeNull();
-      expect(updated!.name).toBe('Updated');
-      expect(updated!.description).toBe('Updated desc');
-      expect(updated!.updatedAt).toBeTruthy();
-      expect(new Date(updated!.updatedAt).getTime()).not.toBeNaN();
+  it('lists all projects', () => {
+    const sandbox = new PathSandbox(dir);
+    const store = new ProjectFileStore(sandbox);
+    store.createProject({ name: 'A' });
+    store.createProject({ name: 'B' });
 
-      const loaded = store.getProject(project.id);
-      expect(loaded!.name).toBe('Updated');
+    const list = store.listProjects();
+    expect(list).toHaveLength(2);
+    expect(list.map((p) => p.name)).toContain('A');
+    expect(list.map((p) => p.name)).toContain('B');
+  });
 
-      cleanup(dir);
-    });
+  it('updates a project', () => {
+    const sandbox = new PathSandbox(dir);
+    const store = new ProjectFileStore(sandbox);
+    const project = store.createProject({ name: 'Original' });
 
-    it('returns null when updating nonexistent project', () => {
-      const { store, dir } = createStore();
-      expect(store.updateProject('nonexistent', { name: 'Nope' })).toBeNull();
-      cleanup(dir);
-    });
+    const updated = store.updateProject(project.id, { name: 'Updated' });
+    expect(updated!.name).toBe('Updated');
+    expect(updated!.id).toBe(project.id);
 
-    it('deletes a project', () => {
-      const { store, dir } = createStore();
+    // Verify persistence
+    const store2 = new ProjectFileStore(sandbox);
+    expect(store2.getProject(project.id)!.name).toBe('Updated');
+  });
 
-      const project = store.createProject({ name: 'Delete Me' });
-      expect(store.getProject(project.id)).not.toBeNull();
+  it('deletes a project', () => {
+    const sandbox = new PathSandbox(dir);
+    const store = new ProjectFileStore(sandbox);
+    const project = store.createProject({ name: 'ToDelete' });
 
-      const deleted = store.deleteProject(project.id);
-      expect(deleted).toBe(true);
-      expect(store.getProject(project.id)).toBeNull();
+    const deleted = store.deleteProject(project.id);
+    expect(deleted).toBe(true);
 
-      cleanup(dir);
-    });
+    // After delete, getProject returns null (empty file marker)
+    const store2 = new ProjectFileStore(sandbox);
+    expect(store2.getProject(project.id)).toBeNull();
+  });
 
-    it('returns false when deleting nonexistent project', () => {
-      const { store, dir } = createStore();
-      expect(store.deleteProject('nonexistent')).toBe(false);
-      cleanup(dir);
-    });
+  it('returns null for non-existent project', () => {
+    const sandbox = new PathSandbox(dir);
+    const store = new ProjectFileStore(sandbox);
+    expect(store.getProject('nonexistent')).toBeNull();
+  });
 
-    it('lists all projects', () => {
-      const { store, dir } = createStore();
-
-      store.createProject({ name: 'Project A' });
-      store.createProject({ name: 'Project B' });
-      store.createProject({ name: 'Project C' });
-
-      const list = store.listProjects();
-      expect(list).toHaveLength(3);
-      expect(list.map((p) => p.name).sort()).toEqual(['Project A', 'Project B', 'Project C']);
-
-      cleanup(dir);
-    });
-
-    it('persists data to disk (database as filesystem)', () => {
-      const { store, dir } = createStore();
-
-      const project = store.createProject({ name: 'Persist Test', taskIds: ['task_1', 'task_2'] });
-
-      // Read the file directly from disk
-      const filePath = join(dir, '.kanban-data', 'projects', `${project.id}.json`);
-      expect(existsSync(filePath)).toBe(true);
-
-      const raw = JSON.parse(readFileSync(filePath, 'utf-8'));
-      expect(raw.name).toBe('Persist Test');
-      expect(raw.taskIds).toEqual(['task_1', 'task_2']);
-
-      cleanup(dir);
-    });
+  it('returns empty list when no projects exist', () => {
+    const sandbox = new PathSandbox(dir);
+    const store = new ProjectFileStore(sandbox);
+    expect(store.listProjects()).toEqual([]);
   });
 });

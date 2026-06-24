@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils';
 import type { TaskStatus } from '@/components/kanban/StatusBadge';
 
 export interface TaskNodeData extends Record<string, unknown> {
+  id: string;
   label: string;
   status: TaskStatus;
   agent: string;
@@ -20,13 +21,13 @@ export type WorkflowTaskNode = Node<TaskNodeData, 'taskNode'>;
 const iconMap = LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string }>>;
 
 export function TaskNode({ data, selected }: NodeProps<WorkflowTaskNode>) {
-  const { label, status, agent, icon, color, treeColor, isRoot, metrics } = data;
+  const { id, label, status, agent, icon, color, treeColor, isRoot, metrics } = data;
   const AgentIcon = iconMap[icon] ?? LucideIcons.Bot;
 
   return (
     <div
       className={cn(
-        'min-w-[200px] max-w-[260px] rounded-2xl border border-border/60 bg-card/90 px-3 py-2 shadow-xl shadow-black/25 backdrop-blur-sm transition-all duration-200',
+        'min-w-[200px] max-w-[260px] cursor-pointer rounded-2xl border border-border/60 bg-card/90 px-3 py-2 shadow-xl shadow-black/25 backdrop-blur-sm transition-all duration-200 hover:border-primary/50',
         selected && 'ring-2 ring-primary/60',
         isRoot && 'border-primary/50'
       )}
@@ -35,6 +36,7 @@ export function TaskNode({ data, selected }: NodeProps<WorkflowTaskNode>) {
       <Handle type="target" position={Position.Top} className="!bg-muted-foreground" />
       <div className="mb-1.5 flex items-center gap-1.5">
         <StatusBadge status={status} />
+        <span className="ml-auto font-mono text-[10px] text-muted-foreground/50">{id}</span>
       </div>
       <p className="truncate text-sm font-medium leading-tight text-foreground/95">{label}</p>
       <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-muted-foreground/70">

@@ -17,6 +17,7 @@ import { registerSettingsRoutes } from './routes/settings.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerReportRoutes } from './routes/reports.js';
 import { registerWebSocket } from './ws-server.js';
+import { ProjectFileStore } from '../persistence/project-file-store.js';
 
 // --- Types ---
 
@@ -100,17 +101,26 @@ export function createServer(
   const startTime = Date.now();
   const version = readVersion();
 
-  fastify.get('/health', async () => ({
-    status: 'ok',
-    uptime: Date.now() - startTime,
-    version,
-  }));
+  fastify.get('/health', async () => {
+    const tasks = [...orquestrator.tasks.values()];
+    const byStatus: Record<string, number> = {};
+    for (const t of tasks) {
+      byStatus[t.status] = (byStatus[t.status] ?? 0) + 1;
+    }
+    return {
+      status: 'ok',
+      uptime: Date.now() - startTime,
+      version,
+      tasks: { total: tasks.length, byStatus },
+      events: orquestrator.events.length,
+    };
+  });
 
   // --- Routes ---
 
   registerTaskRoutes(fastify, orquestrator);
   registerAgentRoutes(fastify, orquestrator);
-  registerProjectRoutes(fastify);
+  registerProjectRoutes(fastify, new ProjectFileStore(orquestrator.sandbox));
   registerSettingsRoutes(fastify);
   registerEventRoutes(fastify, orquestrator);
   registerReportRoutes(fastify, orquestrator);

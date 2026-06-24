@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
-import { MessageSquare, GitBranch, History, Table, Pencil, Check, X } from 'lucide-react';
+import { MessageSquare, GitBranch, History, Table, Pencil, Check, X, ArrowUpLeft } from 'lucide-react';
 import { HexColorPicker } from 'react-colorful';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
@@ -75,6 +75,17 @@ export function TaskDrawer({ taskId, defaultTab, onClose }: TaskDrawerProps) {
     setSearchParams(params, { replace: true });
   };
 
+  // Switch the open drawer to another task (subtask node/row or parent button),
+  // keeping the current tab. Replaces the current modal in place.
+  const openTask = useCallback(
+    (nextTaskId: string) => {
+      const params = new URLSearchParams(searchParams);
+      params.set('task', nextTaskId);
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
   const startEditing = () => {
     if (!task) return;
     setEditTitle(task.title);
@@ -114,6 +125,18 @@ export function TaskDrawer({ taskId, defaultTab, onClose }: TaskDrawerProps) {
         >
           {/* Header: título editável + abas */}
           <div className="flex shrink-0 items-center gap-3 border-b border-border/50 bg-background/30 backdrop-blur-sm px-5 py-2">
+            {task.parentId && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 shrink-0 gap-1 px-2 text-xs"
+                onClick={() => openTask(task.parentId!)}
+                title={`Abrir task pai (${task.parentId})`}
+              >
+                <ArrowUpLeft className="h-3 w-3" />
+                Task pai
+              </Button>
+            )}
             <div className="min-w-0 flex-1">
               {editing ? (
                 <div className="flex items-center gap-1.5">
@@ -206,13 +229,13 @@ export function TaskDrawer({ taskId, defaultTab, onClose }: TaskDrawerProps) {
               <TaskChatPanel task={task} />
             </TabsContent>
             <TabsContent value="workflow" className="h-full m-0 p-0">
-              <WorkflowView task={task} allTasks={tasks} />
+              <WorkflowView task={task} allTasks={tasks} onNodeClick={openTask} />
             </TabsContent>
             <TabsContent value="history" className="h-full m-0 p-0">
               <TaskHistoryPanel task={task} />
             </TabsContent>
             <TabsContent value="summary" className="h-full m-0 p-0">
-              <TaskSummaryPanel task={task} />
+              <TaskSummaryPanel task={task} onRowClick={openTask} />
             </TabsContent>
           </div>
         </Tabs>

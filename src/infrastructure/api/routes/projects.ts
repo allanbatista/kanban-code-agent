@@ -1,19 +1,6 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
-import { randomUUID } from 'node:crypto';
-
-// --- In-Memory Project Store ---
-
-interface Project {
-  id: string;
-  name: string;
-  description: string;
-  taskIds: string[];
-  createdAt: string;
-  updatedAt: string;
-}
-
-const projects = new Map<string, Project>();
+import type { ProjectFileStore } from '../../persistence/project-file-store.js';
 
 // --- Zod Schemas ---
 
@@ -33,27 +20,14 @@ const projectParams = z.object({
   id: z.string().min(1).max(128),
 });
 
-// --- Helpers ---
-
-function toProjectResponse(project: Project) {
-  return {
-    id: project.id,
-    name: project.name,
-    description: project.description,
-    taskIds: project.taskIds,
-    createdAt: project.createdAt,
-    updatedAt: project.updatedAt,
-  };
-}
-
 // --- Route Registration ---
 
-export function registerProjectRoutes(fastify: FastifyInstance): void {
+export function registerProjectRoutes(fastify: FastifyInstance, store: ProjectFileStore): void {
   // GET /api/projects — list all projects
   fastify.get('/api/projects', async () => {
-    const list = [...projects.values()];
+    const list = store.listProjects();
     return {
-      projects: list.map(toProjectResponse),
+      projects: list,
       total: list.length,
     };
   });
@@ -65,19 +39,14 @@ export function registerProjectRoutes(fastify: FastifyInstance): void {
       return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
     }
 
-    const now = new Date().toISOString();
-    const project: Project = {
-      id: randomUUID(),
+    const project = store.createProject({
       name: body.data.name,
-      description: body.data.description ?? '',
-      taskIds: body.data.taskIds ?? [],
-      createdAt: now,
-      updatedAt: now,
-    };
+      description: body.data.description,
+      taskIds: body.data.taskIds,
+    });
 
-    projects.set(project.id, project);
     reply.status(201);
-    return toProjectResponse(project);
+    return project;
   });
 
   // GET /api/projects/:id — get project detail
@@ -87,12 +56,12 @@ export function registerProjectRoutes(fastify: FastifyInstance): void {
       return reply.status(400).send({ error: 'Invalid params', issues: params.error.issues });
     }
 
-    const project = projects.get(params.data.id);
+    const project = store.getProject(params.data.id);
     if (!project) {
       return reply.status(404).send({ error: 'Project not found' });
     }
 
-    return toProjectResponse(project);
+    return project;
   });
 
   // PATCH /api/projects/:id — update project
@@ -107,17 +76,17 @@ export function registerProjectRoutes(fastify: FastifyInstance): void {
       return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
     }
 
-    const project = projects.get(params.data.id);
+    const project = store.updateProject(params.data.id, {
+      name: body.data.name,
+      description: body.data.description,
+      taskIds: body.data.taskIds,
+    });
+
     if (!project) {
       return reply.status(404).send({ error: 'Project not found' });
     }
 
-    if (body.data.name !== undefined) project.name = body.data.name;
-    if (body.data.description !== undefined) project.description = body.data.description;
-    if (body.data.taskIds !== undefined) project.taskIds = body.data.taskIds;
-    project.updatedAt = new Date().toISOString();
-
-    return toProjectResponse(project);
+    return project;
   });
 
   // DELETE /api/projects/:id — delete project
@@ -127,11 +96,10 @@ export function registerProjectRoutes(fastify: FastifyInstance): void {
       return reply.status(400).send({ error: 'Invalid params', issues: params.error.issues });
     }
 
-    if (!projects.has(params.data.id)) {
+    if (!store.deleteProject(params.data.id)) {
       return reply.status(404).send({ error: 'Project not found' });
     }
 
-    projects.delete(params.data.id);
     reply.status(204).send();
   });
 }

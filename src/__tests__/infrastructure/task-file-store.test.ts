@@ -174,4 +174,59 @@ describe('TaskFileStore', () => {
       cleanup(dir);
     });
   });
+
+  describe('continuity artifacts', () => {
+    it('saves and loads scope-spec', () => {
+      const { store, dir } = createStore();
+      const spec = [
+        { id: 's1', description: 'Health check endpoint', satisfied: false },
+        { id: 's2', description: 'Returns 200 OK', satisfied: true, verifiedAt: new Date().toISOString() },
+      ];
+      store.saveScopeSpec('task_1', spec);
+
+      const loaded = store.loadScopeSpec('task_1');
+      expect(loaded).toHaveLength(2);
+      expect(loaded[0].satisfied).toBe(false);
+      expect(loaded[1].satisfied).toBe(true);
+      cleanup(dir);
+    });
+
+    it('returns empty array for missing scope-spec', () => {
+      const { store, dir } = createStore();
+      expect(store.loadScopeSpec('task_1')).toEqual([]);
+      cleanup(dir);
+    });
+
+    it('appends and loads progress-log', () => {
+      const { store, dir } = createStore();
+      store.appendProgressLog('task_1', { ts: new Date().toISOString(), action: 'started', detail: 'Epoch 1' });
+      store.appendProgressLog('task_1', { ts: new Date().toISOString(), epoch: 1, action: 'progress', detail: 'Half done' });
+
+      const log = store.loadProgressLog('task_1');
+      expect(log).toHaveLength(2);
+      expect(log[0].action).toBe('started');
+      expect(log[1].epoch).toBe(1);
+      cleanup(dir);
+    });
+
+    it('saves and loads env-resume', () => {
+      const { store, dir } = createStore();
+      store.saveEnvResume('task_1', {
+        testCommand: 'npm test',
+        buildCommand: 'npm run build',
+        notes: 'Run tests before committing',
+      });
+
+      const loaded = store.loadEnvResume('task_1');
+      expect(loaded).not.toBeNull();
+      expect(loaded!.testCommand).toBe('npm test');
+      cleanup(dir);
+    });
+
+    it('returns null for missing env-resume', () => {
+      const { store, dir } = createStore();
+      expect(store.loadEnvResume('task_1')).toBeNull();
+      cleanup(dir);
+    });
+  });
 });
