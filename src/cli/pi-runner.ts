@@ -183,12 +183,18 @@ export class PiSdkAgentRunner implements AgentRunner {
         ? (session.getLastAssistantText() ?? '')
         : '';
 
+      // Pi SessionStats.tokens = { input, output, cacheRead, cacheWrite, total }.
+      // `total` already bundles cache, so we surface cache separately to keep the
+      // headline (input+output) honest: input + output + cache = total.
+      const cacheBefore = (statsBefore?.tokens?.cacheRead ?? 0) + (statsBefore?.tokens?.cacheWrite ?? 0);
+      const cacheAfter = (statsAfter?.tokens?.cacheRead ?? 0) + (statsAfter?.tokens?.cacheWrite ?? 0);
       return {
         output,
         stats: {
           tokens: {
             input: (statsAfter?.tokens?.input ?? 0) - (statsBefore?.tokens?.input ?? 0),
             output: (statsAfter?.tokens?.output ?? 0) - (statsBefore?.tokens?.output ?? 0),
+            cache: cacheAfter - cacheBefore,
             total: (statsAfter?.tokens?.total ?? 0) - (statsBefore?.tokens?.total ?? 0),
           },
           cost: (statsAfter?.cost ?? 0) - (statsBefore?.cost ?? 0),

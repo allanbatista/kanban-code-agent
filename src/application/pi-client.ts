@@ -43,7 +43,7 @@ export class RunCancelledError extends Error {
 export interface AgentRunResult {
   output: string;
   stats: {
-    tokens?: { input?: number; output?: number; total?: number };
+    tokens?: { input?: number; output?: number; cache?: number; total?: number };
     cost?: number;
   };
 }
@@ -86,39 +86,68 @@ export class PiAgentClient {
 
     const metadata = orquestrator.toMetadata(task);
     const taskDir = orquestrator.getTaskDir(task.taskId);
-    const systemPrompt = [
+
+    // Only the orchestrator (Manager) that still has delegation budget decomposes
+    // work. Everyone else is a leaf executor: lean prompt, no create_subtask.
+    const canDelegate = metadata.canCreateSubtasks && orquestrator.isOrchestrator(task);
+
+    const commonHeader = [
       agent.role,
       orquestrator.buildTaskMetadataBlock(task, metadata),
       '',
       'COMO VOCE SE COMUNICA',
       '- O titulo da task e gerado separadamente e e curto e direto. NUNCA trate suas mensagens como titulo nem repita o titulo como resposta.',
-      '- Durante a execucao, use a tool post_message para dar feedback ao usuario sobre o que esta fazendo (progresso, decisao tomada, proximo passo). Sao mensagens informativas e NAO finalizam a task.',
+      '- Assim que comecar, use a tool post_message para dizer em 1 linha o que vai fazer; e use-a novamente a cada passo relevante (decisao, delegacao, espera, consolidacao). Sao mensagens informativas e NAO finalizam a task.',
       '- Toda finalizacao de uma task e SEMPRE uma resposta sua: o campo messages da sua decisao e a mensagem de conclusao entregue ao usuario.',
-      '',
-      'QUANDO PARAR (decisao final)',
-      'Ao decidir parar, retorne uma mensagem de conclusao deixando claro um dos casos:',
-      '- CONCLUIDA: o trabalho foi entregue. Resuma o resultado/entregaveis. -> status completed.',
-      '- PRECISA DE RESPOSTA: voce esta bloqueado e precisa de informacao/decisao do usuario. Faca a pergunta de forma objetiva. -> status completed com a pergunta clara em messages (a task vai para revisao aguardando o usuario).',
-      '',
-      'DELEGACAO (subtasks)',
-      '1. Use create_subtask para delegar a outro agente (Produto, Architecture, Engineer, Code Reviewer, QA, Generic) quando a task exigir o trabalho final desse agente. Voce orquestra; nao faca o trabalho final de outro agente.',
-      '2. Apos criar subtasks, retorne status waiting com waitGroups contendo os taskIds retornados pela tool (WAIT_ALL aguarda todas; ON_DEMAND processa uma a uma). NUNCA responda completed no mesmo turno em que criou subtasks.',
-      '3. Os resultados (conclusoes) das subtasks chegam como input nos eventos recebidos no proximo turno. Consolide essas conclusoes e so entao responda completed com a mensagem final ao usuario.',
-      '',
-      'ARTEFATOS',
-      '- Para produzir arquivos use create_artifact.',
+    ];
+
+    const roleBlock = canDelegate
+      ? [
+          '',
+          'SEU PAPEL: ORQUESTRADOR',
+          '- Voce NAO faz o trabalho final de outro agente: voce decompoe e delega.',
+          '- Se a tarefa pede itens distintos (ex.: uma saudacao por idioma, um arquivo por modulo), voce DEVE criar UMA subtask por item via create_subtask e NUNCA responder direto.',
+          '- Passe a cada subtask apenas a instrucao minima e auto-contida para o item dela (sem contexto das outras).',
+          '',
+          'FLUXO DE DELEGACAO',
+          '1. post_message dizendo quantas subtasks vai criar e por que.',
+          '2. Chame create_subtask para CADA item (ela retorna o taskId).',
+          '3. Retorne status waiting com waitGroups usando os taskIds retornados (WAIT_ALL aguarda todas; ON_DEMAND entrega uma a uma). NUNCA responda completed no mesmo turno em que criou subtasks.',
+          '4. As conclusoes das subtasks chegam como eventos no proximo turno. Consolide-as e so entao responda completed com a mensagem final ao usuario.',
+          '',
+          'QUANDO PARAR (decisao final)',
+          '- CONCLUIDA: todas as subtasks terminaram e voce consolidou o resultado. -> status completed.',
+          '- PRECISA DE RESPOSTA: bloqueado, precisa de decisao do usuario. -> status completed com a pergunta clara em messages.',
+        ]
+      : [
+          '',
+          'SEU PAPEL: EXECUTOR',
+          '- Execute a tarefa diretamente e retorne o resultado final. NAO delegue, NAO crie subtasks.',
+          '- Para produzir arquivos use create_artifact. Para feedback de progresso use post_message.',
+          '',
+          'QUANDO PARAR (decisao final)',
+          '- CONCLUIDA: o trabalho foi entregue. Coloque o resultado final em messages. -> status completed.',
+          '- PRECISA DE RESPOSTA: bloqueado, precisa de decisao do usuario. -> status completed com a pergunta clara em messages.',
+        ];
+
+    const outputBlock = [
       '',
       'FORMATO DE SAIDA',
       'Retorne APENAS o JSON puro do contrato (campo status), sem texto antes/depois, sem markdown. Exatamente um destes:',
       `completado: ${JSON.stringify({ status: 'completed', messages: [{ type: 'text', text: 'conclusao ou pergunta ao usuario' }] })}`,
-      `aguardando: ${JSON.stringify({ status: 'waiting', waitGroups: [{ waitId: 'g1', mode: 'WAIT_ALL', taskIds: ['id1'] }], messages: [{ type: 'text', text: 'motivo' }] })}`,
+      ...(canDelegate
+        ? [`aguardando: ${JSON.stringify({ status: 'waiting', waitGroups: [{ waitId: 'g1', mode: 'WAIT_ALL', taskIds: ['<taskId-retornado-por-create_subtask>'] }], messages: [{ type: 'text', text: 'motivo' }] })}`]
+        : []),
       `retry: ${JSON.stringify({ status: 'retry', instructions: 'novas instrucoes', messages: [{ type: 'text', text: 'motivo' }] })}`,
-    ].join('\n');
+    ];
+
+    const systemPrompt = [...commonHeader, ...roleBlock, ...outputBlock].join('\n');
 
     const prompt = buildPrompt(task, metadata, triggerEvents, this.maxPromptChatMessages);
 
-    // Only tasks that may still create subtasks get the orchestration tools.
-    const customTools = metadata.canCreateSubtasks ? orquestrator.buildAgentTools(task) : [];
+    // post_message + create_artifact go to every agent; create_subtask only to a
+    // delegating orchestrator with remaining budget.
+    const customTools = orquestrator.buildAgentTools(task, canDelegate);
     const tools = [...this.tools, ...customTools.map((tool) => tool.name)];
 
     return this.runner.run({

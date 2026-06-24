@@ -38,7 +38,7 @@ function makeBaseMetadata(overrides: Partial<TaskMetadata> = {}): TaskMetadata {
     runs: [],
     taskChat: [],
     artifacts: [],
-    metrics: { durationMs: 0, tokens: { input: 0, output: 0, total: 0 }, cost: 0 },
+    metrics: { durationMs: 0, tokens: { input: 0, output: 0, cache: 0, total: 0 }, cost: 0 },
     ...overrides,
   };
 }

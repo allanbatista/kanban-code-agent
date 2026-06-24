@@ -433,6 +433,67 @@ describe('Orquestrator', () => {
   });
 
   // -------------------------------------------------------------------
+  // Mixed wait groups (task-b: "duas como grupo, duas independentes")
+  // -------------------------------------------------------------------
+  describe('mixed wait groups', () => {
+    it('registers a WAIT_ALL group and an ON_DEMAND group, keeps the agent OFF while waiting, then settles', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      // task_1 = parent; task_2/3 = the WAIT_ALL "grupo"; task_4/5 = the
+      // ON_DEMAND "independentes". All subtasks gated so they stay pending while
+      // we assert the wait structure.
+      const runner = makeRoutedRunner(
+        {
+          task_1: [
+            waitingDecision([
+              { waitId: 'grupo', mode: WAIT_GROUP_MODE.WAIT_ALL, taskIds: ['task_2', 'task_3'] },
+              { waitId: 'independentes', mode: WAIT_GROUP_MODE.ON_DEMAND, taskIds: ['task_4', 'task_5'] },
+            ]),
+          ],
+          task_2: [completedDecision('g1')],
+          task_3: [completedDecision('g2')],
+          task_4: [completedDecision('i1')],
+          task_5: [completedDecision('i2')],
+        },
+        { task_2: gate, task_3: gate, task_4: gate, task_5: gate },
+      );
+      const orc = new Orquestrator(createDeps(dir, createPiClientWithRunner(runner)));
+      const parent = orc.createRootTask('Parent mixed', 'agent-tester');
+      const grupoA = orc.spawnSubtask(parent, 'agent-tester', 'Grupo 1', 'g1');
+      const grupoB = orc.spawnSubtask(parent, 'agent-tester', 'Grupo 2', 'g2');
+      const indep1 = orc.spawnSubtask(parent, 'agent-tester', 'Indep 1', 'i1');
+      const indep2 = orc.spawnSubtask(parent, 'agent-tester', 'Indep 2', 'i2');
+
+      await waitForStatus(orc, parent, TASK_STATUS.WAITING);
+
+      // The waiting agent is turned off: no in-flight run for the parent.
+      expect(
+        (orc as unknown as { runningTaskIds: Set<string> }).runningTaskIds.has(parent.taskId),
+      ).toBe(false);
+
+      const run = parent.runs.find((r) => r.status === 'WAITING');
+      expect(run).toBeDefined();
+      const byId = Object.fromEntries((run?.waitGroups ?? []).map((g) => [g.waitId, g]));
+      expect(byId.grupo.mode).toBe(WAIT_GROUP_MODE.WAIT_ALL);
+      expect(byId.grupo.taskIds).toEqual(['task_2', 'task_3']);
+      expect(byId.grupo.status).toBe(WAIT_GROUP_STATUS.WAITING);
+      expect(byId.independentes.mode).toBe(WAIT_GROUP_MODE.ON_DEMAND);
+      expect(byId.independentes.taskIds).toEqual(['task_4', 'task_5']);
+      expect(byId.independentes.status).toBe(WAIT_GROUP_STATUS.WAITING);
+
+      release();
+      await orc.waitUntilSettled(parent);
+
+      expect(parent.status).toBe(TASK_STATUS.COMPLETED);
+      for (const sub of [grupoA, grupoB, indep1, indep2]) {
+        expect(sub.status).toBe(TASK_STATUS.COMPLETED);
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------
   // getSubtasks
   // -------------------------------------------------------------------
   describe('getSubtasks', () => {

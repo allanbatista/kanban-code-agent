@@ -282,7 +282,7 @@ function formatSwarmEvent(event: SwarmEvent): string {
 
 function addSessionStats(
   metrics: Task['metrics'],
-  stats: { tokens?: { input?: number; output?: number; total?: number }; cost?: number },
+  stats: { tokens?: { input?: number; output?: number; cache?: number; total?: number }; cost?: number },
   startedAt: string,
   finishedAt: string,
 ): Task['metrics'] {
@@ -293,6 +293,7 @@ function addSessionStats(
     tokens: {
       input: metrics.tokens.input + (typeof stats.tokens?.input === 'number' ? stats.tokens.input : 0),
       output: metrics.tokens.output + (typeof stats.tokens?.output === 'number' ? stats.tokens.output : 0),
+      cache: metrics.tokens.cache + (typeof stats.tokens?.cache === 'number' ? stats.tokens.cache : 0),
       total: metrics.tokens.total + (typeof stats.tokens?.total === 'number' ? stats.tokens.total : 0),
     },
     cost: metrics.cost + (typeof stats.cost === 'number' ? stats.cost : 0),
@@ -676,6 +677,15 @@ export class Orquestrator extends EventEmitter {
     return subtask;
   }
 
+  /**
+   * Only the orchestrator (Manager) decomposes work into subtasks. Specialized
+   * agents are leaf executors: they do the work and return, which keeps their
+   * context minimal and prevents trivial tasks from spawning runaway nesting.
+   */
+  isOrchestrator(task: Task): boolean {
+    return task.options.assignedTo === MANAGER_AGENT;
+  }
+
   getSubtasks(task: Task): Task[] {
     return task.subtaskIds
       .map((tid) => this.tasks.get(tid))
@@ -870,9 +880,33 @@ export class Orquestrator extends EventEmitter {
       .join('\n');
   }
 
+  // Slim metadata for the SYSTEM prompt: only what the agent needs to decide its
+  // next move. The full chat/runs/metrics/artifacts already travel in the user
+  // prompt (buildPrompt) — re-sending them here doubled the context every turn,
+  // which is what inflated cache-token totals. Keeping this lean also guarantees
+  // a subtask only sees the essentials, never sibling/parent internals.
   buildTaskMetadataBlock(task: Task, metadata?: TaskMetadata): string {
     const md = metadata ?? this.toMetadata(task);
-    return ['<task_metadata>', JSON.stringify(md, null, 2), '</task_metadata>'].join('\n');
+    const slim = {
+      taskId: md.taskId,
+      title: md.title,
+      assignedTo: md.assignedTo,
+      status: md.status,
+      depth: md.depth,
+      maxDepth: md.maxDepth,
+      canCreateSubtasks: md.canCreateSubtasks,
+      runtimeConfig: md.runtimeConfig,
+      allowedModels: md.allowedModels,
+      allowedEfforts: md.allowedEfforts,
+      retryCount: md.retryCount,
+      maxRetries: md.maxRetries,
+      technicalRetryCount: md.technicalRetryCount,
+      maxTechnicalRetries: md.maxTechnicalRetries,
+      maxSubtasksPerTask: md.maxSubtasksPerTask,
+      attachmentsDir: md.attachmentsDir,
+      artifactsDir: md.artifactsDir,
+    };
+    return ['<task_metadata>', JSON.stringify(slim, null, 2), '</task_metadata>'].join('\n');
   }
 
   resolveRuntimeConfig(task: Task, agent?: Agent): Required<RuntimeConfig> {
@@ -933,11 +967,15 @@ export class Orquestrator extends EventEmitter {
    * Returned as Pi-agnostic specs; the runner adapts them to Pi SDK tools so the
    * Manager can actually decompose work into subtasks for specialized agents.
    */
-  buildAgentTools(task: Task): CustomToolSpec[] {
+  buildAgentTools(task: Task, includeDelegation: boolean): CustomToolSpec[] {
     const delegatable = this.getAgentNames().filter(
       (name) => name !== MANAGER_AGENT && name !== INBOX_AGENT,
     );
-    return [
+    // post_message and create_artifact are available to EVERY agent (feedback and
+    // file output are not orchestration). create_subtask is added only for tasks
+    // that orchestrate — executor subtasks just do the work and return, which
+    // keeps their context minimal and prevents runaway nesting.
+    const tools: CustomToolSpec[] = [
       {
         name: 'post_message',
         description:
@@ -955,7 +993,9 @@ export class Orquestrator extends EventEmitter {
           return 'ok';
         },
       },
-      {
+    ];
+    if (includeDelegation) {
+      tools.push({
         name: 'create_subtask',
         description:
           'Cria uma subtask assincrona delegada a um agente especializado e retorna seus metadados (incluindo taskId). Use o taskId retornado nos waitGroups do status waiting.',
@@ -989,8 +1029,9 @@ export class Orquestrator extends EventEmitter {
           const subtask = existing ?? this.spawnSubtask(task, assignedTo, title, message, runtimeConfig);
           return JSON.stringify(this.toMetadata(subtask));
         },
-      },
-      {
+      });
+    }
+    tools.push({
         name: 'create_artifact',
         description: 'Cria um arquivo no diretorio artifacts da task atual e o registra.',
         parameters: {
@@ -1014,8 +1055,8 @@ export class Orquestrator extends EventEmitter {
           );
           return JSON.stringify(artifact);
         },
-      },
-    ];
+    });
+    return tools;
   }
 
   shutdown(): void {
@@ -1056,9 +1097,10 @@ export class Orquestrator extends EventEmitter {
       task.status,
       this.formatTaskDependencies(task),
       formatDuration(task.metrics.durationMs),
-      String(task.metrics.tokens.total),
       String(task.metrics.tokens.input),
       String(task.metrics.tokens.output),
+      String(task.metrics.tokens.cache),
+      String(task.metrics.tokens.total),
       formatCost(task.metrics.cost),
       `${task.retryCount}/${task.technicalRetryCount}`,
     ]);
@@ -1067,10 +1109,11 @@ export class Orquestrator extends EventEmitter {
         durationMs: acc.durationMs + task.metrics.durationMs,
         input: acc.input + task.metrics.tokens.input,
         output: acc.output + task.metrics.tokens.output,
+        cache: acc.cache + task.metrics.tokens.cache,
         total: acc.total + task.metrics.tokens.total,
         cost: acc.cost + task.metrics.cost,
       }),
-      { durationMs: 0, input: 0, output: 0, total: 0, cost: 0 },
+      { durationMs: 0, input: 0, output: 0, cache: 0, total: 0, cost: 0 },
     );
     rows.push([
       'TOTAL',
@@ -1078,14 +1121,15 @@ export class Orquestrator extends EventEmitter {
       '-',
       '-',
       formatDuration(totals.durationMs),
-      String(totals.total),
       String(totals.input),
       String(totals.output),
+      String(totals.cache),
+      String(totals.total),
       formatCost(totals.cost),
       '-',
     ]);
     return formatMarkdownTable(
-      ['task', 'agent', 'status', 'depends_on', 'duration', 'tokens', 'input', 'output', 'price', 'retry/tech'],
+      ['task', 'agent', 'status', 'depends_on', 'duration', 'input', 'output', 'cache', 'total', 'price', 'retry/tech'],
       rows,
     );
   }
@@ -1200,6 +1244,7 @@ export class Orquestrator extends EventEmitter {
       this.markEventsProcessed(task, triggerEvents);
       task.resultMessages = task.appendAgentMessages(decision.messages);
       this.startOrUpdateWaitRun(task, run, waitGroups, task.resultMessages);
+      this.announceDelegation(task, waitGroups);
       task.status = TASK_STATUS.WAITING;
       this.markTaskDirty(task);
       this.recordEvent(SWARM_EVENT_TYPE.TASK_WAITING, {
@@ -1281,6 +1326,7 @@ export class Orquestrator extends EventEmitter {
     this.markEventsProcessed(task, triggerEvents);
     if (messages.length > 0) task.resultMessages = task.appendAgentMessages(messages);
     this.startOrUpdateWaitRun(task, run, waitGroups, task.resultMessages);
+    this.announceDelegation(task, waitGroups);
     task.status = TASK_STATUS.WAITING;
     this.markTaskDirty(task);
     this.recordEvent(SWARM_EVENT_TYPE.TASK_WAITING, {
@@ -1632,6 +1678,23 @@ export class Orquestrator extends EventEmitter {
     return run;
   }
 
+  // Posts one deterministic feedback line naming the delegated subtasks and the
+  // wait mode, so the user always sees "what is happening" even when the model
+  // forgets to call post_message itself. Skips if the same line was just posted.
+  private announceDelegation(task: Task, waitGroups: AgentWaitGroup[]): void {
+    const subtasks = waitGroups
+      .flatMap((g) => g.taskIds)
+      .map((id) => this.tasks.get(id))
+      .filter((st): st is Task => Boolean(st));
+    if (subtasks.length === 0) return;
+    const modes = [...new Set(waitGroups.map((g) => g.mode))].join('/');
+    const lines = subtasks.map((st) => `• ${st.options.title} → ${st.options.assignedTo} [${st.status}]`);
+    const text = `Deleguei ${subtasks.length} subtask(s) e estou aguardando (${modes}):\n${lines.join('\n')}`;
+    const last = task.chat[task.chat.length - 1];
+    if (last && last.role === 'assistant' && last.text === text) return;
+    this.postAgentMessage(task, text);
+  }
+
   private startOrUpdateWaitRun(
     task: Task,
     run: TaskRun,
@@ -1639,6 +1702,9 @@ export class Orquestrator extends EventEmitter {
     resultMessages: TaskChatMessage[],
   ): void {
     run.status = 'WAITING';
+    // A run entering WAITING is in a valid state again; drop any error left by a
+    // failed attempt that was recovered via coercion (no scary stale error).
+    run.error = undefined;
     run.resultMessages = resultMessages;
     run.waitGroups = mergeWaitGroups(
       run.waitGroups,

@@ -54,6 +54,8 @@ export interface TaskMetrics {
   tokens: {
     input: number;
     output: number;
+    /** Cache read + write tokens (cheap). Kept separate so input+output+cache = total. */
+    cache: number;
     total: number;
   };
   cost: number;
@@ -233,7 +235,7 @@ export class Task {
   private createEmptyMetrics(): TaskMetrics {
     return {
       durationMs: 0,
-      tokens: { input: 0, output: 0, total: 0 },
+      tokens: { input: 0, output: 0, cache: 0, total: 0 },
       cost: 0,
     };
   }

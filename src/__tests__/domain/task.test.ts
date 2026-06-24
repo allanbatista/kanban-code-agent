@@ -57,7 +57,7 @@ describe('Task constructor', () => {
     const task = new Task(defaultOptions);
     expect(task.metrics).toEqual({
       durationMs: 0,
-      tokens: { input: 0, output: 0, total: 0 },
+      tokens: { input: 0, output: 0, cache: 0, total: 0 },
       cost: 0,
     });
   });
