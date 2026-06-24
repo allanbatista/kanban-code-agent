@@ -9,7 +9,10 @@ import type {
   ApiHealth,
 } from '@/types/api';
 
-export const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:35000';
+// Same-origin by default (empty base = relative '/api/...'): in dev the Vite
+// server proxies /api to the API; in production the API server serves the page.
+// Set VITE_API_URL to target an absolute API host.
+export const API_BASE = import.meta.env.VITE_API_URL ?? '';
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   // Only declare a JSON content-type when we actually send a body. Fastify
