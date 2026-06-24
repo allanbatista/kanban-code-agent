@@ -5,22 +5,9 @@ import { tmpdir } from 'node:os';
 import { SnapshotStore } from '../../infrastructure/persistence/snapshot-store.js';
 import { PathSandbox } from '../../infrastructure/filesystem/sandbox.js';
 import { Task } from '../../domain/task.js';
-import type { SwarmEvent } from '../../domain/events.js';
 
 function createTask(id: string, title: string): Task {
   return new Task({ taskId: id, title, assignedTo: 'agent-1', depth: 0 }, false);
-}
-
-function createEvent(overrides: Partial<SwarmEvent> = {}): SwarmEvent {
-  return {
-    seq: overrides.seq ?? 1,
-    eventId: overrides.eventId ?? 'evt_1',
-    type: 'TASK_CREATED',
-    taskId: 'task_1',
-    ts: new Date().toISOString(),
-    processedByTaskIds: [],
-    ...overrides,
-  };
 }
 
 function createStore(): { store: SnapshotStore; dir: string } {
@@ -43,8 +30,7 @@ describe('SnapshotStore', () => {
       t1.status = 'RUNNING';
       tasks.set('task_1', t1);
 
-      const events = [createEvent()];
-      store.saveSnapshot(tasks, events, ['task_1'], 2);
+      store.saveSnapshot(tasks, ['task_1'], 2);
 
       const loaded = store.loadSnapshot();
       expect(loaded).not.toBeNull();
@@ -54,7 +40,8 @@ describe('SnapshotStore', () => {
       expect(loaded!.tasks).toHaveLength(1);
       expect(loaded!.tasks[0].options.taskId).toBe('task_1');
       expect(loaded!.tasks[0].status).toBe('RUNNING');
-      expect(loaded!.events).toHaveLength(1);
+      // The event log is no longer embedded in the snapshot (lives in events.jsonl).
+      expect(loaded!.events).toBeUndefined();
       expect(loaded!.timestamp).toBeDefined();
       cleanup(dir);
     });
@@ -65,8 +52,8 @@ describe('SnapshotStore', () => {
       const tasks = new Map<string, Task>();
       tasks.set('task_1', createTask('task_1', 'T1'));
 
-      store.saveSnapshot(tasks, [], ['task_1'], 1);
-      store.saveSnapshot(tasks, [], ['task_1'], 2);
+      store.saveSnapshot(tasks,['task_1'], 1);
+      store.saveSnapshot(tasks,['task_1'], 2);
 
       const snapshotPath = join(dir, '.swarm', 'state.snapshot.json');
       const bakPath = snapshotPath + '.bak';
@@ -78,7 +65,7 @@ describe('SnapshotStore', () => {
       const { store, dir } = createStore();
 
       const tasks = new Map<string, Task>();
-      store.saveSnapshot(tasks, [], [], 0);
+      store.saveSnapshot(tasks,[], 0);
 
       const loaded = store.loadSnapshot();
       expect(loaded!.version).toBe(1);
@@ -124,7 +111,7 @@ describe('SnapshotStore', () => {
 
       const tasks = new Map<string, Task>();
       tasks.set('task_1', createTask('task_1', 'T1'));
-      store.saveSnapshot(tasks, [], ['task_1'], 1);
+      store.saveSnapshot(tasks,['task_1'], 1);
 
       store.backup();
 

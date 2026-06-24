@@ -11,11 +11,13 @@ import type { SerializedTask, Task } from '../../domain/task.js';
 
 export interface SnapshotData {
   tasks: SerializedTask[];
-  events: SwarmEvent[];
   rootTaskIds: string[];
   nextSeq: number;
   version: number;
   timestamp: string;
+  // The event log is the append-only source of truth (events.jsonl); the
+  // snapshot no longer embeds it. Kept optional only to read legacy snapshots.
+  events?: SwarmEvent[];
 }
 
 /**
@@ -33,12 +35,12 @@ export class SnapshotStore {
   }
 
   /**
-   * Serialize full swarm state to a snapshot file.
-   * Tasks are serialized via their serialize() method.
+   * Serialize swarm state (tasks + roots + counters) to a snapshot file.
+   * The event log is NOT embedded — it lives append-only in events.jsonl — so a
+   * save is O(tasks) instead of O(tasks + every event ever recorded).
    */
   saveSnapshot(
     tasks: Map<string, Task>,
-    events: SwarmEvent[],
     rootTaskIds: string[],
     nextSeq: number,
   ): void {
@@ -49,7 +51,6 @@ export class SnapshotStore {
 
     const snapshot: SnapshotData = {
       tasks: serializedTasks,
-      events,
       rootTaskIds,
       nextSeq,
       version: CURRENT_VERSION,
@@ -75,7 +76,6 @@ export class SnapshotStore {
 
       // Basic structural validation
       if (!Array.isArray(data.tasks)) return null;
-      if (!Array.isArray(data.events)) return null;
       if (!Array.isArray(data.rootTaskIds)) return null;
       if (typeof data.nextSeq !== 'number') return null;
       if (typeof data.version !== 'number') return null;

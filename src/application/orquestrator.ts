@@ -1035,7 +1035,9 @@ export class Orquestrator extends EventEmitter {
 
   persist(): void {
     this.flushDirtyTasks();
-    this.snapshotStore.saveSnapshot(this.tasks, this.events, this.rootTaskIds, this.nextSeq);
+    // Events are appended incrementally to events.jsonl (eventStore), so the
+    // snapshot only carries tasks + roots + counters — no O(events) rewrite.
+    this.snapshotStore.saveSnapshot(this.tasks, this.rootTaskIds, this.nextSeq);
   }
 
   persistTask(task: Task): void {
@@ -1979,9 +1981,11 @@ export class Orquestrator extends EventEmitter {
   // -----------------------------------------------------------------------
 
   private loadState(): void {
+    // The event log is the append-only source of truth; always load it from the
+    // jsonl rather than the snapshot (which no longer embeds it).
+    this.events = this.eventStore.loadAll();
     const snapshot = this.snapshotStore.loadSnapshot();
     if (snapshot) {
-      this.events = snapshot.events ?? this.eventStore.loadAll();
       this.nextSeq =
         snapshot.nextSeq ?? this.events.reduce((max, event) => Math.max(max, event.seq), 0) + 1;
       this.rootTaskIds = uniqueStrings(snapshot.rootTaskIds ?? []);
@@ -2000,15 +2004,40 @@ export class Orquestrator extends EventEmitter {
         }
       }
     } else {
-      this.events = this.eventStore.loadAll();
       this.nextSeq = this.events.reduce((max, event) => Math.max(max, event.seq), 0) + 1;
       this.replayEventsMinimal();
     }
 
+    // events.jsonl stores each event as appended (processedByTaskIds: []). That
+    // per-task consumption flag is mutated in-place after append and only the
+    // wait groups persist it, so rebuild it from the loaded runs' processedEventIds.
+    this.rederiveProcessedEvents();
     this.repairDepths();
     this.deriveIdCounters();
     this.recoverStatusesAfterCrash();
     this.reseedBudget();
+  }
+
+  /**
+   * Rebuild each event's `processedByTaskIds` (the per-task "already consumed"
+   * flag) from the persisted wait groups. This flag mutates in-place after the
+   * event is appended to the log, so it is not in events.jsonl; the equivalent
+   * `group.processedEventIds` IS persisted on the runs, so we replay it here.
+   */
+  private rederiveProcessedEvents(): void {
+    const eventById = new Map(this.events.map((event) => [event.eventId, event]));
+    for (const task of this.tasks.values()) {
+      for (const run of task.runs) {
+        for (const group of run.waitGroups) {
+          for (const eventId of group.processedEventIds) {
+            const event = eventById.get(eventId);
+            if (event && !event.processedByTaskIds.includes(task.taskId)) {
+              event.processedByTaskIds.push(task.taskId);
+            }
+          }
+        }
+      }
+    }
   }
 
   /** Re-seed BudgetTracker from persisted task.metrics so post-restart gate matches live state. */

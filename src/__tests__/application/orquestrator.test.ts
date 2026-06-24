@@ -547,6 +547,35 @@ describe('Orquestrator', () => {
       expect(recovered).toBeDefined();
       expect(recovered.title).toBe('Running task');
     });
+
+    it('re-derives event processedByTaskIds from persisted wait groups after restart', async () => {
+      // Parent waits on a subtask, consumes its completion, then finishes — the
+      // completion event ends up marked processed by the parent.
+      const runner = makeRoutedRunner({
+        task_1: [
+          waitingDecision([{ waitId: 'wg1', mode: WAIT_GROUP_MODE.WAIT_ALL, taskIds: ['task_2'] }]),
+          completedDecision('consolidated'),
+        ],
+        task_2: [completedDecision('sub done')],
+      });
+      const orc = new Orquestrator(createDeps(dir, createPiClientWithRunner(runner)));
+      const parent = orc.createRootTask('Parent', 'agent-tester');
+      orc.spawnSubtask(parent, 'agent-tester', 'Sub', 'msg');
+      await orc.waitUntilSettled(parent);
+
+      const completedEvt = getEvents(orc).find(
+        (e) => e.type === SWARM_EVENT_TYPE.TASK_COMPLETED && e.taskId === 'task_2',
+      );
+      expect(completedEvt?.processedByTaskIds).toContain(parent.taskId);
+      orc.persist();
+
+      // Restart: events.jsonl stores processedByTaskIds:[], so it must be rebuilt.
+      const orc2 = new Orquestrator(createDeps(dir, createPiClient([])), { stopWhenWaiting: true });
+      const recoveredEvt = getEvents(orc2).find(
+        (e) => e.type === SWARM_EVENT_TYPE.TASK_COMPLETED && e.taskId === 'task_2',
+      );
+      expect(recoveredEvt?.processedByTaskIds).toContain('task_1');
+    });
   });
 
   // -------------------------------------------------------------------
