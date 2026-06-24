@@ -873,6 +873,18 @@ export class Orquestrator extends EventEmitter {
     this.recordEvent(SWARM_EVENT_TYPE.ARTIFACT_CREATED, { task, payload: { artifact } });
   }
 
+  // Appends an informative assistant message mid-run and pushes it to the UI in
+  // real time. Does not finalize the task; the run still emits its own decision.
+  postAgentMessage(task: Task, text: string): TaskChatMessage {
+    task.appendChat('assistant', 'text', text);
+    this.markTaskDirty(task);
+    const message = task.chat[task.chat.length - 1];
+    this.recordEvent(SWARM_EVENT_TYPE.MESSAGE_APPENDED, { task, messages: [message] });
+    this.persist();
+    this.emit('state:changed');
+    return message;
+  }
+
   // Writes an artifact file, registers it on the task and emits ARTIFACT_CREATED.
   createArtifact(
     task: Task,
@@ -901,6 +913,23 @@ export class Orquestrator extends EventEmitter {
       (name) => name !== MANAGER_AGENT && name !== INBOX_AGENT,
     );
     return [
+      {
+        name: 'post_message',
+        description:
+          'Envia uma mensagem informativa ao chat da task durante a execucao (progresso, decisao, proximo passo). NAO finaliza a task; o usuario ve em tempo real.',
+        parameters: {
+          type: 'object',
+          properties: {
+            text: { type: 'string', description: 'Mensagem de feedback ao usuario.' },
+          },
+          required: ['text'],
+          additionalProperties: false,
+        },
+        execute: async (params: Record<string, unknown>) => {
+          this.postAgentMessage(task, String(params.text));
+          return 'ok';
+        },
+      },
       {
         name: 'create_subtask',
         description:

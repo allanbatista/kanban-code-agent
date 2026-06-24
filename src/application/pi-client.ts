@@ -86,7 +86,34 @@ export class PiAgentClient {
 
     const metadata = orquestrator.toMetadata(task);
     const taskDir = orquestrator.getTaskDir(task.taskId);
-    const systemPrompt = `${agent.role}\n${orquestrator.buildTaskMetadataBlock(task, metadata)}\n\nREGRAS:\n1. Use a tool create_subtask para delegar a outro agente (Produto, Architecture, Engineer, Code Reviewer, QA, Generic) quando a task exigir trabalho que pertence a esse agente. Voce orquestra; nao faca o trabalho final de outro agente.\n2. Apos chamar create_subtask, retorne status waiting com waitGroups contendo os taskIds retornados pela tool (WAIT_ALL aguarda todas; ON_DEMAND processa uma a uma). Nao responda completed no mesmo turno em que criou subtasks.\n3. Quando os resultados das subtasks chegarem nos eventos recebidos, consolide e retorne completed.\n4. Para produzir arquivo, use create_artifact\n5. Retorne APENAS o JSON puro do contrato (campo \"status\"), sem texto antes/depois, sem markdown\n\nFORMATOS (retorne exatamente um destes):\ncompletado: ${JSON.stringify({ status: 'completed', messages: [{ type: 'text', text: 'resultado' }] })}\naguardando: ${JSON.stringify({ status: 'waiting', waitGroups: [{ waitId: 'g1', mode: 'WAIT_ALL', taskIds: ['id1'] }], messages: [{ type: 'text', text: 'motivo' }] })}\nretry: ${JSON.stringify({ status: 'retry', instructions: 'novas instrucoes', messages: [{ type: 'text', text: 'motivo' }] })}`;
+    const systemPrompt = [
+      agent.role,
+      orquestrator.buildTaskMetadataBlock(task, metadata),
+      '',
+      'COMO VOCE SE COMUNICA',
+      '- O titulo da task e gerado separadamente e e curto e direto. NUNCA trate suas mensagens como titulo nem repita o titulo como resposta.',
+      '- Durante a execucao, use a tool post_message para dar feedback ao usuario sobre o que esta fazendo (progresso, decisao tomada, proximo passo). Sao mensagens informativas e NAO finalizam a task.',
+      '- Toda finalizacao de uma task e SEMPRE uma resposta sua: o campo messages da sua decisao e a mensagem de conclusao entregue ao usuario.',
+      '',
+      'QUANDO PARAR (decisao final)',
+      'Ao decidir parar, retorne uma mensagem de conclusao deixando claro um dos casos:',
+      '- CONCLUIDA: o trabalho foi entregue. Resuma o resultado/entregaveis. -> status completed.',
+      '- PRECISA DE RESPOSTA: voce esta bloqueado e precisa de informacao/decisao do usuario. Faca a pergunta de forma objetiva. -> status completed com a pergunta clara em messages (a task vai para revisao aguardando o usuario).',
+      '',
+      'DELEGACAO (subtasks)',
+      '1. Use create_subtask para delegar a outro agente (Produto, Architecture, Engineer, Code Reviewer, QA, Generic) quando a task exigir o trabalho final desse agente. Voce orquestra; nao faca o trabalho final de outro agente.',
+      '2. Apos criar subtasks, retorne status waiting com waitGroups contendo os taskIds retornados pela tool (WAIT_ALL aguarda todas; ON_DEMAND processa uma a uma). NUNCA responda completed no mesmo turno em que criou subtasks.',
+      '3. Os resultados (conclusoes) das subtasks chegam como input nos eventos recebidos no proximo turno. Consolide essas conclusoes e so entao responda completed com a mensagem final ao usuario.',
+      '',
+      'ARTEFATOS',
+      '- Para produzir arquivos use create_artifact.',
+      '',
+      'FORMATO DE SAIDA',
+      'Retorne APENAS o JSON puro do contrato (campo status), sem texto antes/depois, sem markdown. Exatamente um destes:',
+      `completado: ${JSON.stringify({ status: 'completed', messages: [{ type: 'text', text: 'conclusao ou pergunta ao usuario' }] })}`,
+      `aguardando: ${JSON.stringify({ status: 'waiting', waitGroups: [{ waitId: 'g1', mode: 'WAIT_ALL', taskIds: ['id1'] }], messages: [{ type: 'text', text: 'motivo' }] })}`,
+      `retry: ${JSON.stringify({ status: 'retry', instructions: 'novas instrucoes', messages: [{ type: 'text', text: 'motivo' }] })}`,
+    ].join('\n');
 
     const prompt = buildPrompt(task, metadata, triggerEvents, this.maxPromptChatMessages);
 

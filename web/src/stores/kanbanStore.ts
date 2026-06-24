@@ -9,6 +9,8 @@ interface KanbanState {
   familyColors: Record<string, string>;
   loading: boolean;
   error: string | null;
+  wsConnected: boolean;
+  setWsConnected: (connected: boolean) => void;
 
   fetchTasks: () => Promise<void>;
   fetchAgents: () => Promise<void>;
@@ -88,6 +90,8 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
   familyColors: {},
   loading: false,
   error: null,
+  wsConnected: false,
+  setWsConnected: (connected) => set({ wsConnected: connected }),
 
   fetchTasks: async () => {
     set({ loading: true, error: null });

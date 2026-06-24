@@ -104,16 +104,22 @@ export interface WsEvent {
 
 type EventHandler = (event: WsEvent['event'] & object, task?: Record<string, unknown>) => void;
 type StateHandler = (tasks: WsEvent['tasks'] & object) => void;
+type StatusHandler = (connected: boolean) => void;
 
 export interface WsClient {
   onEvent: (handler: EventHandler) => () => void;
   onState: (handler: StateHandler) => () => void;
+  onStatus: (handler: StatusHandler) => () => void;
   close: () => void;
 }
 
 export function createWsClient(options?: { taskId?: string }): WsClient {
   const eventHandlers = new Set<EventHandler>();
   const stateHandlers = new Set<StateHandler>();
+  const statusHandlers = new Set<StatusHandler>();
+  const notifyStatus = (connected: boolean) => {
+    for (const handler of statusHandlers) handler(connected);
+  };
 
   let socket: WebSocket | null = null;
   let reconnectDelay = 1000;
@@ -125,10 +131,13 @@ export function createWsClient(options?: { taskId?: string }): WsClient {
     if (closed) return;
     if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
 
+    console.info('[ws] connecting to', WS_URL);
     socket = new WebSocket(WS_URL);
 
     socket.onopen = () => {
       reconnectDelay = 1000;
+      console.info('[ws] connected', WS_URL);
+      notifyStatus(true);
       // subscribe when connected
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: 'subscribe', taskId: options?.taskId }));
@@ -140,6 +149,7 @@ export function createWsClient(options?: { taskId?: string }): WsClient {
         const message: WsEvent = JSON.parse(raw.data as string);
 
         if (message.type === 'event' && message.event) {
+          console.debug('[ws] event', message.event.type, 'task=' + (message.event.taskId ?? '-'));
           for (const handler of eventHandlers) {
             handler(message.event as WsEvent['event'] & object, message.task);
           }
@@ -156,7 +166,9 @@ export function createWsClient(options?: { taskId?: string }): WsClient {
     };
 
     socket.onclose = () => {
+      notifyStatus(false);
       if (closed) return;
+      console.warn('[ws] disconnected; reconnecting in', reconnectDelay, 'ms');
       // exponential backoff reconnect
       reconnectTimer = setTimeout(() => {
         reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
@@ -179,6 +191,10 @@ export function createWsClient(options?: { taskId?: string }): WsClient {
     onState(handler: StateHandler) {
       stateHandlers.add(handler);
       return () => { stateHandlers.delete(handler); };
+    },
+    onStatus(handler: StatusHandler) {
+      statusHandlers.add(handler);
+      return () => { statusHandlers.delete(handler); };
     },
     close() {
       closed = true;

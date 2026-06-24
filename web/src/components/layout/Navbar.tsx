@@ -17,6 +17,7 @@ export function Navbar() {
   const location = useLocation();
   const [commandOpen, setCommandOpen] = useState(false);
   const tasks = useKanbanStore(s => s.tasks);
+  const wsConnected = useKanbanStore(s => s.wsConnected);
 
   return (
     <>
@@ -45,6 +46,19 @@ export function Navbar() {
           </div>
 
           <div className="flex-1" />
+
+          <div
+            className="flex items-center gap-1.5 text-xs text-muted-foreground"
+            title={wsConnected ? 'Tempo real conectado (WebSocket)' : 'Sem conexão em tempo real (WebSocket)'}
+          >
+            <span
+              className={cn(
+                'inline-block h-2 w-2 rounded-full',
+                wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500',
+              )}
+            />
+            <span className="hidden sm:inline">{wsConnected ? 'Tempo real' : 'Offline'}</span>
+          </div>
 
           <Button
             variant="ghost"

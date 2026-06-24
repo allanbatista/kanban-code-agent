@@ -31,8 +31,13 @@ export function App() {
       }
     });
 
+    ws.onStatus((connected) => {
+      useKanbanStore.getState().setWsConnected(connected);
+    });
+
     ws.onEvent((event, task) => {
       if (!event) return;
+      console.debug('[board] apply', event.type, 'task=' + (event.taskId ?? '-'));
       if (event.type === 'TASK_ARCHIVED') {
         const ids = (event.payload?.archivedTaskIds as string[] | undefined) ?? (event.taskId ? [event.taskId] : []);
         ids.forEach((id) => useKanbanStore.getState().removeTask(id));
