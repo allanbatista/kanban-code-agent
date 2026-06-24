@@ -27,7 +27,6 @@ coverage/
 *.js.map
 
 #graphify
-/graphify-runs/
-/graphify-out/cache/
-/graphify-out/cost.json
-
+graphify-runs/
+graphify-out/
+!graphify-out/graph.json

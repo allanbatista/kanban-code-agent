@@ -65,7 +65,7 @@ const defaultSettings: Settings = {
     maxSubtasksPerTask: 10,
     maxRetries: 3,
     maxTechnicalRetries: 2,
-    dataDir: '.swarm',
+    dataDir: '~/.kca',
   },
 };
 

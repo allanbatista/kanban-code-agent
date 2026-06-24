@@ -17,6 +17,27 @@ export interface AgentRunConfig {
   prompt: string;
   sessionManager: unknown;
   resourceLoader: unknown;
+  // When aborted, the runner stops the in-flight agent session promptly.
+  signal?: AbortSignal;
+  // Extra agent tools (e.g. create_subtask, create_artifact). The runner turns
+  // these into Pi SDK tools; the application layer stays free of Pi imports.
+  customTools?: CustomToolSpec[];
+}
+
+/** Plain description of an agent tool, independent of the Pi SDK. */
+export interface CustomToolSpec {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  execute: (params: Record<string, unknown>) => Promise<string>;
+}
+
+/** Thrown when an in-flight agent run is aborted (pause/move/cancel). */
+export class RunCancelledError extends Error {
+  constructor() {
+    super('Run cancelado');
+    this.name = 'RunCancelledError';
+  }
 }
 
 export interface AgentRunResult {
@@ -55,6 +76,7 @@ export class PiAgentClient {
     task: Task,
     orquestrator: Orquestrator,
     triggerEvents: SwarmEvent[],
+    signal?: AbortSignal,
   ): Promise<AgentRunResult> {
     const runtimeConfig = orquestrator.resolveRuntimeConfig(task, agent);
     const modelConfig = this.allowedModels[runtimeConfig.model];
@@ -64,19 +86,25 @@ export class PiAgentClient {
 
     const metadata = orquestrator.toMetadata(task);
     const taskDir = orquestrator.getTaskDir(task.taskId);
-    const systemPrompt = `${agent.role}\n${orquestrator.buildTaskMetadataBlock(task, metadata)}\n\nREGRAS:\n1. Use create_subtask apenas se task exigir delegacao\n2. Se ja ha subtasks, aguarde-as (waiting) em vez de criar novas\n3. Para produzir arquivo, use create_artifact\n4. Retorne APENAS o JSON puro, sem texto antes/depois, sem markdown\n\nFORMATOS (retorne exatamente um destes):\ncompletado: ${JSON.stringify({ status: 'completed', messages: [{ type: 'text', text: 'resultado' }] })}\naguardando: ${JSON.stringify({ status: 'waiting', waitGroups: [{ waitId: 'g1', mode: 'WAIT_ALL', taskIds: ['id1'] }], messages: [{ type: 'text', text: 'motivo' }] })}\nretry: ${JSON.stringify({ status: 'retry', instructions: 'novas instrucoes', messages: [{ type: 'text', text: 'motivo' }] })}`;
+    const systemPrompt = `${agent.role}\n${orquestrator.buildTaskMetadataBlock(task, metadata)}\n\nREGRAS:\n1. Use a tool create_subtask para delegar a outro agente (Produto, Architecture, Engineer, Code Reviewer, QA, Generic) quando a task exigir trabalho que pertence a esse agente. Voce orquestra; nao faca o trabalho final de outro agente.\n2. Apos chamar create_subtask, retorne status waiting com waitGroups contendo os taskIds retornados pela tool (WAIT_ALL aguarda todas; ON_DEMAND processa uma a uma). Nao responda completed no mesmo turno em que criou subtasks.\n3. Quando os resultados das subtasks chegarem nos eventos recebidos, consolide e retorne completed.\n4. Para produzir arquivo, use create_artifact\n5. Retorne APENAS o JSON puro do contrato (campo \"status\"), sem texto antes/depois, sem markdown\n\nFORMATOS (retorne exatamente um destes):\ncompletado: ${JSON.stringify({ status: 'completed', messages: [{ type: 'text', text: 'resultado' }] })}\naguardando: ${JSON.stringify({ status: 'waiting', waitGroups: [{ waitId: 'g1', mode: 'WAIT_ALL', taskIds: ['id1'] }], messages: [{ type: 'text', text: 'motivo' }] })}\nretry: ${JSON.stringify({ status: 'retry', instructions: 'novas instrucoes', messages: [{ type: 'text', text: 'motivo' }] })}`;
 
     const prompt = buildPrompt(task, metadata, triggerEvents, this.maxPromptChatMessages);
+
+    // Only tasks that may still create subtasks get the orchestration tools.
+    const customTools = metadata.canCreateSubtasks ? orquestrator.buildAgentTools(task) : [];
+    const tools = [...this.tools, ...customTools.map((tool) => tool.name)];
 
     return this.runner.run({
       cwd: taskDir,
       model: modelConfig,
       thinkingLevel: runtimeConfig.effort,
-      tools: this.tools,
+      tools,
       systemPrompt,
       prompt,
+      customTools,
       sessionManager: undefined,
       resourceLoader: undefined,
+      signal,
     });
   }
 

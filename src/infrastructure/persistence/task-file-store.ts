@@ -45,13 +45,18 @@ export class TaskFileStore {
   // Chat JSONL
   // ---------------------------------------------------------------------------
 
-  /** Append chat messages to chat.jsonl. */
+  /**
+   * Persist the full chat as chat.jsonl (atomic overwrite).
+   *
+   * Callers always pass the complete, in-memory chat history, so the file is
+   * rewritten rather than appended — appending the whole array on every flush
+   * would duplicate every message once per persist.
+   */
   saveChat(taskId: string, messages: TaskChatMessage[]): void {
     this.assertSandbox();
     const path = this.taskPath(taskId, 'chat.jsonl');
-    for (const msg of messages) {
-      AtomicWriter.appendLine(path, JSON.stringify(msg));
-    }
+    const content = messages.map((msg) => JSON.stringify(msg)).join('\n');
+    AtomicWriter.write(path, content.length ? content + '\n' : '');
   }
 
   /** Read all chat messages from chat.jsonl. Resilient to truncated last line. */
@@ -83,6 +88,17 @@ export class TaskFileStore {
     this.assertSandbox();
     const path = this.taskPath(taskId, 'artifacts.yaml');
     AtomicWriter.writeJson(path, artifacts);
+  }
+
+  /**
+   * Write a generated artifact file under the task's artifacts/ directory.
+   * Returns the sandbox-relative path. Rejects path traversal via PathSandbox.
+   */
+  writeArtifactFile(taskId: string, fileName: string, content: string): string {
+    this.assertSandbox();
+    const path = this.sandbox.resolveSubpath('.swarm', 'tasks', taskId, 'artifacts', fileName);
+    AtomicWriter.write(path, content);
+    return this.sandbox.relativeTo(path);
   }
 
   // ---------------------------------------------------------------------------

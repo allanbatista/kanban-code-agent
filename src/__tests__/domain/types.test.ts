@@ -111,7 +111,7 @@ describe('TASK_MESSAGE_TYPE', () => {
 describe('SWARM_EVENT_TYPE', () => {
   it('has all event types', () => {
     const keys = Object.keys(SWARM_EVENT_TYPE);
-    expect(keys).toHaveLength(23);
+    expect(keys).toHaveLength(25);
     expect(SWARM_EVENT_TYPE.TASK_CREATED).toBe('TASK_CREATED');
     expect(SWARM_EVENT_TYPE.TASK_UPDATED).toBe('TASK_UPDATED');
     expect(SWARM_EVENT_TYPE.TASK_QUEUED).toBe('TASK_QUEUED');

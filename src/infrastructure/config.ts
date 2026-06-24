@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { homedir } from 'node:os';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,7 +30,8 @@ export interface SwarmConfig {
 
 const DEFAULTS: SwarmConfig = {
   port: 35000,
-  dataDir: '.swarm',
+  // Persistência fora do projeto, no diretório do usuário (~/.kca).
+  dataDir: resolve(homedir(), '.kca'),
   logLevel: 'info',
   maxConcurrency: 3,
   runTimeoutMs: 300_000,

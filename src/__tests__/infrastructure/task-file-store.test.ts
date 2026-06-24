@@ -93,17 +93,22 @@ describe('TaskFileStore', () => {
       cleanup(dir);
     });
 
-    it('appends messages across multiple saveChat calls', () => {
+    it('overwrites with the full chat snapshot on each saveChat call', () => {
       const { store, dir } = createStore();
+      // Callers always pass the complete in-memory chat; saveChat rewrites the
+      // file so messages are never duplicated across persists.
       store.saveChat('task_1', [
         { ts: 't1', role: 'user', type: 'text', text: 'First' },
       ]);
       store.saveChat('task_1', [
+        { ts: 't1', role: 'user', type: 'text', text: 'First' },
         { ts: 't2', role: 'assistant', type: 'text', text: 'Second' },
       ]);
 
       const loaded = store.loadChat('task_1');
       expect(loaded).toHaveLength(2);
+      expect(loaded[0].text).toBe('First');
+      expect(loaded[1].text).toBe('Second');
       cleanup(dir);
     });
   });

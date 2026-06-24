@@ -27,7 +27,7 @@ import { AgentOutputInvalidError, parseDecision } from './decision-parser.js';
 import { BudgetTracker, BudgetExceededError } from './budget-tracker.js';
 import { Scheduler } from './scheduler.js';
 import { WorkerPool, RunTimeoutError } from './worker-pool.js';
-import type { PiAgentClient } from './pi-client.js';
+import { RunCancelledError, type PiAgentClient, type CustomToolSpec } from './pi-client.js';
 import type { EventStore } from '../infrastructure/persistence/event-store.js';
 import type { SnapshotStore } from '../infrastructure/persistence/snapshot-store.js';
 import type { TaskFileStore } from '../infrastructure/persistence/task-file-store.js';
@@ -314,6 +314,9 @@ export class Orquestrator extends EventEmitter {
   // state on load, so they survive restarts without a separate persisted field.
   private idCounters: { task: number; run: number; evt: number } = { task: 0, run: 0, evt: 0 };
   private runningTaskIds = new Set<string>();
+  // Abort controllers for in-flight Pi runs, keyed by taskId. Aborting stops
+  // the agent session promptly so pause/move/cancel actually halt work.
+  private runAbortControllers = new Map<string, AbortController>();
   private queuedTaskIds = new Set<string>();
   private taskQueue: string[] = [];
   private pendingTriggerEvents = new Map<string, Map<string, SwarmEvent>>();
@@ -444,29 +447,49 @@ export class Orquestrator extends EventEmitter {
     if (task.options.parentId) throw new Error('Apenas tasks raiz podem ser movidas');
     if (isTerminalTaskStatus(task.status)) throw new Error('Task finalizada não pode ser movida');
 
+    const wasActive = this.runningTaskIds.has(taskId) || this.queuedTaskIds.has(taskId);
+    // dequeue aborts any in-flight Pi run; the runTask result-guard discards
+    // late output, so moving to the Inbox truly pauses execution.
     this.dequeue(taskId);
     task.options.assignedTo = target === 'inbox' ? INBOX_AGENT : MANAGER_AGENT;
     task.status = TASK_STATUS.PENDING;
     task.activeRunId = undefined;
-    // ponytail: an in-flight Pi run is not aborted (no clean per-run cancel);
-    // its result would briefly override this. Wire WorkerPool cancellation if
-    // mid-run parking becomes a real need.
     this.markTaskDirty(task);
     this.recordEvent(SWARM_EVENT_TYPE.TASK_UPDATED, {
       task,
       payload: { assignedTo: task.assignedTo, status: task.status },
     });
+    if (target === 'inbox' && wasActive) {
+      this.recordEvent(SWARM_EVENT_TYPE.TASK_PAUSED, { task });
+    }
     this.persist();
     this.emit('state:changed');
     if (target === 'manager') this.scheduleTask(taskId);
     return task;
   }
 
-  // Removes a task from the scheduling queue (and the worker pool, if pending).
+  // Removes a task from the scheduling queue and aborts its in-flight run.
   private dequeue(taskId: string): void {
     this.queuedTaskIds.delete(taskId);
     this.taskQueue = this.taskQueue.filter((id) => id !== taskId);
     this.workerPool.cancel(taskId);
+    this.cancelActiveRun(taskId);
+  }
+
+  // Aborts the in-flight Pi run for a task (if any) and marks its run cancelled.
+  // The runTask result-guard discards any output that arrives after this.
+  private cancelActiveRun(taskId: string): void {
+    const controller = this.runAbortControllers.get(taskId);
+    if (controller && !controller.signal.aborted) controller.abort();
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+    const run = this.getActiveRun(task);
+    if (run && run.status === 'RUNNING') {
+      run.status = 'FAILED';
+      run.error = 'cancelado';
+      run.completedAt = new Date().toISOString();
+      this.recordEvent(SWARM_EVENT_TYPE.RUN_CANCELLED, { task, runId: run.runId });
+    }
   }
 
   spawnSubtask(
@@ -603,9 +626,16 @@ export class Orquestrator extends EventEmitter {
     this.recordEvent(SWARM_EVENT_TYPE.RUN_STARTED, { task, runId: run.runId });
     this.persist();
 
+    const controller = new AbortController();
+    this.runAbortControllers.set(taskId, controller);
     try {
       this.taskFileStore.ensureTaskDir(task.taskId);
-      const result = await this.piClient.run(agent, task, this, triggerEvents);
+      const result = await this.piClient.run(agent, task, this, triggerEvents, controller.signal);
+      // If the run was cancelled or the task was moved/superseded mid-flight,
+      // discard the result so no phantom output is applied after a pause.
+      if (controller.signal.aborted || task.activeRunId !== run.runId || task.status !== TASK_STATUS.RUNNING) {
+        return;
+      }
       const finishedAt = new Date().toISOString();
       task.metrics = addSessionStats(task.metrics, result.stats, startedAt, finishedAt);
       this.budget.trackUsage(task.taskId, result.stats.tokens?.input ?? 0, result.stats.tokens?.output ?? 0, result.stats.cost ?? 0);
@@ -614,8 +644,13 @@ export class Orquestrator extends EventEmitter {
       task.technicalRetryCount = 0;
       this.applyDecision(task, run, decision, triggerEvents);
     } catch (error) {
+      // A cancelled run (pause/move/cancel) must not be retried or failed.
+      if (error instanceof RunCancelledError || controller.signal.aborted || task.activeRunId !== run.runId) {
+        return;
+      }
       this.handleRunFailure(task, run, error, triggerEvents, startedAt);
     } finally {
+      this.runAbortControllers.delete(taskId);
       this.runningTaskIds.delete(taskId);
       this.emit('state:changed');
       setTimeout(() => this.pumpQueue(), 0);
@@ -699,11 +734,106 @@ export class Orquestrator extends EventEmitter {
     this.recordEvent(SWARM_EVENT_TYPE.ARTIFACT_CREATED, { task, payload: { artifact } });
   }
 
+  // Writes an artifact file, registers it on the task and emits ARTIFACT_CREATED.
+  createArtifact(
+    task: Task,
+    fileName: string,
+    content: string,
+    description: string,
+    fileType: string,
+  ): TaskArtifact {
+    const sizeBytes = Buffer.byteLength(content, 'utf8');
+    const path = this.taskFileStore.writeArtifactFile(task.taskId, fileName, content);
+    const artifact: TaskArtifact = { description, fileType, path, sizeBytes };
+    task.artifacts.push(artifact);
+    task.appendChat('assistant', 'artifact', description, undefined, undefined, [artifact]);
+    this.recordArtifactCreated(task, artifact);
+    this.persist();
+    return artifact;
+  }
+
+  /**
+   * Agent tools that mutate orchestration state (create_subtask, create_artifact).
+   * Returned as Pi-agnostic specs; the runner adapts them to Pi SDK tools so the
+   * Manager can actually decompose work into subtasks for specialized agents.
+   */
+  buildAgentTools(task: Task): CustomToolSpec[] {
+    const delegatable = this.getAgentNames().filter(
+      (name) => name !== MANAGER_AGENT && name !== INBOX_AGENT,
+    );
+    return [
+      {
+        name: 'create_subtask',
+        description:
+          'Cria uma subtask assincrona delegada a um agente especializado e retorna seus metadados (incluindo taskId). Use o taskId retornado nos waitGroups do status waiting.',
+        parameters: {
+          type: 'object',
+          properties: {
+            assignedTo: { type: 'string', enum: delegatable, description: 'Agente destino.' },
+            title: { type: 'string', description: 'Titulo curto da subtask.' },
+            message: { type: 'string', description: 'Instrucao objetiva e auto-contida da subtask.' },
+            model: { type: 'string', enum: Object.keys(ALLOWED_MODELS) },
+            effort: { type: 'string', enum: ALLOWED_EFFORTS },
+          },
+          required: ['assignedTo', 'title', 'message'],
+          additionalProperties: false,
+        },
+        execute: async (params: Record<string, unknown>) => {
+          const assignedTo = String(params.assignedTo);
+          const title = String(params.title);
+          const message = String(params.message);
+          const runtimeConfig = normalizeRuntimeConfig({
+            model: params.model === undefined ? undefined : (params.model as ModelAlias),
+            effort: params.effort === undefined ? undefined : (params.effort as EffortLevel),
+          });
+          // Idempotent: re-issuing the same subtask (replay/retry) reuses it.
+          const existing = this.getSubtasks(task).find(
+            (subtask) =>
+              subtask.options.assignedTo === assignedTo &&
+              subtask.options.title === title &&
+              subtask.chat.some((c) => c.role === 'user' && c.text === message),
+          );
+          const subtask = existing ?? this.spawnSubtask(task, assignedTo, title, message, runtimeConfig);
+          return JSON.stringify(this.toMetadata(subtask));
+        },
+      },
+      {
+        name: 'create_artifact',
+        description: 'Cria um arquivo no diretorio artifacts da task atual e o registra.',
+        parameters: {
+          type: 'object',
+          properties: {
+            fileName: { type: 'string', description: 'Nome do arquivo dentro de artifacts.' },
+            content: { type: 'string', description: 'Conteudo textual completo.' },
+            description: { type: 'string', description: 'Descricao breve do artefato.' },
+            file_type: { type: 'string', description: 'Tipo, ex: markdown, json, text.' },
+          },
+          required: ['fileName', 'content', 'description', 'file_type'],
+          additionalProperties: false,
+        },
+        execute: async (params: Record<string, unknown>) => {
+          const artifact = this.createArtifact(
+            task,
+            String(params.fileName),
+            String(params.content),
+            String(params.description),
+            String(params.file_type),
+          );
+          return JSON.stringify(artifact);
+        },
+      },
+    ];
+  }
+
   shutdown(): void {
     this.shuttingDown = true;
     this.taskQueue = [];
     this.queuedTaskIds.clear();
     this.workerPool.cancelAll();
+    for (const controller of this.runAbortControllers.values()) {
+      if (!controller.signal.aborted) controller.abort();
+    }
+    this.runAbortControllers.clear();
     for (const taskId of this.runningTaskIds) {
       const task = this.tasks.get(taskId);
       if (!task || isTerminalTaskStatus(task.status)) continue;
