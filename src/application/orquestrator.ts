@@ -1865,7 +1865,7 @@ export class Orquestrator extends EventEmitter {
         originalEvent.processedByTaskIds.push(task.taskId);
       }
       if (!task.chat.some((message) => message.eventId === originalEvent.eventId)) {
-        task.appendChat(
+        const eventMessage = task.appendChat(
           'event',
           'event',
           `task ${originalEvent.taskId ?? '-'} ${terminalEventVerb(originalEvent.type)}`,
@@ -1874,6 +1874,8 @@ export class Orquestrator extends EventEmitter {
           originalEvent.messages?.flatMap((m) => m.artifacts ?? []),
           originalEvent.eventId,
         );
+        // Carry the referenced subtask id so the UI can open its chat / show its result.
+        if (originalEvent.taskId) eventMessage.refTaskId = originalEvent.taskId;
       }
     }
     if (triggerEvents.length > 0) this.markTaskDirty(task);

@@ -137,6 +137,30 @@ describe('parseDecision', () => {
       expect(Array.isArray(result.messages)).toBe(true);
     });
 
+    it('recovers natural-language text from a non-contract JSON (no raw envelope in chat)', () => {
+      // Shape a weak model actually returned: custom schema, prose buried in summary.message.
+      const output = JSON.stringify({
+        step: 'VERIFICAR_E_FINALIZAR',
+        status: 'completed',
+        scope: { obj: 'dizer hello em 4 idiomas', checklist: ['ok'] },
+        summary: { action: '4 subtasks', message: '✅ Todas as 4 subtasks foram concluídas.' },
+        next_step: 'Nenhum.',
+      });
+      const result = parseDecision(output);
+      expect(result.status).toBe('completed');
+      expect(result.messages[0].text).toBe('✅ Todas as 4 subtasks foram concluídas.');
+      // The raw JSON envelope must never leak into the user-facing message.
+      expect(result.messages[0].text).not.toContain('"step"');
+      expect(result.messages[0].text).not.toContain('checklist');
+    });
+
+    it('falls back to a generic message when no human text is present', () => {
+      const output = '{"status":"completed","step":"X","data":{"n":1}}';
+      const result = parseDecision(output);
+      expect(result.messages[0].text).toBe('Tarefa concluída.');
+      expect(result.messages[0].text).not.toContain('{');
+    });
+
     it('defaults to text when message lacks type field', () => {
       const output = '{"status":"completed","messages":[{}]}';
       const decision = parseDecision(output);

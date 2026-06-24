@@ -88,6 +88,7 @@ function apiChatToChat(msg: ApiChatMessage): ChatMessage {
     type: msg.type === 'artifact' ? 'artifact' : msg.type === 'event' ? 'event' : 'text',
     text: msg.text,
     artifacts: msg.artifacts?.map(apiArtifactToArtifact),
+    refTaskId: msg.refTaskId,
   };
 }
 

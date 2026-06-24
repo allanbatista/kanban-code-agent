@@ -39,6 +39,8 @@ export interface ChatMessage {
   type: 'text' | 'artifact' | 'event';
   text?: string;
   artifacts?: Artifact[];
+  /** For terminal-event lines: the subtask this event refers to. */
+  refTaskId?: string;
 }
 
 export interface Artifact {

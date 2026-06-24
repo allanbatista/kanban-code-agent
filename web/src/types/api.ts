@@ -62,6 +62,7 @@ export interface ApiChatMessage {
   artifacts?: ApiArtifact[];
   runtimeConfig?: { model?: string; effort?: string };
   eventId?: string;
+  refTaskId?: string;
 }
 
 export interface ApiArtifact {

@@ -34,6 +34,8 @@ export interface TaskChatMessage {
   artifacts?: TaskArtifact[];
   runtimeConfig?: RuntimeConfig;
   eventId?: string;
+  /** For terminal-event chat lines: the subtask this event refers to (so the UI can open it). */
+  refTaskId?: string;
 }
 
 // --- Task Options ---

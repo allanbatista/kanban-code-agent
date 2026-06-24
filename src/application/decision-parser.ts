@@ -15,6 +15,30 @@ export class AgentOutputInvalidError extends Error {
 
 const JSON_BLOCK_RE = /```(?:json)?\s*([\s\S]*?)```/;
 
+// Natural-language fields a model commonly uses to address the human, in order
+// of preference. Used to recover a clean markdown message when the model
+// returns a non-contract JSON shape (so the raw envelope never reaches the chat).
+const HUMAN_TEXT_KEYS = [
+  'message', 'mensagem', 'text', 'texto', 'response', 'resposta',
+  'answer', 'reply', 'result', 'resultado', 'conclusion', 'conclusao',
+  'summary', 'resumo', 'content', 'output',
+];
+
+/** Recursively pull the first non-empty human-facing string from a parsed object. */
+function extractHumanText(value: unknown, depth = 0): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  if (depth > 3 || !value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const obj = value as Record<string, unknown>;
+  for (const key of HUMAN_TEXT_KEYS) {
+    const found = extractHumanText(obj[key], depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 /**
  * Extract a JSON substring delimited by the outermost matching pair of `{` and `}`.
  * Returns null when no balanced object is found.
@@ -105,9 +129,12 @@ export function parseDecision(rawOutput: string): AgentDecision {
     ? obj.status
     : 'completed';
 
-  // Messages: default to text from raw output or json text field
+  // Messages: the human-facing channel is markdown text. When the model skips
+  // the `messages` array (returns a custom JSON shape), recover a clean
+  // natural-language message from its fields — NEVER fall back to the raw JSON
+  // envelope, which would dump the contract into the user's chat.
   if (!Array.isArray(obj.messages)) {
-    obj.messages = [{ type: 'text', text: obj.text || rawOutput }];
+    obj.messages = [{ type: 'text', text: extractHumanText(obj) ?? 'Tarefa concluída.' }];
   }
 
   const messages = obj.messages as unknown[];
@@ -135,7 +162,8 @@ export function parseDecision(rawOutput: string): AgentDecision {
       msgObj.text = msgObj.content;
     }
     if (!msgObj.text) {
-      msgObj.text = JSON.stringify(msgObj);
+      // Recover prose from the message object rather than dumping its JSON.
+      msgObj.text = extractHumanText(msgObj) ?? 'Tarefa concluída.';
     }
   }
 

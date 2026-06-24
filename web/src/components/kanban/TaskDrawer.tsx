@@ -226,7 +226,7 @@ export function TaskDrawer({ taskId, defaultTab, onClose }: TaskDrawerProps) {
           {/* Body */}
           <div className="min-h-0 flex-1 overflow-hidden">
             <TabsContent value="chat" className="h-full m-0 p-0">
-              <TaskChatPanel task={task} />
+              <TaskChatPanel task={task} onOpenTask={openTask} />
             </TabsContent>
             <TabsContent value="workflow" className="h-full m-0 p-0">
               <WorkflowView task={task} allTasks={tasks} onNodeClick={openTask} />

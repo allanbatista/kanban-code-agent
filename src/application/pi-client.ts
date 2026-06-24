@@ -139,8 +139,10 @@ export class PiAgentClient {
     const outputBlock = [
       '',
       'FORMATO DE SAIDA',
-      'Retorne APENAS o JSON puro do contrato (campo status), sem texto antes/depois, sem markdown. Exatamente um destes:',
-      `completado: ${JSON.stringify({ status: 'completed', messages: [{ type: 'text', text: 'conclusao ou pergunta ao usuario' }] })}`,
+      'Sua decisao final e UM unico objeto JSON do contrato (campo status), sem nenhum texto fora dele e sem cercas de codigo.',
+      'O campo messages[].text e a SUA mensagem ao usuario em linguagem natural (markdown) — escreva como falaria com uma pessoa. NUNCA coloque JSON, o proprio contrato, nem estruturas internas (step/scope/checklist/etc.) dentro de text; o usuario nao pediu JSON.',
+      'Exatamente um destes:',
+      `completado: ${JSON.stringify({ status: 'completed', messages: [{ type: 'text', text: 'conclusao ao usuario em linguagem natural (markdown)' }] })}`,
       ...(canDelegate
         ? [`aguardando: ${JSON.stringify({ status: 'waiting', waitGroups: [{ waitId: 'g1', mode: 'WAIT_ALL', taskIds: ['<taskId-retornado-por-create_subtask>'] }], messages: [{ type: 'text', text: 'motivo' }] })}`]
         : []),
