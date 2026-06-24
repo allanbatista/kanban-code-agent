@@ -57,7 +57,10 @@ export async function runServer(config: SwarmConfig): Promise<void> {
 
   const serverOptions = {
     port: config.port,
-    host: '127.0.0.1' as const,
+    // Dual-stack by default so `localhost` works whether the browser resolves it
+    // to 127.0.0.1 (IPv4) or ::1 (IPv6) — a single-stack bind silently breaks the
+    // WebSocket while HTTP falls back. Override with SWARM_HOST.
+    host: process.env.SWARM_HOST ?? '::',
     staticDir: staticDirOpt,
   };
 
