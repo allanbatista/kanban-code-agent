@@ -468,6 +468,143 @@ export class Orquestrator extends EventEmitter {
     return task;
   }
 
+  /**
+   * User-driven cancel: stops any in-flight run/queue entry and marks the task
+   * CANCELLED. Backs both DELETE /api/tasks/:id and a drag to the Cancel column.
+   */
+  cancelTask(taskId: string): Task {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Task ${taskId} não encontrada`);
+    if (isTerminalTaskStatus(task.status)) return task;
+    this.dequeue(taskId);
+    task.status = TASK_STATUS.CANCELLED;
+    task.activeRunId = undefined;
+    task.metrics.finishedAt = new Date().toISOString();
+    this.markTaskDirty(task);
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_CANCELLED, { task });
+    this.scheduler.rebuildWaitIndex(this.tasks);
+    this.persist();
+    this.emit('state:changed');
+    return task;
+  }
+
+  /**
+   * User-driven completion (Revisão → Done). Only a task awaiting review can be
+   * completed by the user; this is what turns REVIEW into COMPLETED.
+   */
+  completeTaskByUser(taskId: string): Task {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Task ${taskId} não encontrada`);
+    if (task.status === TASK_STATUS.COMPLETED) return task;
+    if (task.status !== TASK_STATUS.REVIEW) {
+      throw new Error('Apenas tasks em revisão podem ser concluídas pelo usuário');
+    }
+    this.dequeue(taskId);
+    task.status = TASK_STATUS.COMPLETED;
+    task.activeRunId = undefined;
+    task.metrics.finishedAt = new Date().toISOString();
+    this.markTaskDirty(task);
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_COMPLETED, { task, messages: task.resultMessages });
+    this.scheduler.rebuildWaitIndex(this.tasks);
+    this.persist();
+    this.emit('state:changed');
+    return task;
+  }
+
+  /**
+   * Appends a user message to a task's chat. If the task is awaiting review,
+   * the message reopens it: it returns to the Manager for execution.
+   */
+  appendUserMessage(taskId: string, message: string): Task {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Task ${taskId} não encontrada`);
+    task.appendChat('user', 'text', message);
+    this.markTaskDirty(task);
+    this.recordEvent(SWARM_EVENT_TYPE.MESSAGE_APPENDED, {
+      task,
+      messages: [task.chat[task.chat.length - 1]],
+    });
+    const reopenable =
+      task.status === TASK_STATUS.REVIEW || isTerminalTaskStatus(task.status);
+    if (reopenable && !task.options.parentId) {
+      task.options.assignedTo = MANAGER_AGENT;
+      task.status = TASK_STATUS.PENDING;
+      task.activeRunId = undefined;
+      this.markTaskDirty(task);
+      this.recordEvent(SWARM_EVENT_TYPE.TASK_RESUMED, { task });
+      this.persist();
+      this.emit('state:changed');
+      this.scheduleTask(taskId);
+      return task;
+    }
+    this.persist();
+    this.emit('state:changed');
+    return task;
+  }
+
+  /** Updates a task's runtime config (model/effort) and emits TASK_UPDATED. */
+  updateTaskRuntimeConfig(taskId: string, runtimeConfig: RuntimeConfig): Task {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Task ${taskId} não encontrada`);
+    task.options.runtimeConfig = {
+      ...(task.options.runtimeConfig ?? {}),
+      ...(normalizeRuntimeConfig(runtimeConfig) ?? {}),
+    };
+    this.markTaskDirty(task);
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_UPDATED, {
+      task,
+      payload: { runtimeConfig: task.options.runtimeConfig },
+    });
+    this.persist();
+    this.emit('state:changed');
+    return task;
+  }
+
+  /**
+   * Archives every root task in a given status (Done/Cancel columns): the task
+   * family's files move to `.swarm/tasks/_archived`, the tasks leave the active
+   * state (and snapshot), and a TASK_ARCHIVED event is recorded per root for
+   * audit. Returns the archived root task ids.
+   */
+  archiveByStatus(status: string): string[] {
+    const roots = [...this.tasks.values()].filter(
+      (task) => !task.options.parentId && task.status === status,
+    );
+    const archivedRootIds: string[] = [];
+    for (const root of roots) {
+      const familyIds = this.collectFamilyIds(root);
+      for (const id of familyIds) {
+        this.dequeue(id);
+        this.taskFileStore.archiveTask(id);
+        this.tasks.delete(id);
+      }
+      this.rootTaskIds = this.rootTaskIds.filter((id) => id !== root.taskId);
+      this.recordEvent(SWARM_EVENT_TYPE.TASK_ARCHIVED, {
+        task: root,
+        payload: { taskId: root.taskId, archivedTaskIds: familyIds, status },
+      });
+      archivedRootIds.push(root.taskId);
+    }
+    if (archivedRootIds.length > 0) {
+      this.scheduler.rebuildWaitIndex(this.tasks);
+      this.persist();
+      this.emit('state:changed');
+    }
+    return archivedRootIds;
+  }
+
+  // Returns a task id and all of its descendant subtask ids.
+  private collectFamilyIds(root: Task): string[] {
+    const ids: string[] = [];
+    const queue: Task[] = [root];
+    while (queue.length > 0) {
+      const task = queue.shift()!;
+      ids.push(task.taskId);
+      for (const sub of this.getSubtasks(task)) queue.push(sub);
+    }
+    return ids;
+  }
+
   // Removes a task from the scheduling queue and aborts its in-flight run.
   private dequeue(taskId: string): void {
     this.queuedTaskIds.delete(taskId);
@@ -1020,7 +1157,6 @@ export class Orquestrator extends EventEmitter {
     // completed
     this.markEventsProcessed(task, triggerEvents);
     task.resultMessages = task.appendAgentMessages(decision.messages);
-    task.status = TASK_STATUS.COMPLETED;
     this.completeActiveRun(task, run);
     this.markTaskDirty(task);
     this.recordEvent(SWARM_EVENT_TYPE.RUN_COMPLETED, {
@@ -1028,11 +1164,25 @@ export class Orquestrator extends EventEmitter {
       runId: run.runId,
       messages: task.resultMessages,
     });
-    this.recordEvent(SWARM_EVENT_TYPE.TASK_COMPLETED, {
-      task,
-      runId: run.runId,
-      messages: task.resultMessages,
-    });
+    // A Manager root task is not finished until the user reviews it: the Manager
+    // hands it off to Revisão (REVIEW); the user later completes or reopens it.
+    // Subtasks (and non-Manager roots) complete normally so wait groups resolve.
+    const isManagerRoot = !task.options.parentId && task.options.assignedTo === MANAGER_AGENT;
+    if (isManagerRoot) {
+      task.status = TASK_STATUS.REVIEW;
+      this.recordEvent(SWARM_EVENT_TYPE.TASK_REVIEW, {
+        task,
+        runId: run.runId,
+        messages: task.resultMessages,
+      });
+    } else {
+      task.status = TASK_STATUS.COMPLETED;
+      this.recordEvent(SWARM_EVENT_TYPE.TASK_COMPLETED, {
+        task,
+        runId: run.runId,
+        messages: task.resultMessages,
+      });
+    }
     this.persist();
   }
 
@@ -1466,6 +1616,17 @@ export class Orquestrator extends EventEmitter {
         if (event.type === SWARM_EVENT_TYPE.TASK_COMPLETED) task.status = TASK_STATUS.COMPLETED;
         if (event.type === SWARM_EVENT_TYPE.TASK_FAILED) task.status = TASK_STATUS.FAILED;
         if (event.type === SWARM_EVENT_TYPE.TASK_CANCELLED) task.status = TASK_STATUS.CANCELLED;
+        if (event.type === SWARM_EVENT_TYPE.TASK_REVIEW) task.status = TASK_STATUS.REVIEW;
+      }
+    }
+    // Drop archived families so replay-only recovery matches snapshot recovery.
+    for (const event of this.events) {
+      if (event.type !== SWARM_EVENT_TYPE.TASK_ARCHIVED) continue;
+      const ids = (event.payload?.archivedTaskIds as string[] | undefined) ?? [];
+      for (const id of ids) this.tasks.delete(id);
+      if (event.taskId) {
+        this.tasks.delete(event.taskId);
+        this.rootTaskIds = this.rootTaskIds.filter((id) => id !== event.taskId);
       }
     }
   }

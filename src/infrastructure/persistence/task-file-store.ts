@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, copyFileSync, renameSync, rmSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { AtomicWriter } from '../filesystem/atomic-writer.js';
@@ -126,6 +126,22 @@ export class TaskFileStore {
   // ---------------------------------------------------------------------------
   // Directory bootstrap
   // ---------------------------------------------------------------------------
+
+  /**
+   * Move a task directory into `.swarm/tasks/_archived/{taskId}`, preserving it
+   * for audit while removing it from the active board. Idempotent: a missing
+   * source is a no-op; an existing destination is replaced.
+   */
+  archiveTask(taskId: string): void {
+    this.assertSandbox();
+    const source = this.taskDir(taskId);
+    if (!existsSync(source)) return;
+    const archivedDir = this.sandbox.resolveSubpath('.swarm', 'tasks', '_archived');
+    this.ensureDir(archivedDir);
+    const dest = join(archivedDir, taskId);
+    if (existsSync(dest)) rmSync(dest, { recursive: true, force: true });
+    renameSync(source, dest);
+  }
 
   /** Create the full task directory structure if it does not exist. */
   ensureTaskDir(taskId: string): void {

@@ -1050,3 +1050,100 @@ describe('Orquestrator', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review / cancel / reopen / archive (user-driven lifecycle)
+// ---------------------------------------------------------------------------
+describe('Orquestrator user lifecycle', () => {
+  let dir: string;
+
+  const managerAgent: Agent = {
+    name: 'Manager',
+    role: 'Orquestrador.',
+    runtimeConfig: { model: 'fast', effort: 'off' },
+    tools: ['read'],
+  };
+
+  function managerDeps(piClient: PiAgentClient): OrquestratorDeps {
+    const sandbox = new PathSandbox(dir);
+    return {
+      eventStore: new EventStore(sandbox),
+      snapshotStore: new SnapshotStore(sandbox),
+      taskFileStore: new TaskFileStore(sandbox),
+      sandbox,
+      agents: [managerAgent],
+      piClient,
+    };
+  }
+
+  function settle(task: Task): Promise<void> {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (
+          task.status === TASK_STATUS.REVIEW ||
+          task.status === TASK_STATUS.COMPLETED ||
+          task.status === TASK_STATUS.FAILED
+        )
+          return resolve();
+        setTimeout(check, 5);
+      };
+      check();
+    });
+  }
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'orc-life-'));
+  });
+  afterEach(() => {
+    try { rmSync(dir, { recursive: true, force: true }); } catch {}
+  });
+
+  it('Manager root goes to REVIEW (not COMPLETED) on completion', async () => {
+    const orc = new Orquestrator(managerDeps(createPiClient([completedDecision()])));
+    const task = orc.createRootTask('Root', 'Manager');
+    await settle(task);
+    expect(task.status).toBe(TASK_STATUS.REVIEW);
+    expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_REVIEW, task.taskId)).toBeDefined();
+    expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_COMPLETED, task.taskId)).toBeUndefined();
+  });
+
+  it('completeTaskByUser turns REVIEW into COMPLETED', async () => {
+    const orc = new Orquestrator(managerDeps(createPiClient([completedDecision()])));
+    const task = orc.createRootTask('Root', 'Manager');
+    await settle(task);
+    orc.completeTaskByUser(task.taskId);
+    expect(task.status).toBe(TASK_STATUS.COMPLETED);
+    expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_COMPLETED, task.taskId)).toBeDefined();
+  });
+
+  it('appendUserMessage reopens a REVIEW task back to execution', async () => {
+    const orc = new Orquestrator(managerDeps(createPiClient([completedDecision(), completedDecision()])));
+    const task = orc.createRootTask('Root', 'Manager');
+    await settle(task);
+    expect(task.status).toBe(TASK_STATUS.REVIEW);
+    orc.appendUserMessage(task.taskId, 'mais uma coisa');
+    expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.MESSAGE_APPENDED, task.taskId)).toBeDefined();
+    expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_RESUMED, task.taskId)).toBeDefined();
+    expect([TASK_STATUS.PENDING, TASK_STATUS.QUEUED, TASK_STATUS.RUNNING, TASK_STATUS.REVIEW]).toContain(task.status);
+  });
+
+  it('cancelTask marks CANCELLED and emits TASK_CANCELLED', () => {
+    const orc = new Orquestrator(managerDeps(createPiClient([])), { resetState: true, stopWhenWaiting: true });
+    const task = orc.createRootTask('Root', 'Manager');
+    orc.cancelTask(task.taskId);
+    expect(task.status).toBe(TASK_STATUS.CANCELLED);
+    expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_CANCELLED, task.taskId)).toBeDefined();
+  });
+
+  it('archiveByStatus removes tasks from state and emits TASK_ARCHIVED', async () => {
+    const orc = new Orquestrator(managerDeps(createPiClient([completedDecision()])));
+    const task = orc.createRootTask('Root', 'Manager');
+    await settle(task);
+    orc.completeTaskByUser(task.taskId);
+    const archived = orc.archiveByStatus(TASK_STATUS.COMPLETED);
+    expect(archived).toContain(task.taskId);
+    expect(orc.tasks.has(task.taskId)).toBe(false);
+    expect(orc.rootTaskIds).not.toContain(task.taskId);
+    expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_ARCHIVED, task.taskId)).toBeDefined();
+  });
+});

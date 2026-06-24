@@ -19,19 +19,20 @@ const createTaskBody = z.object({
   execute: z.boolean().optional(),
 });
 
+// User-permitted status transitions: complete (Revisão→Done) or cancel.
 const updateTaskBody = z.object({
-  status: z.enum([
-    TASK_STATUS.PENDING,
-    TASK_STATUS.QUEUED,
-    TASK_STATUS.RUNNING,
-    TASK_STATUS.WAITING,
-    TASK_STATUS.COMPLETED,
-    TASK_STATUS.FAILED,
-    TASK_STATUS.CANCELLED,
-  ]).optional(),
+  status: z.enum([TASK_STATUS.COMPLETED, TASK_STATUS.CANCELLED]).optional(),
   runtimeConfig: runtimeConfigSchema.optional(),
   // The only user-permitted reassignments: park in Inbox or send to the Manager.
   assignedTo: z.enum(['inbox', 'manager']).optional(),
+});
+
+const messageBody = z.object({
+  message: z.string().min(1).max(10000),
+});
+
+const archiveBody = z.object({
+  status: z.enum([TASK_STATUS.COMPLETED, TASK_STATUS.CANCELLED]),
 });
 
 const taskParams = z.object({
@@ -44,6 +45,7 @@ const listQuery = z.object({
     TASK_STATUS.QUEUED,
     TASK_STATUS.RUNNING,
     TASK_STATUS.WAITING,
+    TASK_STATUS.REVIEW,
     TASK_STATUS.COMPLETED,
     TASK_STATUS.FAILED,
     TASK_STATUS.CANCELLED,
@@ -164,18 +166,57 @@ export function registerTaskRoutes(
       }
     }
 
-    if (body.data.status) {
-      task.status = body.data.status;
-    }
-    if (body.data.runtimeConfig) {
-      task.options.runtimeConfig = {
-        ...(task.options.runtimeConfig ?? {}),
-        ...body.data.runtimeConfig,
-      };
+    try {
+      if (body.data.status === TASK_STATUS.COMPLETED) {
+        orquestrator.completeTaskByUser(params.data.taskId);
+      } else if (body.data.status === TASK_STATUS.CANCELLED) {
+        orquestrator.cancelTask(params.data.taskId);
+      }
+      if (body.data.runtimeConfig) {
+        orquestrator.updateTaskRuntimeConfig(params.data.taskId, body.data.runtimeConfig as RuntimeConfig);
+      }
+    } catch (error) {
+      return reply.status(400).send({
+        error: 'Failed to update task',
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
 
-    orquestrator.persistTask(task);
-    return toTaskResponse(task, orquestrator);
+    return toTaskResponse(orquestrator.tasks.get(params.data.taskId)!, orquestrator);
+  });
+
+  // POST /api/tasks/:taskId/messages — append a user message (reopens REVIEW tasks)
+  fastify.post('/api/tasks/:taskId/messages', async (request, reply) => {
+    const params = taskParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: 'Invalid params', issues: params.error.issues });
+    }
+    const body = messageBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
+    }
+    if (!orquestrator.tasks.get(params.data.taskId)) {
+      return reply.status(404).send({ error: 'Task not found' });
+    }
+    try {
+      const task = orquestrator.appendUserMessage(params.data.taskId, body.data.message);
+      return toTaskResponse(task, orquestrator);
+    } catch (error) {
+      return reply.status(400).send({
+        error: 'Failed to append message',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  // POST /api/tasks/archive — archive all tasks in a column status (Done/Cancel)
+  fastify.post('/api/tasks/archive', async (request, reply) => {
+    const body = archiveBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
+    }
+    const archived = orquestrator.archiveByStatus(body.data.status);
+    return { archived, total: archived.length };
   });
 
   // GET /api/tasks/:taskId/chat — get task chat history
@@ -206,9 +247,7 @@ export function registerTaskRoutes(
       return reply.status(404).send({ error: 'Task not found' });
     }
 
-    task.status = TASK_STATUS.CANCELLED;
-    orquestrator.persistTask(task);
-
-    return { taskId: task.taskId, status: task.status };
+    const cancelled = orquestrator.cancelTask(params.data.taskId);
+    return { taskId: cancelled.taskId, status: cancelled.status };
   });
 }

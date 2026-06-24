@@ -14,6 +14,10 @@ interface ClientMessage {
 interface ServerEventMessage {
   type: 'event';
   event: SwarmEvent;
+  // Current metadata of the event's task, so the client applies the change
+  // incrementally (no full refetch). Absent when the task no longer exists
+  // (e.g. archived) — the client then removes it.
+  task?: TaskMetadata;
 }
 
 interface ServerStateMessage {
@@ -94,7 +98,14 @@ export function registerWebSocket(
     const latestEvent = orquestrator.events[orquestrator.events.length - 1];
     if (!latestEvent) return;
 
-    const eventMessage: ServerEventMessage = { type: 'event', event: latestEvent };
+    const affected = latestEvent.taskId
+      ? orquestrator.tasks.get(latestEvent.taskId)
+      : undefined;
+    const eventMessage: ServerEventMessage = {
+      type: 'event',
+      event: latestEvent,
+      task: affected ? orquestrator.toMetadata(affected) : undefined,
+    };
     const data = JSON.stringify(eventMessage);
 
     for (const client of clients) {
