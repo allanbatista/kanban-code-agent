@@ -1,12 +1,13 @@
 import { cn } from '@/lib/utils';
 
-export type TaskStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+export type TaskStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'REVIEW' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 
 const STATUS_CLASSES: Record<TaskStatus, string> = {
   PENDING: 'bg-muted-foreground/70 ring-1 ring-muted-foreground/20',
   QUEUED: 'bg-yellow-400/80 ring-1 ring-yellow-400/30',
   RUNNING: 'bg-emerald-400 animate-pulse ring-1 ring-emerald-400/40 shadow-sm shadow-emerald-400/20',
   WAITING: 'bg-blue-400/80 ring-1 ring-blue-400/30',
+  REVIEW: 'bg-purple-400/80 ring-1 ring-purple-400/30',
   COMPLETED: 'bg-emerald-500/90 ring-1 ring-emerald-500/40',
   FAILED: 'bg-red-400/90 ring-1 ring-red-400/40',
   CANCELLED: 'bg-muted-foreground/50 ring-1 ring-muted-foreground/20',

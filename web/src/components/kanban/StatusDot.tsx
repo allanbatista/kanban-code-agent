@@ -1,13 +1,14 @@
 /* eslint-disable react-refresh/only-export-components */
 import { cn } from '@/lib/utils';
 
-export type TaskStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+export type TaskStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'REVIEW' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 
 const STATUS_CLASSES: Record<TaskStatus, string> = {
   PENDING: 'bg-muted-foreground',
   QUEUED: 'bg-yellow-500',
   RUNNING: 'bg-green-500 animate-pulse',
   WAITING: 'bg-blue-500',
+  REVIEW: 'bg-purple-500',
   COMPLETED: 'bg-emerald-500',
   FAILED: 'bg-destructive',
   CANCELLED: 'bg-muted-foreground',
@@ -38,6 +39,7 @@ export function getStatusLabel(status: TaskStatus): string {
     QUEUED: 'queued',
     RUNNING: 'running',
     WAITING: 'waiting',
+    REVIEW: 'review',
     COMPLETED: 'completed',
     FAILED: 'failed',
     CANCELLED: 'cancelled',
