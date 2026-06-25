@@ -7,7 +7,7 @@ depends_on: [F0, F1, F2]
 
 # F5 — Avaliação Independente (QA + Code Reviewer), Guardrails de Papel e Definition of Done (§8.2, §11)
 
-**Status da fase:** `pending`
+**Status da fase:** `done` (implementado 2026-06-24 — ver PLAN.md §7.5 e DEFERRED.md para cortes conscientes)
 **Objetivo:** Implementar o pilar do §8.2/§11: antes de um root do Manager chegar a `REVIEW`/`COMPLETED`, **disparar automaticamente** passes de avaliação **segregados** de QA (comportamental) e Code Reviewer (estático), separados do gerador, que **ambos** precisam **aprovar**; reprovação devolve feedback acionável ao gerador. Unificar as definições de agente numa **fonte única com guardrails** (must/must-not + tool allow-list) e **impor a DoD** (§11).
 **Depende de:** F0, F1, F2.
 
@@ -74,4 +74,3 @@ QA e Code Reviewer **existem** em `agents/index.ts` mas **nunca são invocados**
 - [ ] Avaliação **configurável/desligável** (marcada `ponytail:`).
 - [ ] `npm test` verde (mock + e2e); `typecheck`+`lint` limpos.
 - [ ] **`ponytail-review`** sobre o diff; achados endereçados/justificados.
-</content>

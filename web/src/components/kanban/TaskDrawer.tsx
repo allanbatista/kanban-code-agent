@@ -244,7 +244,7 @@ export function TaskDrawer({ taskId, defaultTab, onClose }: TaskDrawerProps) {
         <div className="flex shrink-0 items-center gap-4 border-t border-border/50 bg-background/30 backdrop-blur-sm px-5 py-2.5">
           <div className="flex items-center gap-2">
             <span className="text-xs text-muted-foreground">{task.assignedTo}</span>
-            <StatusBadge status={task.status} />
+            <StatusBadge status={task.status} waitingReason={task.waitingReason} />
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground/70">
             <span>🤖 {task.runtimeConfig.model} · {task.runtimeConfig.effort}</span>

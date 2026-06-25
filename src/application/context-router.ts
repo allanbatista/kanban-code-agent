@@ -1,16 +1,17 @@
 export type ContextStrategy = 'rehydrate' | 'compact' | 'reset';
 
 /**
- * Choose context strategy based on task state.
- * - rehydrate: default, use indexed rehydration (scope-spec + progress + chat tail)
- * - compact: active session growing too large, summarize in-place
- * - reset: context anxiety, start fresh with handoff
+ * Choose the context strategy for the current state (§3.4 — state-dependent
+ * routing). Kept deliberately simple (a threshold) and marked as scaffolding:
+ * as models sustain longer contexts this may stop being load-bearing (§1.2).
+ * - rehydrate: default — indexed rehydration (scope-spec + progress + chat tail)
+ * - compact: the working chat overflows the tail budget → summarize the omitted
+ *   prefix in-place rather than silently dropping it.
+ *
+ * `reset` (full handoff) is intentionally NOT auto-selected here; see DEFERRED.md.
  */
 export function chooseContextStrategy(chatLength: number, maxMessages: number): ContextStrategy {
-  const ratio = chatLength / maxMessages;
-  if (ratio >= 1.0) return 'compact';
-  if (ratio >= 0.8) return 'rehydrate';
-  return 'rehydrate';
+  return chatLength > maxMessages ? 'compact' : 'rehydrate';
 }
 
 /**

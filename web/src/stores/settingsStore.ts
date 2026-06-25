@@ -36,7 +36,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     density: 'Comfortable',
   },
   advanced: {
-    maxConcurrency: 3,
     runTimeoutMs: 600000,
     maxTaskDepth: 4,
     maxSubtasks: 25,
@@ -85,7 +84,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
           language: 'pt-BR',
         },
         advanced: {
-          maxConcurrency: state.advanced.maxConcurrency,
           runTimeoutMs: state.advanced.runTimeoutMs,
           maxTaskDepth: state.advanced.maxTaskDepth,
           maxSubtasksPerTask: state.advanced.maxSubtasks,

@@ -7,7 +7,7 @@ depends_on: []
 
 # F0 — Baseline, Harness de Testes e Primeiro E2E Real
 
-**Status da fase:** `pending`
+**Status da fase:** `done` (implementado 2026-06-24 — ver PLAN.md §7.5 e DEFERRED.md para cortes conscientes)
 **Objetivo:** Transformar a base atual numa fundação confiável e reproduzível: fixar o verde (285 testes), **versionar `PROJECT.md` + `web/`**, unificar o registro de modelos (L13) e o data-root (L18), **ligar o `ProjectFileStore`** (L14), extrair **um harness de mock de LLM + servidor reutilizável**, subir o **primeiro e2e de verdade** (`front → backend → agent → filesystem → WS`) e **plugar a validação viva DeepSeek v4 flash effort=high** (L17). Tudo que vem depois se apoia nisto.
 **Depende de:** —
 
@@ -86,4 +86,3 @@ O sistema já é forte, mas: (a) `PROJECT.md` e `web/` estão untracked (L16); (
 - [ ] `npm run validate:live` documentado e skippa sem chave; com chave confirma DeepSeek v4 flash / effort high.
 - [ ] `npm test` (root+web) verde; `typecheck`+`lint` limpos.
 - [ ] **`ponytail-review`** sobre o diff; achados endereçados/justificados.
-</content>

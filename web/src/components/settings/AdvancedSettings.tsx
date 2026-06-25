@@ -14,7 +14,6 @@ export function AdvancedSettings() {
   useEffect(() => { fetchSettings(); }, [fetchSettings]);
 
   const configs = [
-    { key: 'maxConcurrency', label: 'Max Concurrency', value: advanced.maxConcurrency },
     { key: 'runTimeoutMs', label: 'Run Timeout (ms)', value: advanced.runTimeoutMs },
     { key: 'maxTaskDepth', label: 'Max Task Depth', value: advanced.maxTaskDepth },
     { key: 'maxSubtasks', label: 'Max Subtasks', value: advanced.maxSubtasks },

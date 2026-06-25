@@ -89,7 +89,7 @@ describe("api client (T02)", () => {
     const mockSettings = {
       appearance: { theme: "dark", language: "pt-BR" },
       providers: [],
-      advanced: { maxConcurrency: 3, runTimeoutMs: 300000, maxTaskDepth: 5, maxSubtasksPerTask: 10, maxRetries: 3, maxTechnicalRetries: 2, dataDir: ".swarm" },
+      advanced: { runTimeoutMs: 300000, maxTaskDepth: 5, maxSubtasksPerTask: 10, maxRetries: 3, maxTechnicalRetries: 2, dataDir: ".swarm" },
     };
     mockFetch.mockResolvedValueOnce({
       ok: true,

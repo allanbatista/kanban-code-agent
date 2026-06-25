@@ -17,6 +17,7 @@ interface SummaryRow {
   title: string;
   depth: number;
   status: TaskStatus;
+  waitingReason?: Task['waitingReason'];
   durationMs: number;
   waitingMs: number;
   tokensTotal: number;
@@ -186,7 +187,7 @@ export function TaskSummaryPanel({ task, onRowClick }: TaskSummaryPanelProps) {
                     <td className="px-2 py-1.5 font-mono text-muted-foreground/60 whitespace-nowrap">{row.id}</td>
                     <td className="px-2 py-1.5 text-center text-muted-foreground/70 whitespace-nowrap">{row.depth}</td>
                     <td className="px-2 py-1.5 whitespace-nowrap">
-                      <StatusBadge status={row.status} />
+                      <StatusBadge status={row.status} waitingReason={row.waitingReason} />
                     </td>
                     <td className="px-2 py-1.5 text-right font-mono text-muted-foreground/80 whitespace-nowrap">{formatMs(row.durationMs)}</td>
                     <td className="px-2 py-1.5 text-right font-mono text-amber-400/80 whitespace-nowrap">{row.waitingMs > 0 ? formatMs(row.waitingMs) : '-'}</td>
@@ -237,6 +238,7 @@ function collectSummaryRows(root: Task, allTasks: Task[]): SummaryRow[] {
       title: task.title,
       depth,
       status: task.status as TaskStatus,
+      waitingReason: task.waitingReason,
       durationMs: task.metrics.durationMs,
       waitingMs: task.metrics.waitingMs,
       tokensTotal: task.metrics.tokens.total,

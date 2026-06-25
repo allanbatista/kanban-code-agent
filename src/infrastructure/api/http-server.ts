@@ -10,6 +10,7 @@ import type { Orquestrator } from '../../application/orquestrator.js';
 import type { Logger } from '../logging/logger.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { requestLogger } from './middleware/request-logger.js';
+import { makeAuthHook } from './middleware/auth.js';
 import { registerTaskRoutes } from './routes/tasks.js';
 import { registerAgentRoutes } from './routes/agents.js';
 import { registerProjectRoutes } from './routes/projects.js';
@@ -87,6 +88,10 @@ export function createServer(
 
   fastify.addHook('onRequest', requestLogger(logger.child('http')));
 
+  // Opt-in bearer auth (F8.T2): active only when SWARM_AUTH_TOKEN is set.
+  const authHook = makeAuthHook(process.env.SWARM_AUTH_TOKEN);
+  if (authHook) fastify.addHook('onRequest', authHook);
+
   fastify.setErrorHandler((err, request, reply) => {
     const error = err as Error;
     logger.error('request error', error, {
@@ -113,6 +118,8 @@ export function createServer(
       version,
       tasks: { total: tasks.length, byStatus },
       events: orquestrator.events.length,
+      // Operational telemetry so problems surface before tasks silently stall.
+      operations: orquestrator.getOperationalStats(),
     };
   });
 

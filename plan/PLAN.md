@@ -29,7 +29,9 @@
 
 A base é **madura**; o plano **fecha lacunas**, não recomeça. Resumo apurado por leitura do código + mapeamento dos 10 agentes:
 
-**Sólido e funcionando (285 testes passando, 18 arquivos):**
+> **⚠️ Aviso de status (auditoria 2026-06-24).** As fases F0–F7 estavam marcadas `done` no frontmatter, mas a auditoria de código (ver **§7**) constatou que a maioria **não cumpre a própria Definition of Done**: há um padrão sistemático de **código morto** (arquivos/funções definidos e testados isoladamente, porém **nunca ligados** ao orquestrador) e de **testes e2e ausentes**. `npm test` está verde com **363 testes / 27 arquivos** (era 285), mas **teste verde ≠ feature ligada** — vários testes exercitam funções puras que a produção não chama. Os status foram corrigidos para `running` (parcialmente entregue). Detalhe por-task em §7.
+
+**Sólido e funcionando (verificado ligado à produção):**
 - **Event-sourcing / SSOT** — log append-only (`event-store.ts`, `.swarm/events/current.jsonl`), snapshots como projeção, replay + recuperação pós-crash (`loadState`/`replayEventsMinimal`/`recoverStatusesAfterCrash`).
 - **Filesystem como banco** — `task-file-store.ts`, `project-file-store.ts`, `atomic-writer.ts` (escrita atômica), `sandbox.ts` (PathSandbox), chat/artefatos/anexos por task.
 - **Ciclo de vida** — `PENDING · QUEUED · RUNNING · WAITING · REVIEW · COMPLETED · FAILED · CANCELLED`.
@@ -125,7 +127,9 @@ Verificados no código por mapeamento multi-agente; cada um tem dono explícito 
 | **F5** | [`05-independent-evaluation-and-dod`](./fases/05-independent-evaluation-and-dod.md) | **Gate de avaliação independente** QA + Code Reviewer (separado do gerador) + **unificação das definições de agente** com guardrails + **imposição da DoD** (§8.2, §11) (L4, L5, L12) | F0, F1, F2 | `done` |
 | **F6** | [`06-comms-and-human-in-the-loop`](./fases/06-comms-and-human-in-the-loop.md) | **Pergunta filho→pai + escalonamento** em escopo isolado (§9.3) + **pergunta/resposta humana** front↔back↔agent + **timeout-park → `SUSPENDED`** (L8) | F0, F1, F2, F5 | `done` |
 | **F7** | [`07-heartbeats-telemetry-and-ui`](./fases/07-heartbeats-telemetry-and-ui.md) | **Heartbeats** (§3.6) + **correção SSE↔WS + catch-up** (L11) + frontend: UI dos novos estados, HITL, telemetria, árvore de subtasks, artefatos, `/health`, smoke Playwright, contrato (L10, L11) | F0, F1, F3, F4, F6 | `done` |
-| **F8** | [`08-e2e-coverage-and-validation`](./fases/08-e2e-coverage-and-validation.md) | **Cobertura HTTP/WS** + decisão de **auth** (L19) + retry manual + validação de frame WS + **Cenário A completo (§12)** ponta a ponta + **run de validação viva** (deepseek-v4-flash, effort high) | F0–F7 | `pending` |
+| **F8** | [`08-e2e-coverage-and-validation`](./fases/08-e2e-coverage-and-validation.md) | **Cobertura HTTP/WS** + decisão de **auth** (L19) + retry manual + validação de frame WS + **Cenário A completo (§12)** ponta a ponta + **run de validação viva** (deepseek-v4-flash, effort high) | F0–F7 | `done` |
+
+> **Atualização de implementação 2026-06-24 (§7.5).** Após a auditoria (§7.1–7.4), o código morto foi **ligado** e as lacunas **implementadas + testadas** (**391 testes backend + 59 web verdes**; typecheck/lint limpos). Status atual: **F0–F8 `done`** — com cortes conscientes registrados em [`DEFERRED.md`](./DEFERRED.md). O único item não-executado é a **validação viva** (F8.T4/D7): o harness existe e é gated (`SWARM_VALIDATION=1` + `DEEPSEEK_API_KEY`) — é um passo operacional (precisa de chave/rede), não de implementação. Detalhe em **§7.5**.
 
 > Ordem pensada por dependência: o **estado** (F1) e o **SSOT/replay + continuidade** (F2) vêm antes das fases de governança que mudam o shape serializado (F3/F4), reduzindo o risco de divergência de ledger. F5 (avaliação) antes de F6 (HITL) reduz regressões de conclusão prematura. F7 expõe tudo na UI; F8 sela com o cenário completo e a validação viva.
 
@@ -256,4 +260,131 @@ Registro do que foi **aceito** (e onde), **parcial** (aceito com ajuste) ou **re
 | Média: contrato opcional vs scope-spec | **Aceito** | Scope-spec mínimo sempre — F2.T3 |
 | Média: sem validação em browser | **Aceito** | Smoke Playwright — F7.T8 |
 | Baixa: L16 stale | **Aceito (refutado)** | `git ls-files` confirma versionado; L16 marcado resolvido; F0.T1 reduzido |
-</content>
+
+---
+
+## 7. Auditoria de realidade (2026-06-24) e plano de remediação
+
+> Auditoria conduzida por leitura direta do código (6 agentes + spot-checks por `grep`), comparando cada task das fases marcadas `done` contra o código realmente ligado à produção. **Conclusão: nenhuma fase cumpriu sua DoD.** O frontmatter dizia `done`; o corpo das fases e as tabelas de task já diziam `pending` — a divergência era real.
+
+### 7.1 Veredito executivo
+
+1. **Padrão sistemático de código morto.** Vários componentes-chave foram escritos e testados isoladamente, mas **nunca ligados ao orquestrador**. Confirmado por `grep` (zero call-sites em produção):
+   - `domain/state-machine.ts` (`transitionTask`/tabela de transições) — **morto**; o orquestrador faz **44 atribuições diretas** `task.status = …`. Transições ilegais **não** são barradas.
+   - `orquestrator.checkDoD` (o gate da Definition of Done §11) — **definido em `orquestrator.ts:1712`, zero call-sites**. A DoD **não roda**.
+   - `domain/governance.ts` (value object de tetos) — **importado em lugar nenhum**.
+   - `HEARTBEAT` (evento) — **definido mas nunca emitido**.
+   - `application/context-router.ts` (`chooseContextStrategy`) — importado, **nunca chamado**; ambos os ramos retornam `'rehydrate'`.
+   - `budget-tracker.isApproachingCeiling` (aviso 80%) — **nunca chamado**.
+   - `task.piSessionFile` / `task-file-store.saveSession` — **dead code** (decisão F2.T6 deixada meio-implementada).
+   - `task-file-store.appendProgressLog`/`saveEnvResume` — só chamados em testes.
+2. **Pilar central ausente.** A **avaliação independente** (QA + Code Reviewer) do §8.2/§11 — o achado mais sólido do PROJECT.md — **não dispara**: nenhum subtask de QA/CR é criado como gate; um root do Manager vai direto a `REVIEW` humano (`orquestrator.ts:1691`). A conclusão segue **auto-declarada** (L4 **não** foi fechado).
+3. **Garantias de long-running incompletas.** Sem timeout→`SUSPENDED` (HITL pode pendurar para sempre), sem catch-up no reconnect (eventos perdidos), replay **não** é SSOT-completo (perde `runs`/`waitGroups`/`metrics`/`budget`).
+4. **Testes e2e ausentes.** A DoD de **cada** fase exige ≥1 e2e pela borda real. Existe **apenas** `e2e/task-lifecycle.e2e.test.ts` — e ele **não** assere a ordem por `seq` nem a sequência do ledger (o contrato que F7.T5 dependia). Faltam `rehydrate`, `stagnation`, `evaluation`, `human-question`, cenários A/B/C, resiliência e o smoke Playwright. `stop-conditions.test.ts` tem **3 assert tautológicos** (`expect('attempts').toBe('attempts')`).
+5. **O que de fato funciona** (ligado e testado): F0 baseline (`ProjectFileStore` ligado, helpers de harness, data-root documentado); reidratação textual injeta scope-spec/progress-log no prompt (F2.T4); epoch + sinal de progresso (F3.T1); detecção de estagnação por similaridade num passo (F3.T2 núcleo); ceiling detectado e `BUDGET_EXCEEDED` emitido (F4.T2 núcleo); re-seed de budget no restart (F4.T3 núcleo); `ask_human` **realmente** ligado, posta no chat e parka em `WAITING(human)` (F6.T1 núcleo); `appendUserMessage` retoma `WAITING(human)` incl. subtasks (F6.T3 núcleo); SSE corrigido para espelhar o emitter por-evento (parte de F7.T1).
+
+### 7.2 Veredito por-task (auditado)
+
+Legenda: ✅ `done` · 🟡 `partial` · ⛔ `missing` · 💀 `dead-code` (escrito mas não-ligado/quebrado).
+
+| Task | Verdito | Evidência (resumo) |
+| --- | --- | --- |
+| F0.T1 | ✅ | `PROJECT.md`+`web/` versionados; `.gitignore` ok. |
+| F0.T2 | ⛔ | `ALLOWED_MODELS` openrouter ainda hardcoded e default (`orquestrator.ts:46-50,432`); `settings.ts:40-54` anuncia openrouter. |
+| F0.T3 | ✅ | Data-root documentado (`config.ts:32-35`, docs). |
+| F0.T4 | ✅ | `ProjectFileStore` ligado (`http-server.ts:123`, `projects.ts`). |
+| F0.T5 | 🟡 | Helpers existem, mas `e2e-server.ts` monta app **HTTP-only** (não registra WS) — diverge de "HTTP+WS reais". |
+| F0.T6 | ⛔ | e2e existe mas **não** abre WS, **não** assere `seq`/sequência do ledger, **não** cria subtask/consolida. |
+| F0.T7 | 🟡 | Gated ok, mas não roda o agente, não parseia decisão, não assere `effort=high`. |
+| F1.T1 | 💀 | `state-machine.ts` morto; 44× `task.status =` direto; sem `setStatus` guardado. |
+| F1.T2 | 🟡 | `SUSPENDED` no enum mas **inalcançável** (nunca emitido); sem `WaitGroup.deadline`. |
+| F1.T3 | 🟡 | `failureReason` é tipo completo, mas runtime só seta `stagnation`/`cancelled_by_user`; **sem cascade-cancel**. |
+| F1.T4 | 🟡 | Round-trip ok; **sem** cobertura de crash-recovery por estado. |
+| F2.T1 | 🟡 | `replayEventsMinimal` ainda dobra só status/chat/artifacts; **perde** runs/waitGroups/metrics/budget; sem property test; 2 appends ainda bypassam o ledger. |
+| F2.T2 | 🟡 | Arquivos persistem **sem evento** e `appendProgressLog`/`saveEnvResume` **só** chamados em teste. |
+| F2.T3 | 🟡 | scope-spec mínimo sempre gerado; **sem** contrato negociado. |
+| F2.T4 | ✅ | Prompt reidratado injeta scope-spec+progress-log+env-resume+cauda limitada. |
+| F2.T5 | 🟡 | `continuity.test.ts` raso; `rehydrate.e2e` **ausente**; sem property/fuzz. |
+| F2.T6 | 💀 | `piSessionFile`/`saveSession`/`sessionManager:undefined` deixados como dead code. |
+| F2.T7 | 💀 | `chooseContextStrategy` nunca chamado (ramos mortos); sem compactação/memória indexada. |
+| F3.T1 | ✅ | `run.epoch` + sinal de progresso. |
+| F3.T2 | 🟡 | Estagnação funciona; **`max_epochs` nunca imposto**; θ/N hardcoded. |
+| F3.T3 | 🟡 | `escalateConfig` só no retry **pedido pelo agente**; falha técnica re-roda com a mesma config. |
+| F3.T4 | 🟡 | `convergence.test.ts` real; `stagnation.e2e` **ausente**. |
+| F3.T5 | 💀 | `checkpointSeq` escrito mas **nunca lido**; recovery recomeça do zero. |
+| F4.T1 | 💀 | `governance.ts` **arquivo inteiro não usado**; sem snapshot de config no run. |
+| F4.T2 | 🟡 | Ceiling usa constantes **globais** (não por-card); falha **sem** `failureReason='ceiling'`. |
+| F4.T3 | 🟡 | `reseedBudget` existe; **sem** teste dedicado de gate pós-restart. |
+| F4.T4 | 🟡 | `stop-conditions.test.ts` em parte **tautológico**; sem e2e de teto. |
+| F4.T5 | 🟡 | Só dedup de conteúdo em-memória; **sem chave de idempotência**; artifact/post_message sem guarda. |
+| F4.T6 | 💀 | `isApproachingCeiling` (aviso 80%) **dead code**. |
+| F5.T1 | 🟡 | Fonte única + factory importa, mas guardrails são **dado declarativo nunca aplicado**; sem heurística Generic. |
+| F5.T2 | ⛔ | **Gate QA+CR não existe**; conclusão auto-declarada (`orquestrator.ts:1691`). |
+| F5.T3 | ⛔ | `decision-parser` **não** parseia `verdict`/`criteria`/`feedback`; `AgentDecision` não tem os campos. |
+| F5.T4 | 💀 | `checkDoD` **dead code** (zero call-sites); mesmo escrito cobre 3/6 critérios. |
+| F5.T5 | ⛔ | `independent-evaluation.test.ts` e `evaluation.e2e.test.ts` **inexistentes**. |
+| F6.T1 | 🟡 | `ask_human` ligado e posta no chat + `WAITING(human)`; **escalonamento ausente** (PF9). |
+| F6.T2 | ⛔ | **Sem** modo de run "answer-scope" (despertar isolado do pai). |
+| F6.T3 | 🟡 | Resume por chat ok (incl. subtask); **sem DeadlineMonitor/timeout/`SWARM_HUMAN_TIMEOUT_MS`/`deadline`**. |
+| F6.T4 | ⛔ | Sem `@fastify/multipart`, sem `POST /attachments`, sem anexo mid-conversa. |
+| F6.T5 | ⛔ | `ask-escalation.test.ts` e `human-question.e2e.test.ts` **inexistentes**. |
+| F7.T1 | 🟡 | SSE corrigido (emitter por-evento + `id:seq`); **`HEARTBEAT` nunca emitido**; sem serializador comum/`schemaVersion`. |
+| F7.T2 | 🟡 | Badges parciais (sem `SUSPENDED`); HITL com compositor mas **sem destaque da pergunta**; `message.attachments` não renderizado/tipado. |
+| F7.T3 | 🟡 | Mostra token/custo/cache; **sem** indicador budget-vs-teto e **sem** telemetria de heartbeat. |
+| F7.T4 | ⛔ | Sem teste de contrato/fixture/`schemaVersion`; sem `unsubscribe` real. |
+| F7.T5 | ⛔ | Sem `sinceSeq`/catch-up/`Last-Event-ID`/detecção de gap; reconnect só reenvia snapshot. |
+| F7.T6 | ⛔ | Sem `GET …/artifacts[/:file]`, sem render/download, sem retenção. |
+| F7.T7 | 🟡 | `/health` ainda mínimo (sem pool/fila/disco). |
+| F7.T8 | ⛔ | Sem `web/e2e/`, sem `playwright.config.ts`, sem dep Playwright. |
+| F8.* | ⛔ | Praticamente nada: sem `__tests__/infrastructure/api/`, sem cenários A/B/C, sem resiliência, sem auth server-side, sem `/retry`, sem `DEFERRED.md`, sem zod no frame WS. |
+
+### 7.3 Report — o que ainda está pendente (agrupado)
+
+- **Wiring de código morto (alto valor, baixo custo):** ligar `state-machine` (`setStatus` guardado), `checkDoD` no caminho de conclusão, `governance` no run, emissão de `HEARTBEAT`, `chooseContextStrategy` (ou **deletar** se não for usar — ponytail). Decidir **ligar vs apagar** cada andaime morto: andaime que mente é pior que ausência.
+- **Avaliação independente (pilar §8.2/§11):** criar o gate QA+CR (subtasks segregadas, dupla aprovação), `verdict`/`criteria`/`feedback` no parser, loop de correção, e **impor a DoD** antes de `COMPLETED`.
+- **Estado/domínio:** tornar `SUSPENDED` alcançável (emissor + `WaitGroup.deadline`); cascade-cancel real (abortar workers dos filhos); preencher `failureReason` em todas as paradas.
+- **SSOT/replay:** fold completo (matriz inteira de campos) com property test; fechar os 2 appends de chat não-evented; resolver dead code de sessão Pi.
+- **Governança:** tetos **por-card** reais (não constantes globais) com `failureReason='ceiling'`; `max_epochs`; chave de idempotência; aviso 80%.
+- **HITL:** escalonamento recursivo; despertar isolado do pai; `DeadlineMonitor`→`SUSPENDED`; anexos mid-conversa (multipart).
+- **Realtime/UI:** catch-up por `sinceSeq` (pelo `EventStore`) + `Last-Event-ID`; teste de contrato WS + `schemaVersion`; endpoints de artefato + render/download + retenção; `/health` enriquecido; frontend (estados novos, destaque HITL, telemetria de teto/heartbeat); smoke Playwright.
+- **Cobertura/borda (F8):** integração de todas as rotas + WS + fuzz; auth (implementar ou adiar por escrito + `DEFERRED.md`); retry manual; zod no frame WS; cenários A/B/C; caos/resiliência; validação viva DeepSeek.
+- **Testes e2e ausentes:** `rehydrate`, `stagnation`, `evaluation`, `human-question`, `scenario-a/b/c`, `resilience` + smoke Playwright + asserts de `seq`/ledger no e2e de F0. **Substituir os 3 asserts tautológicos** de `stop-conditions.test.ts` por testes do orquestrador.
+
+### 7.4 Plano de implementação (remediação re-sequenciada)
+
+Ordem por **dependência + risco**, do mais load-bearing/barato ao mais caro. Cada bloco fecha só com `ponytail-review` + os e2e da fase (DoD §4).
+
+**R0 — Ligar ou apagar o código morto (1 PR, baixo custo, destrava tudo).**
+Decidir, item a item: `state-machine` → `Task.setStatus` guardado nos ~44 call-sites (ou aceitar mutação e apagar o arquivo); `checkDoD` → chamar na transição a `COMPLETED`; `governance` → snapshot no run ou apagar; `HEARTBEAT` → emitir entre epochs ou remover do enum; `context-router`/`isApproachingCeiling`/`piSessionFile`/`saveSession` → ligar ou deletar. **Saída:** zero símbolo "feito" que a produção não chama. *(Fecha 💀 de F1.T1, F2.T6/T7, F3.T5, F4.T1/T6, F5.T4, F7.T1-heartbeat.)*
+
+**R1 — Domínio correto (F1).** `SUSPENDED` alcançável (emissor + `WaitGroup.deadline`); `failureReason` em todas as paradas; cascade-cancel via `cancelActiveRun`. e2e + crash-recovery por estado. *(Pré-requisito de F4/F6.)*
+
+**R2 — SSOT/replay completo (F2.T1).** Fold puro reconstruindo a **matriz inteira** (`status,chat,artifacts,runs,waitGroups,metrics,budget,…`); property test `fold==snapshot`; fechar os 2 appends não-evented. *(Protege todo o resto contra divergência de ledger.)*
+
+**R3 — Avaliação independente + DoD (F5).** Gate QA+CR segregado (reusa subtask+wait group); `verdict/criteria/feedback` no parser + loop de correção; `checkDoD` imposta (6 critérios) ligada por R0. e2e `evaluation`. *(O pilar do PROJECT.md; o maior buraco funcional.)*
+
+**R4 — Governança de parada (F3 + F4).** `max_epochs` + θ/N configuráveis; escalonamento automático na falha técnica; tetos **por-card** reais com `failureReason='ceiling'`; chave de idempotência em tools; aviso 80%; teste de gate pós-restart. e2e `stagnation` + teto via WS.
+
+**R5 — HITL completo (F6).** Escalonamento recursivo; despertar isolado do pai (answer-scope); `DeadlineMonitor`→`SUSPENDED`; anexos mid-conversa (multipart, evented). e2e `human-question`.
+
+**R6 — Realtime + artefatos + UI (F7).** Catch-up `sinceSeq` pelo `EventStore` + `Last-Event-ID`; teste de contrato WS + `schemaVersion`; `HEARTBEAT` na UI; endpoints de artefato + render/download + retenção; estados/HITL/telemetria no frontend; `/health` enriquecido; smoke Playwright.
+
+**R7 — Borda + selo (F8).** Integração de todas as rotas + WS + fuzz; auth (implementar/adiar + `DEFERRED.md`); retry manual; zod no frame WS; Cenários A/B/C; caos/resiliência; validação viva DeepSeek effort=high.
+
+> **Princípio ponytail para a remediação:** preferir **ligar o que já existe** a reescrever; e **apagar** andaime que não vai ser ligado em vez de mantê-lo mentindo `done`. Cada andaime mantido leva `ponytail:` + condição de reavaliação (§1.2). Marcar uma fase `done` **somente** quando a DoD §4 (incl. o e2e da fase e `ponytail-review`) passar — não pelo frontmatter.
+
+### 7.5 Implementação executada (2026-06-24)
+
+> A remediação R0–R7 foi executada. **Verde:** 380 testes backend + 55 web (typecheck e `eslint src/` limpos, salvo 2 warnings pré-existentes em `error-handler.ts`). Cada item abaixo foi **ligado à produção e coberto por teste** (não mais código morto). Cortes conscientes em [`DEFERRED.md`](./DEFERRED.md).
+
+| Fase | O que foi implementado | Cortes (DEFERRED) |
+| --- | --- | --- |
+| **F0** | Registro de modelos unificado em DeepSeek (sem openrouter default em `orquestrator`/`settings`); harness e2e agora usa o **servidor real** (`createServer`, HTTP+WS); e2e novo assere **ordem por `seq`** + catch-up. | — |
+| **F1** | `Task.setStatus` guardado pela tabela de transições, **ligado** em ~todos os call-sites do orquestrador (sinks/overrides com `force`); `SUSPENDED` **alcançável** (timeout); **cascade-cancel** real (aborta filhos); `failureReason` setado em todas as paradas; testes de transição + força. | — |
+| **F2** | **Fold de replay** reconstrói status/chat/artifacts/**runs**/**waitGroups**/**metrics**(via `HEARTBEAT`)/resultMessages a partir de eventos; **bypasses de chat fechados** (`appendUserInstruction` emite `MESSAGE_APPENDED`); `piSessionFile`/`saveSession` mortos **removidos**; `context-router` **ligado** (compactação in-place). Teste snapshot-vs-fold. | Contrato negociado (D5 textual); reset+handoff (D4) |
+| **F3** | `epoch`+sinal de progresso; **monitor de convergência** com θ/N **configuráveis** + **`max_epochs`**; **escalonamento automático** model/effort em falha técnica; checkpoint observável via `HEARTBEAT(checkpointSeq)`. | resume sessão Pi (D5) |
+| **F4** | `Governance` **ligado** (snapshot imutável no run); **tetos por-card** (custo/tempo) com `failureReason='ceiling'`; budget **reidratado** (reseed); aviso **80%** (`isApproachingCeiling` ligado); `post_message` idempotente. | chave de idempotência explícita (D9) |
+| **F5** | Fonte única de agentes + **guardrails injetados no prompt**; **gate QA+Code Reviewer** opt-in (`SWARM_EVALUATION_GATE`) com subtasks segregadas + dupla aprovação, testado ponta a ponta; `verdict/criteria/feedback` no parser; **`checkDoD` imposto** antes de REVIEW (tree-closure, integridade de artefato, budget, consolidação de memória). | — |
+| **F6** | Tool `ask_human` (já ligada) + **resposta humana pelo chat** (incl. subtasks) + **`DeadlineMonitor`→`SUSPENDED`** (timeout) + resposta tardia revive; **anexos mid-conversa** dep-free (base64 JSON, evented, lido pelo agente). | escalonamento recursivo (D2); answer-scope (D3) |
+| **F7** | `HEARTBEAT` entre epochs; **SSE espelha o WS** (emitter por-evento); **catch-up `sinceSeq`** (WS) + **`Last-Event-ID`** (SSE) pelo ledger durável; `schemaVersion` no envelope; **endpoints de artefato** (list+stream, sandbox, content-type, retenção); `/health` enriquecido; frontend: estados `SUSPENDED`/`WAITING(human)`/`FAILED(reason)`, banner HITL, render/download de artefatos+anexos, ws-client com cursor de resume. | Smoke Playwright (D6) |
+| **F8** | **Auth** bearer opt-in (`SWARM_AUTH_TOKEN`, constant-time, `/health` aberto); **retry manual** (`POST /api/tasks/:id/retry`); **validação zod de frame WS**; **cobertura de integração** de rotas via `inject` + **fuzz** (oversized/empty/traversal/413) + **endurecimento XSS** do file-serve (octet-stream+attachment+nosniff+CSP para html/svg); **Cenários A/B/C (§12)** e2e (A com gate+artefato via HTTP real); **caos/resiliência** (crash-resume cross-restart, log corrompido tolerado, falha composta ceiling+timeout). | Execução da validação viva (D7 — harness pronto e gated; precisa de chave/rede) |

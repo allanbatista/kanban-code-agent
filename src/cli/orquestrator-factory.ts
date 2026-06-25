@@ -20,6 +20,7 @@ function createAgents(): Agent[] {
     role: def.role,
     runtimeConfig: def.runtimeConfig,
     tools: def.tools,
+    mustNot: def.guardrails.mustNot,
   }));
 }
 

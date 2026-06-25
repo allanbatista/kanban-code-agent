@@ -49,6 +49,11 @@ export function buildPrompt(
     : 'Sem runs.';
 
   const chatTail = task.chat.slice(-maxPromptChatMessages);
+  // State-dependent context routing (§3.4): when the chat overflows the tail
+  // budget we compact in-place — surface a marker for the omitted prefix instead
+  // of silently dropping it (the durable detail lives in scope-spec/progress-log).
+  const omittedCount = task.chat.length - chatTail.length;
+  const strategy = chooseContextStrategy(task.chat.length, maxPromptChatMessages);
 
   const sections = [
     `Tarefa: ${task.options.title}`,
@@ -83,8 +88,12 @@ export function buildPrompt(
     sections.push(`Ambiente:\n${parts.join('\n')}`);
   }
 
+  const chatHeader =
+    strategy === 'compact' && omittedCount > 0
+      ? `Task chat (${omittedCount} mensagens anteriores compactadas — detalhe no scope-spec/progress-log acima):`
+      : 'Task chat:';
   sections.push(
-    `Task chat:\n${chatTail.map(formatChatMessage).join('\n')}`,
+    `${chatHeader}\n${chatTail.map(formatChatMessage).join('\n')}`,
     MICRO_CYCLE_INSTRUCTION,
     'Decida o proximo passo e retorne somente o JSON estruturado.',
   );

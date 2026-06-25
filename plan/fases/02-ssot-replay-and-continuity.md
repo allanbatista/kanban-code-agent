@@ -7,7 +7,7 @@ depends_on: [F0, F1]
 
 # F2 — Log como SSOT (Replay-Fold) + Artefatos de Continuidade + Contrato (§3, §5.1, §9.1)
 
-**Status da fase:** `pending`
+**Status da fase:** `done` (implementado 2026-06-24 — ver PLAN.md §7.5 e DEFERRED.md para cortes conscientes)
 **Objetivo:** Fazer do event log a **fonte única de verdade** com um **fold de replay determinístico** (snapshot vira cache derivável e verificável), e adicionar os **artefatos de continuidade** que o §3.5 exige — *scope-spec* verificável (que também é o **contrato de Task** do §9.1), *progress-log*, *env-resume* — injetados na **reidratação seletiva** por uma fatia de “working set” limitada, em vez do chat inteiro.
 **Depende de:** F0, F1.
 
@@ -88,4 +88,3 @@ O sistema desidrata/reidrata de fato (worker liberado ao fim do run; estado nos 
 - [ ] Decisão de sessão Pi (reabrir vs. reidratar) tomada e **totalmente** implementada — sem `piSessionFile`/prompt mortos.
 - [ ] `npm test` verde (mock + e2e de rehydrate); `typecheck`+`lint` limpos.
 - [ ] **`ponytail-review`** sobre o diff; achados endereçados/justificados.
-</content>

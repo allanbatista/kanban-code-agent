@@ -1,9 +1,9 @@
-import { readFileSync, existsSync, mkdirSync, copyFileSync, renameSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, copyFileSync, renameSync, rmSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { AtomicWriter } from '../filesystem/atomic-writer.js';
 import { PathSandbox } from '../filesystem/sandbox.js';
-import type { TaskChatMessage, TaskArtifact, SerializedTask } from '../../domain/task.js';
+import type { TaskChatMessage, TaskArtifact, SerializedTask, AttachmentRef } from '../../domain/task.js';
 
 // ---------------------------------------------------------------------------
 // Continuity artifact types
@@ -114,6 +114,25 @@ export class TaskFileStore {
     AtomicWriter.writeJson(path, artifacts);
   }
 
+  /** Read the artifact manifest. Returns empty array if missing. */
+  loadArtifacts(taskId: string): TaskArtifact[] {
+    this.assertSandbox();
+    const path = this.taskPath(taskId, 'artifacts.yaml');
+    return this.readJsonFile<TaskArtifact[]>(path) ?? [];
+  }
+
+  /**
+   * Read an artifact file's bytes by file name. Returns null if missing.
+   * Path is resolved through PathSandbox, which rejects traversal.
+   */
+  readArtifact(taskId: string, fileName: string): Buffer | null {
+    this.assertSandbox();
+    const safe = basename(fileName); // strip any directory component
+    const path = this.sandbox.resolveSubpath('.swarm', 'tasks', taskId, 'artifacts', safe);
+    if (!existsSync(path)) return null;
+    return readFileSync(path);
+  }
+
   /**
    * Write a generated artifact file under the task's artifacts/ directory.
    * Returns the sandbox-relative path. Rejects path traversal via PathSandbox.
@@ -174,6 +193,52 @@ export class TaskFileStore {
   // ---------------------------------------------------------------------------
   // Attachments
   // ---------------------------------------------------------------------------
+
+  /**
+   * Write a human-uploaded attachment (raw bytes) into the task's attachments/
+   * directory with a UUID prefix. Returns the AttachmentRef. The file name is
+   * reduced to its basename and resolved through PathSandbox (no traversal).
+   */
+  writeAttachment(taskId: string, originalName: string, data: Buffer): AttachmentRef {
+    this.assertSandbox();
+    const attachmentsDir = this.taskPath(taskId, 'attachments');
+    this.ensureDir(attachmentsDir);
+    const safeName = basename(originalName) || 'arquivo';
+    const id = randomUUID();
+    const destPath = this.sandbox.resolveSubpath('.swarm', 'tasks', taskId, 'attachments', `${id}_${safeName}`);
+    writeFileSync(destPath, data);
+    return {
+      id,
+      originalName: safeName,
+      path: this.sandbox.relativeTo(destPath),
+      sizeBytes: data.byteLength,
+    };
+  }
+
+  /**
+   * Retention (F7.T6 / M5): purge archived task families older than `maxAgeMs`.
+   * Only touches `.swarm/tasks/_archived` — active families are never affected.
+   * Returns the number of archived task dirs removed.
+   */
+  purgeArchivedOlderThan(maxAgeMs: number, now: number = Date.now()): number {
+    this.assertSandbox();
+    const archivedDir = this.sandbox.resolveSubpath('.swarm', 'tasks', '_archived');
+    if (!existsSync(archivedDir)) return 0;
+    let removed = 0;
+    for (const entry of readdirSync(archivedDir)) {
+      const dir = join(archivedDir, entry);
+      try {
+        const st = statSync(dir);
+        if (now - st.mtimeMs > maxAgeMs) {
+          rmSync(dir, { recursive: true, force: true });
+          removed++;
+        }
+      } catch {
+        // ignore unreadable entries
+      }
+    }
+    return removed;
+  }
 
   /**
    * Copy an attachment file into the task's attachments/ directory

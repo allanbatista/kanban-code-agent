@@ -16,7 +16,6 @@ export interface ProviderConfig {
 }
 
 export interface AdvancedSettings {
-  maxConcurrency: number;
   runTimeoutMs: number;
   maxTaskDepth: number;
   maxSubtasks: number;

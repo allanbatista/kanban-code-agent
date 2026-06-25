@@ -7,7 +7,7 @@ depends_on: [F0, F1, F3, F4, F6]
 
 # F7 — Heartbeats, Paridade SSE↔WS e Frontend (Observabilidade em Tempo Real)
 
-**Status da fase:** `pending`
+**Status da fase:** `done` (implementado 2026-06-24 — ver PLAN.md §7.5 e DEFERRED.md para cortes conscientes)
 **Objetivo:** Expor toda a governança nova na UI e corrigir o contrato de streaming: emitir **`HEARTBEAT`** entre epochs com tokens/custo/tempo acumulados (§3.6), **corrigir o SSE** para espelhar o WS (hoje quebrado, L11), e completar o frontend — afordância de **HITL** (responder pergunta), indicadores de **budget vs teto**, telemetria de cache/heartbeat, **lanes de `FAILED`/`SUSPENDED`**, árvore de subtasks/workflow, edição de título persistida e ações de review.
 **Depende de:** F0, F1, F4, F6.
 
@@ -93,4 +93,3 @@ O Kanban é a interface visual **e** o SSOT — a UI precisa refletir o ledger f
 - [ ] Teste de contrato WS protege contra drift; 1 cliente WS por mount; sem mocks em runtime.
 - [ ] `cd web && npm test` verde + `npm run build` ok; `npm test` (root) sem regressão; `typecheck`+`lint` limpos.
 - [ ] **`ponytail-review`** sobre o diff (incl. front); achados endereçados/justificados.
-</content>

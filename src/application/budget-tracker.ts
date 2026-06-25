@@ -8,6 +8,14 @@ export class BudgetExceededError extends Error {
   }
 }
 
+/** Raised when a single card exceeds its own cost/time ceiling (§10.5). */
+export class CeilingExceededError extends BudgetExceededError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CeilingExceededError';
+  }
+}
+
 /**
  * Per-task token and cost usage record.
  */

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react';
+import { Send, ChevronDown, ChevronUp, ExternalLink, Download, Paperclip, MessageCircleQuestion } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Input } from '@/components/ui/input';
@@ -14,6 +14,10 @@ interface TaskChatPanelProps {
   task: Task;
   onOpenTask?: (taskId: string) => void;
 }
+
+const fileNameOf = (path: string): string => path.split('/').pop() ?? path;
+const artifactHref = (taskId: string, path: string): string =>
+  `${import.meta.env.VITE_API_URL ?? ''}/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(fileNameOf(path))}`;
 
 // Last natural-language reply a task produced — shown when expanding an event line.
 function lastAssistantText(task: Task): string | undefined {
@@ -124,9 +128,11 @@ export function TaskChatPanel({ task, onOpenTask }: TaskChatPanelProps) {
               )}
             >
               {msg.type === 'artifact' && (
-                <div className="flex items-center gap-1 text-primary">
-                  <span>📦</span>
-                  <span>{msg.text}</span>
+                <div className="text-primary">
+                  <div className="flex items-center gap-1">
+                    <span>📦</span>
+                    <span>{msg.text}</span>
+                  </div>
                 </div>
               )}
               {msg.type === 'text' && (
@@ -134,6 +140,29 @@ export function TaskChatPanel({ task, onOpenTask }: TaskChatPanelProps) {
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
                 </div>
               )}
+              {/* Agent artifacts: downloadable / openable via the artifact endpoint. */}
+              {msg.artifacts?.map((a, ai) => (
+                <a
+                  key={ai}
+                  href={artifactHref(task.id, a.path)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1 flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-2 py-1 text-xs text-primary hover:bg-primary/10"
+                  title={a.description}
+                >
+                  <Download className="h-3 w-3" />
+                  <span className="truncate">{fileNameOf(a.path)}</span>
+                  <span className="text-[10px] text-muted-foreground/70">{a.file_type}</span>
+                </a>
+              ))}
+              {/* Human attachments. */}
+              {msg.attachments?.map((att, ai) => (
+                <div key={ai} className="mt-1 flex items-center gap-1.5 rounded-lg border border-border/60 bg-muted/40 px-2 py-1 text-xs">
+                  <Paperclip className="h-3 w-3 text-muted-foreground" />
+                  <span className="truncate">{att.originalName}</span>
+                  <span className="text-[10px] text-muted-foreground/60">{Math.ceil(att.sizeBytes / 1024)} KB</span>
+                </div>
+              ))}
               <span className="mt-1 block text-[10px] text-muted-foreground/60">
                 {new Date(msg.ts).toLocaleTimeString()}
               </span>
@@ -148,12 +177,26 @@ export function TaskChatPanel({ task, onOpenTask }: TaskChatPanelProps) {
         )}
       </div>
     </ScrollArea>
+    {/* HITL: when the agent is waiting on the human, prompt the reply inline.
+        The answer is sent through the normal chat composer (chat-only design). */}
+    {task.status === 'WAITING' && task.waitingReason === 'human' && (
+      <div className="flex items-center gap-2 border-t border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+        <MessageCircleQuestion className="h-4 w-4 shrink-0" />
+        <span>O agente aguarda sua resposta. Responda pelo campo abaixo.</span>
+      </div>
+    )}
+    {task.status === 'SUSPENDED' && (
+      <div className="flex items-center gap-2 border-t border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-300/80">
+        <MessageCircleQuestion className="h-4 w-4 shrink-0" />
+        <span>Suspensa por timeout. Uma resposta reativa a tarefa.</span>
+      </div>
+    )}
     <div className="flex items-center gap-2 border-t border-border/50 p-3">
       <Input
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-        placeholder="Enviar mensagem..."
+        placeholder={task.waitingReason === 'human' ? 'Responder ao agente...' : 'Enviar mensagem...'}
       />
       <Button size="icon" onClick={handleSend} disabled={!text.trim()}>
         <Send className="h-4 w-4" />

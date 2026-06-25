@@ -1,4 +1,7 @@
-export type TaskStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'REVIEW' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+export type TaskStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'SUSPENDED' | 'REVIEW' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+export type TaskWaitingReason = 'subtasks' | 'human' | 'validation';
+export type FailureReason = 'attempts' | 'stagnation' | 'ceiling' | 'blocked' | 'human_timeout' | 'cancelled_by_user';
+export type EvaluationVerdict = 'approved' | 'rejected';
 
 export interface TaskMetrics {
   startedAt?: string;
@@ -39,6 +42,7 @@ export interface ChatMessage {
   type: 'text' | 'artifact' | 'event';
   text?: string;
   artifacts?: Artifact[];
+  attachments?: Attachment[];
   /** For terminal-event lines: the subtask this event refers to. */
   refTaskId?: string;
 }
@@ -63,6 +67,9 @@ export interface Task {
   assignedTo: string;
   parentId?: string;
   status: TaskStatus;
+  waitingReason?: TaskWaitingReason;
+  failureReason?: FailureReason;
+  evaluationVerdict?: EvaluationVerdict;
   depth: number;
   subtaskIds: string[];
   runId?: string;

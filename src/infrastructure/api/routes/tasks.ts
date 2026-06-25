@@ -39,6 +39,32 @@ const taskParams = z.object({
   taskId: z.string().min(1).max(128),
 });
 
+const artifactParams = z.object({
+  taskId: z.string().min(1).max(128),
+  // Strict allowlist: no path separators, quotes, or CR/LF (header-breakout safe).
+  fileName: z.string().min(1).max(256).regex(/^[A-Za-z0-9._-]+$/, 'invalid file name'),
+});
+
+// Dep-free attachment upload: base64 payload in JSON (no @fastify/multipart).
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024; // 5 MB
+const attachmentBody = z.object({
+  fileName: z.string().min(1).max(256),
+  contentBase64: z.string().min(1),
+  message: z.string().max(10000).optional(),
+});
+
+// Inline-safe content types for agent-authored artifacts. HTML/SVG/XML are
+// deliberately EXCLUDED — serving them inline from the same origin is stored
+// XSS; they fall through to octet-stream + attachment disposition below.
+const CONTENT_TYPES: Record<string, string> = {
+  markdown: 'text/markdown; charset=utf-8',
+  md: 'text/markdown; charset=utf-8',
+  json: 'application/json; charset=utf-8',
+  text: 'text/plain; charset=utf-8',
+  txt: 'text/plain; charset=utf-8',
+  csv: 'text/csv; charset=utf-8',
+};
+
 const listQuery = z.object({
   status: z.enum([
     TASK_STATUS.PENDING,
@@ -62,6 +88,7 @@ function toTaskResponse(task: Task, orquestrator: Orquestrator) {
     assignedTo: task.assignedTo,
     parentId: task.parentId,
     status: task.status,
+    waitingReason: task.waitingReason,
     depth: task.depth,
     subtaskIds: task.subtaskIds,
     runtimeConfig: task.runtimeConfig,
@@ -207,6 +234,111 @@ export function registerTaskRoutes(
         message: error instanceof Error ? error.message : String(error),
       });
     }
+  });
+
+  // POST /api/tasks/:taskId/retry — manually re-run a FAILED/CANCELLED/REVIEW task
+  fastify.post('/api/tasks/:taskId/retry', async (request, reply) => {
+    const params = taskParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: 'Invalid params', issues: params.error.issues });
+    }
+    if (!orquestrator.tasks.get(params.data.taskId)) {
+      return reply.status(404).send({ error: 'Task not found' });
+    }
+    try {
+      const task = orquestrator.retryTask(params.data.taskId);
+      return toTaskResponse(task, orquestrator);
+    } catch (error) {
+      return reply.status(400).send({
+        error: 'Failed to retry task',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  // POST /api/tasks/:taskId/attachments — human uploads an attachment mid-chat
+  fastify.post('/api/tasks/:taskId/attachments', async (request, reply) => {
+    const params = taskParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: 'Invalid params', issues: params.error.issues });
+    }
+    const body = attachmentBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
+    }
+    if (!orquestrator.tasks.get(params.data.taskId)) {
+      return reply.status(404).send({ error: 'Task not found' });
+    }
+    let data: Buffer;
+    try {
+      data = Buffer.from(body.data.contentBase64, 'base64');
+    } catch {
+      return reply.status(400).send({ error: 'Invalid base64 content' });
+    }
+    if (data.byteLength === 0 || data.byteLength > MAX_ATTACHMENT_BYTES) {
+      return reply.status(413).send({ error: 'Attachment too large or empty' });
+    }
+    try {
+      const ref = orquestrator.appendUserAttachment(
+        params.data.taskId,
+        body.data.fileName,
+        data,
+        body.data.message,
+      );
+      reply.status(201);
+      return { attachment: ref };
+    } catch (error) {
+      return reply.status(400).send({
+        error: 'Failed to attach',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  // GET /api/tasks/:taskId/artifacts — list the task's artifacts
+  fastify.get('/api/tasks/:taskId/artifacts', async (request, reply) => {
+    const params = taskParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: 'Invalid params', issues: params.error.issues });
+    }
+    const task = orquestrator.tasks.get(params.data.taskId);
+    if (!task) {
+      return reply.status(404).send({ error: 'Task not found' });
+    }
+    return { artifacts: task.artifacts };
+  });
+
+  // GET /api/tasks/:taskId/artifacts/:fileName — stream an artifact's content
+  fastify.get('/api/tasks/:taskId/artifacts/:fileName', async (request, reply) => {
+    const params = artifactParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: 'Invalid params', issues: params.error.issues });
+    }
+    const task = orquestrator.tasks.get(params.data.taskId);
+    if (!task) {
+      return reply.status(404).send({ error: 'Task not found' });
+    }
+    let content: Buffer | null;
+    try {
+      content = orquestrator.taskFileStore.readArtifact(params.data.taskId, params.data.fileName);
+    } catch {
+      // PathSandbox rejected the resolved path (traversal attempt).
+      return reply.status(403).send({ error: 'Forbidden path' });
+    }
+    if (!content) {
+      return reply.status(404).send({ error: 'Artifact not found' });
+    }
+    const artifact = task.artifacts.find((a) => a.path.endsWith(`/${params.data.fileName}`) || a.path.endsWith(params.data.fileName));
+    const safeType = artifact && CONTENT_TYPES[artifact.fileType];
+    // Inline only known-safe (non-executable) text types; everything else is a
+    // forced download. Hardening headers prevent MIME-sniffing + active content.
+    const contentType = safeType ?? 'application/octet-stream';
+    const disposition = safeType ? 'inline' : 'attachment';
+    reply.header('Content-Type', contentType);
+    reply.header('Content-Disposition', `${disposition}; filename="${params.data.fileName}"`);
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('Content-Security-Policy', "sandbox; default-src 'none'");
+    return reply.send(content);
   });
 
   // POST /api/tasks/archive — archive all tasks in a column status (Done/Cancel)

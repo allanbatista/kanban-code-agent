@@ -93,12 +93,16 @@ export class PiAgentClient {
     const metadata = orquestrator.toMetadata(task);
     const taskDir = orquestrator.getTaskDir(task.taskId);
 
-    // Only the orchestrator (Manager) that still has delegation budget decomposes
-    // work. Everyone else is a leaf executor: lean prompt, no create_subtask.
+    // Any task with remaining delegation budget can become the parent of its own
+    // subtasks. Depth/subtask ceilings still bound runaway nesting.
     const canDelegate = metadata.canCreateSubtasks && orquestrator.isOrchestrator(task);
 
+    const guardrailBlock = agent.mustNot?.length
+      ? `\nVOCE NAO DEVE (guardrails do papel):\n${agent.mustNot.map((g) => `- ${g}`).join('\n')}`
+      : '';
+
     const commonHeader = [
-      agent.role,
+      agent.role + guardrailBlock,
       orquestrator.buildTaskMetadataBlock(task, metadata),
       '',
       'COMO VOCE SE COMUNICA',
@@ -114,12 +118,15 @@ export class PiAgentClient {
           '- Voce NAO faz o trabalho final de outro agente: voce decompoe e delega.',
           '- Se a tarefa pede itens distintos (ex.: uma saudacao por idioma, um arquivo por modulo), voce DEVE criar UMA subtask por item via create_subtask e NUNCA responder direto.',
           '- Passe a cada subtask apenas a instrucao minima e auto-contida para o item dela (sem contexto das outras).',
+          '- Se uma subtask entregar resultado vazio, generico ou invalido, NAO crie outra subtask de retry. Use request_subtask_validation na taskId original explicando o problema.',
+          '- Depois de validar uma subtask, use continue_subtask para mandar continuar, accept_subtask para aceitar ou cancel_subtask para cancelar.',
           '',
           'FLUXO DE DELEGACAO',
           '1. post_message dizendo quantas subtasks vai criar e por que.',
           '2. Chame create_subtask para CADA item (ela retorna o taskId).',
           '3. Retorne status waiting com waitGroups usando os taskIds retornados (WAIT_ALL aguarda todas; ON_DEMAND entrega uma a uma). NUNCA responda completed no mesmo turno em que criou subtasks.',
-          '4. As conclusoes das subtasks chegam como eventos no proximo turno. Consolide-as e so entao responda completed com a mensagem final ao usuario.',
+          '4. As conclusoes das subtasks chegam como eventos no proximo turno. Valide cada entrega na subtask original e so entao consolide ou retorne waiting aguardando as mesmas taskIds.',
+          '5. So responda completed com a mensagem final ao usuario depois de validar e consolidar as subtasks.',
           '',
           'QUANDO PARAR (decisao final)',
           '- CONCLUIDA: todas as subtasks terminaram e voce consolidou o resultado. -> status completed.',
@@ -153,8 +160,8 @@ export class PiAgentClient {
 
     const prompt = buildPrompt(task, metadata, triggerEvents, this.maxPromptChatMessages, continuity);
 
-    // post_message + create_artifact go to every agent; create_subtask only to a
-    // delegating orchestrator with remaining budget.
+    // post_message + create_artifact go to every agent; create_subtask only when
+    // depth/subtask ceilings allow another delegation layer.
     const customTools = orquestrator.buildAgentTools(task, canDelegate);
     // Use agent-specific tools (from definition) + custom orchestration tools
     const tools = [...agent.tools, ...customTools.map((tool) => tool.name)];
@@ -167,6 +174,42 @@ export class PiAgentClient {
       systemPrompt,
       prompt,
       customTools,
+      sessionManager: undefined,
+      resourceLoader: undefined,
+      signal,
+    });
+  }
+
+  async repairInvalidOutput(
+    agent: Agent,
+    task: Task,
+    orquestrator: Orquestrator,
+    errorMessage: string,
+    invalidOutput: string,
+    signal?: AbortSignal,
+  ): Promise<AgentRunResult> {
+    const runtimeConfig = orquestrator.resolveRuntimeConfig(task, agent);
+    const modelConfig = this.allowedModels[runtimeConfig.model];
+    if (!modelConfig) {
+      throw new Error(`Modelo alias ${runtimeConfig.model} não encontrado`);
+    }
+
+    const prompt = [
+      'A resposta anterior nao respeitou o contrato JSON.',
+      `Erro: ${errorMessage}`,
+      'Corrija a resposta anterior e retorne SOMENTE um objeto JSON valido, sem texto fora dele e sem cercas de codigo.',
+      `Contrato: ${JSON.stringify({ status: 'completed', messages: [{ type: 'text', text: 'mensagem final ao usuario' }] })}`,
+      `Saida anterior:\n${invalidOutput.slice(0, 4000)}`,
+    ].join('\n\n');
+
+    return this.runner.run({
+      cwd: orquestrator.getTaskDir(task.taskId),
+      model: modelConfig,
+      thinkingLevel: runtimeConfig.effort,
+      tools: [],
+      systemPrompt: 'Voce corrige somente o formato da resposta final para JSON valido no contrato pedido.',
+      prompt,
+      customTools: [],
       sessionManager: undefined,
       resourceLoader: undefined,
       signal,

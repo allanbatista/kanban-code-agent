@@ -8,7 +8,7 @@ process.env.SWARM_RETRY_BASE_DELAY_MS = '10';
 process.env.SWARM_MAX_TASK_RETRIES = '2';
 process.env.SWARM_MAX_TECHNICAL_RETRIES = '1';
 
-import { Orquestrator } from '../../application/orquestrator.js';
+import { INBOX_AGENT, Orquestrator } from '../../application/orquestrator.js';
 import { Task } from '../../domain/task.js';
 import { TASK_STATUS, SWARM_EVENT_TYPE, WAIT_GROUP_MODE, WAIT_GROUP_STATUS } from '../../domain/types.js';
 import type { Agent } from '../../domain/agent.js';
@@ -162,6 +162,30 @@ describe('Orquestrator', () => {
     });
   });
 
+  describe('parallel scheduling', () => {
+    it('starts every queued task without an artificial concurrency ceiling', async () => {
+      const started = new Set<string>();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const runner: AgentRunner = {
+        async run(config: AgentRunConfig): Promise<AgentRunResult> {
+          started.add(basename(String(config.cwd)));
+          await gate;
+          return {
+            output: completedDecision('done'),
+            stats: { tokens: { input: 1, output: 1, total: 2 }, cost: 0 },
+          };
+        },
+      };
+      const orc = new Orquestrator(createDeps(dir, createPiClientWithRunner(runner)));
+      const tasks = Array.from({ length: 8 }, (_, i) => orc.createRootTask(`Task ${i}`, 'agent-tester'));
+
+      await vi.waitFor(() => expect(started.size).toBe(8));
+      release();
+      await vi.waitFor(() => expect(tasks.every((task) => task.status === TASK_STATUS.COMPLETED)).toBe(true));
+    });
+  });
+
   // -------------------------------------------------------------------
   // spawnSubtask
   // -------------------------------------------------------------------
@@ -213,6 +237,158 @@ describe('Orquestrator', () => {
       task.options.depth = 5; // MAX_TASK_DEPTH is 5
 
       expect(() => orc.spawnSubtask(task, 'agent-tester', 'TooDeep', 'msg')).toThrow('Depth maximo');
+    });
+
+    it('allows subtasks to create their own subtasks and consolidate them', async () => {
+      const calls: Record<string, number> = {};
+      const childLeafCounts: Record<string, number> = { 'Grupo 1': 1, 'Grupo 2': 2, 'Grupo 3': 3, 'Grupo 4': 5 };
+      const stats = { tokens: { input: 1, output: 1, total: 2 }, cost: 0 };
+      const runner: AgentRunner = {
+        async run(config: AgentRunConfig): Promise<AgentRunResult> {
+          const taskId = basename(String(config.cwd));
+          const title = config.prompt.match(/^Tarefa: (.+)$/m)?.[1] ?? '';
+          const n = (calls[taskId] = (calls[taskId] ?? 0) + 1);
+          const create = (config.customTools ?? []).find((tool) => tool.name === 'create_subtask');
+
+          if (title.startsWith('crie 4 substasks') && n === 1) {
+            if (!create) throw new Error('root sem create_subtask');
+            const ids: string[] = [];
+            for (let i = 1; i <= 4; i += 1) {
+              const sub = JSON.parse(await create.execute({
+                assignedTo: 'agent-tester',
+                title: `Grupo ${i}`,
+                message: `Crie entre 1 e 5 subtasks para mensagens motivacionais do grupo ${i}.`,
+              }));
+              ids.push(sub.taskId);
+            }
+            return {
+              output: waitingDecision([{ waitId: 'root', mode: 'WAIT_ALL', taskIds: ids }], 'Criei 4 subtasks.'),
+              stats,
+            };
+          }
+
+          if (title in childLeafCounts && n === 1) {
+            if (!create) throw new Error(`${taskId} sem create_subtask`);
+            const ids: string[] = [];
+            for (let i = 1; i <= childLeafCounts[title]; i += 1) {
+              const leaf = JSON.parse(await create.execute({
+                assignedTo: 'agent-tester',
+                title: `${taskId} mensagem ${i}`,
+                message: 'Gere uma mensagem motivacional com ate 32 palavras.',
+              }));
+              ids.push(leaf.taskId);
+            }
+            return {
+              output: waitingDecision([{ waitId: `${taskId}-leaves`, mode: 'WAIT_ALL', taskIds: ids }], 'Criei subtasks filhas.'),
+              stats,
+            };
+          }
+
+          return {
+            output: completedDecision('Acredite no proximo passo; pequenas acoes consistentes constroem grandes mudancas hoje.'),
+            stats,
+          };
+        },
+      };
+      const orc = new Orquestrator(createDeps(dir, createPiClientWithRunner(runner)));
+      const root = orc.createRootTask(
+        'crie 4 substasks que cada subtasks e cada task gere de forma aleatória entre 1 e 5 subtasks com o objetivo de cada uma dessas tasks gerar uma mensagem motivacional com até 32 palavras.',
+        'agent-tester',
+      );
+
+      await vi.waitFor(() => expect(root.status).toBe(TASK_STATUS.COMPLETED), { timeout: 5000 });
+
+      const children = orc.getSubtasks(root);
+      const leaves = children.flatMap((child) => orc.getSubtasks(child));
+      expect(children).toHaveLength(4);
+      expect(children.map((child) => child.subtaskIds.length).sort((a, b) => a - b)).toEqual([1, 2, 3, 5]);
+      expect(leaves).toHaveLength(11);
+      expect(leaves.every((leaf) => leaf.status === TASK_STATUS.COMPLETED)).toBe(true);
+      for (const leaf of leaves) {
+        const words = leaf.resultMessages.map((message) => message.text ?? '').join(' ').trim().split(/\s+/);
+        expect(words.length).toBeLessThanOrEqual(32);
+      }
+    });
+  });
+
+  describe('subtask validation', () => {
+    it('requests validation on the original subtask without creating a retry task', () => {
+      const orc = new Orquestrator(createDeps(dir, createPiClient([])));
+      const parent = orc.createRootTask('Parent', INBOX_AGENT);
+      const subtask = orc.spawnSubtask(parent, 'agent-tester', 'Sub original', 'msg');
+      subtask.status = TASK_STATUS.COMPLETED;
+
+      const taskCount = orc.tasks.size;
+      const validated = orc.requestSubtaskValidation(parent, subtask.taskId, 'Faltou evidencia concreta.');
+
+      expect(validated.taskId).toBe(subtask.taskId);
+      expect(orc.tasks.size).toBe(taskCount);
+      expect(parent.subtaskIds).toEqual([subtask.taskId]);
+      expect([...orc.tasks.values()].some((task) => /retry/i.test(task.title))).toBe(false);
+      expect(subtask.status).toBe(TASK_STATUS.WAITING);
+      expect(subtask.waitingReason).toBe('validation');
+      expect(subtask.chat.at(-1)?.text).toBe('Faltou evidencia concreta.');
+      expect(orc.toMetadata(subtask).waitingReason).toBe('validation');
+      expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_WAITING, subtask.taskId)?.payload).toMatchObject({
+        waitingReason: 'validation',
+        validatorTaskId: parent.taskId,
+      });
+    });
+
+    it('continues the same subtask from validation', () => {
+      const orc = new Orquestrator(createDeps(dir, createPiClient([])));
+      const parent = orc.createRootTask('Parent', INBOX_AGENT);
+      const subtask = orc.spawnSubtask(parent, 'agent-tester', 'Sub original', 'msg');
+      orc.requestSubtaskValidation(parent, subtask.taskId, 'Refaca sem resposta generica.');
+
+      const continued = orc.continueSubtask(parent, subtask.taskId, 'Continue na mesma task.');
+
+      expect(continued.taskId).toBe(subtask.taskId);
+      expect(continued.waitingReason).toBeUndefined();
+      expect(parent.subtaskIds).toEqual([subtask.taskId]);
+      expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_RESUMED, subtask.taskId)).toBeDefined();
+      expect([TASK_STATUS.PENDING, TASK_STATUS.QUEUED, TASK_STATUS.RUNNING, TASK_STATUS.COMPLETED]).toContain(
+        continued.status,
+      );
+    });
+
+    it('cancels the same subtask from validation', () => {
+      const orc = new Orquestrator(createDeps(dir, createPiClient([])));
+      const parent = orc.createRootTask('Parent', INBOX_AGENT);
+      const subtask = orc.spawnSubtask(parent, 'agent-tester', 'Sub original', 'msg');
+      orc.requestSubtaskValidation(parent, subtask.taskId, 'Nao atende ao contrato.');
+
+      const cancelled = orc.cancelSubtask(parent, subtask.taskId, 'Cancelar esta entrega.');
+
+      expect(cancelled.taskId).toBe(subtask.taskId);
+      expect(cancelled.status).toBe(TASK_STATUS.CANCELLED);
+      expect(cancelled.waitingReason).toBeUndefined();
+      expect(orc.tasks.size).toBe(2);
+      expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_CANCELLED, subtask.taskId)?.payload).toMatchObject({
+        cancelledByTaskId: parent.taskId,
+      });
+    });
+
+    it('exposes validation tools for direct subtasks', async () => {
+      const orc = new Orquestrator(createDeps(dir, createPiClient([])));
+      const parent = orc.createRootTask('Parent', INBOX_AGENT);
+      const subtask = orc.spawnSubtask(parent, 'agent-tester', 'Sub original', 'msg');
+      subtask.status = TASK_STATUS.COMPLETED;
+
+      const tools = orc.buildAgentTools(parent, true);
+      const request = tools.find((tool) => tool.name === 'request_subtask_validation');
+      const accept = tools.find((tool) => tool.name === 'accept_subtask');
+      expect(request).toBeDefined();
+      expect(accept).toBeDefined();
+
+      const metadata = JSON.parse(await request!.execute({
+        taskId: subtask.taskId,
+        message: 'Resultado invalido; detalhe o criterio.',
+      })) as TaskMetadata;
+
+      expect(metadata.taskId).toBe(subtask.taskId);
+      expect(metadata.waitingReason).toBe('validation');
+      expect(orc.tasks.size).toBe(2);
     });
   });
 
@@ -762,6 +938,38 @@ describe('Orquestrator', () => {
   // Technical retry (run throws)
   // -------------------------------------------------------------------
   describe('technical retry', () => {
+    it('repairs invalid decision schema once before failing the task', async () => {
+      const calls: AgentRunConfig[] = [];
+      const responses = [
+        JSON.stringify({ status: 'completed', messages: ['Done'] }),
+        completedDecision('Done'),
+      ];
+      const runner: AgentRunner = {
+        async run(config: AgentRunConfig): Promise<AgentRunResult> {
+          calls.push(config);
+          return {
+            output: responses.shift() ?? completedDecision('extra'),
+            stats: { tokens: { input: 1, output: 1, total: 2 }, cost: 0 },
+          };
+        },
+      };
+      const client = createPiClientWithRunner(runner);
+      const deps = createDeps(dir, client);
+      const orc = new Orquestrator(deps);
+
+      const task = orc.createRootTask('Repair schema', 'agent-tester');
+
+      await vi.waitFor(() => expect(task.status).toBe(TASK_STATUS.COMPLETED));
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1].tools).toEqual([]);
+      expect(calls[1].customTools).toEqual([]);
+      expect(calls[1].prompt).toContain('messages[0] is not a valid object');
+      expect(task.resultMessages[0].text).toBe('Done');
+      expect(task.resultMessages[0].text).not.toContain('Falha ao executar task');
+      expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.AGENT_OUTPUT_INVALID, task.taskId)).toBeDefined();
+    });
+
     it('run throws -> increments technicalRetryCount', async () => {
       // The technical retry involves async retry with backoff delays.
       // We test that the task exists and the orquestrator was created correctly.

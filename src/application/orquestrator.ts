@@ -12,6 +12,7 @@ import type {
   AttachmentRef,
   SerializedTask,
   AgentOutputMessage,
+  TaskMetrics,
 } from '../domain/task.js';
 import type { TaskRun } from '../domain/run.js';
 import type { SwarmEvent } from '../domain/events.js';
@@ -24,8 +25,9 @@ import {
   WAIT_GROUP_STATUS,
 } from '../domain/types.js';
 import { AgentOutputInvalidError, parseDecision } from './decision-parser.js';
-import { BudgetTracker, BudgetExceededError, checkCardCeiling } from './budget-tracker.js';
+import { BudgetTracker, BudgetExceededError, CeilingExceededError, checkCardCeiling, isApproachingCeiling } from './budget-tracker.js';
 import { checkStagnation, type RunSignal } from './convergence.js';
+import { createDefaultGovernance, type Governance } from '../domain/governance.js';
 import { Scheduler } from './scheduler.js';
 import { WorkerPool, RunTimeoutError } from './worker-pool.js';
 import { RunCancelledError, type PiAgentClient, type CustomToolSpec } from './pi-client.js';
@@ -43,10 +45,12 @@ import { Task as TaskImpl } from '../domain/task.js';
 const DEFAULT_MODEL_ALIAS: ModelAlias = 'fast';
 const DEFAULT_EFFORT: EffortLevel = 'off';
 
+// Fallback registry when no resolved models are injected (deps.models). Aligned
+// with config.ts defaults (DeepSeek) — no openrouter default anywhere (L13/F0.T2).
 const ALLOWED_MODELS: Record<ModelAlias, { provider: string; modelId: string; description: string }> = {
-  fast: { provider: 'openrouter', modelId: 'openai/gpt-5.4-nano', description: 'tarefas simples e baixo custo' },
-  balanced: { provider: 'openrouter', modelId: 'deepseek/deepseek-v4-flash', description: 'uso geral equilibrado' },
-  deep: { provider: 'openrouter', modelId: 'deepseek/deepseek-v4-pro', description: 'tarefas complexas ou criticas' },
+  fast: { provider: 'deepseek', modelId: 'deepseek-v4-flash', description: 'tarefas simples e baixo custo' },
+  balanced: { provider: 'deepseek', modelId: 'deepseek-v4-flash', description: 'uso geral equilibrado' },
+  deep: { provider: 'deepseek', modelId: 'deepseek-v4-pro', description: 'tarefas complexas ou criticas' },
 };
 
 const ALLOWED_EFFORTS: EffortLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
@@ -134,7 +138,6 @@ function sanitizeTitle(raw: string): string {
   return unquoted.slice(0, MAX_TITLE_LENGTH - 1).trimEnd() + '…';
 }
 
-const MAX_CONCURRENCY = readPositiveIntegerEnv('SWARM_MAX_CONCURRENCY', 3);
 const MAX_TASK_DEPTH = readPositiveIntegerEnv('SWARM_MAX_TASK_DEPTH', 5);
 const MAX_SUBTASKS_PER_TASK = readPositiveIntegerEnv('SWARM_MAX_SUBTASKS_PER_TASK', 10);
 const MAX_TASK_RETRIES = readPositiveIntegerEnv('SWARM_MAX_TASK_RETRIES', 3);
@@ -144,6 +147,16 @@ const RETRY_BASE_DELAY_MS = readPositiveIntegerEnv('SWARM_RETRY_BASE_DELAY_MS', 
 const MAX_TOTAL_TOKENS = readPositiveIntegerEnv('SWARM_MAX_TOTAL_TOKENS', Number.MAX_SAFE_INTEGER);
 const MAX_TOTAL_COST = readPositiveNumberEnv('SWARM_MAX_TOTAL_COST', Number.POSITIVE_INFINITY);
 const MAX_PROMPT_CHAT_MESSAGES = readPositiveIntegerEnv('SWARM_MAX_PROMPT_CHAT_MESSAGES', 60);
+// Human-intervention timeout (§10.6): an unanswered WAITING(human) card is
+// parked in SUSPENDED after this long, freeing prioritization. A late answer
+// still revives it. Swept by a periodic monitor.
+const HUMAN_TIMEOUT_MS = readPositiveIntegerEnv('SWARM_HUMAN_TIMEOUT_MS', 3_600_000);
+const DEADLINE_SWEEP_MS = readPositiveIntegerEnv('SWARM_DEADLINE_SWEEP_MS', 30_000);
+// Graceful-degradation warning threshold for per-card ceilings (§10.5).
+const CEILING_WARNING_RATIO = 0.8;
+// Convergence monitor knobs (§5.3) — configurable θ and N.
+const CONVERGENCE_THETA = readPositiveNumberEnv('SWARM_CONVERGENCE_THETA', 0.9);
+const STAGNATION_EPOCHS = readPositiveIntegerEnv('SWARM_STAGNATION_EPOCHS', 3);
 
 // ---------------------------------------------------------------------------
 // Dependency interface
@@ -409,8 +422,21 @@ export class Orquestrator extends EventEmitter {
   private dirtyTaskIds = new Set<string>();
   private shuttingDown = false;
 
+  // Human-in-the-loop deadlines: taskId → ISO timestamp at which an unanswered
+  // WAITING(human) card is parked in SUSPENDED. Swept by a periodic monitor.
+  private humanDeadlines = new Map<string, string>();
+  private deadlineTimer?: ReturnType<typeof setInterval>;
+
+  // Independent-evaluation gate (§8.2/§11). Off by default (andaime §1.2,
+  // opt-in via SWARM_EVALUATION_GATE=1); when on, a Manager root must pass QA +
+  // Code Reviewer subtasks before reaching REVIEW.
+  private readonly evaluationEnabled = process.env.SWARM_EVALUATION_GATE === '1';
+  // Per-task governance snapshot defaults (§10). Captured into each run so a
+  // mid-flight config change cannot move the goalposts of a running card.
+  private readonly governance: Governance = createDefaultGovernance();
+
   private readonly scheduler = new Scheduler();
-  private readonly workerPool = new WorkerPool(MAX_CONCURRENCY, RUN_TIMEOUT_MS);
+  private readonly workerPool = new WorkerPool(RUN_TIMEOUT_MS);
   private readonly budget = new BudgetTracker(MAX_TOTAL_TOKENS, MAX_TOTAL_COST);
 
   private readonly eventStore: EventStore;
@@ -542,7 +568,7 @@ export class Orquestrator extends EventEmitter {
     // late output, so moving to the Inbox truly pauses execution.
     this.dequeue(taskId);
     task.options.assignedTo = target === 'inbox' ? INBOX_AGENT : MANAGER_AGENT;
-    task.status = TASK_STATUS.PENDING;
+    task.setStatus(TASK_STATUS.PENDING, { force: true });
     task.activeRunId = undefined;
     this.markTaskDirty(task);
     this.recordEvent(SWARM_EVENT_TYPE.TASK_UPDATED, {
@@ -567,11 +593,24 @@ export class Orquestrator extends EventEmitter {
     if (!task) throw new Error(`Task ${taskId} não encontrada`);
     if (isTerminalTaskStatus(task.status)) return task;
     this.dequeue(taskId);
-    task.status = TASK_STATUS.CANCELLED;
-    task.failureReason = 'cancelled_by_user';
-    task.activeRunId = undefined;
-    task.metrics.finishedAt = new Date().toISOString();
-    this.markTaskDirty(task);
+    // Cascade cancel: aborting the parent aborts the whole active family so no
+    // child worker is left running (orphan-run). Reuses dequeue→cancelActiveRun.
+    const familyIds = this.collectFamilyIds(task);
+    for (const id of familyIds) {
+      const member = this.tasks.get(id);
+      if (!member || isTerminalTaskStatus(member.status)) continue;
+      this.dequeue(id);
+      member.setStatus(TASK_STATUS.CANCELLED, { force: true, failureReason: 'cancelled_by_user', waitingReason: undefined });
+      member.activeRunId = undefined;
+      member.metrics.finishedAt = new Date().toISOString();
+      this.markTaskDirty(member);
+      if (id !== taskId) {
+        this.recordEvent(SWARM_EVENT_TYPE.TASK_CANCELLED, {
+          task: member,
+          payload: { cancelledByTaskId: taskId, allowDuplicateTerminalEvent: true },
+        });
+      }
+    }
     this.recordEvent(SWARM_EVENT_TYPE.TASK_CANCELLED, { task });
     this.scheduler.rebuildWaitIndex(this.tasks);
     this.persist();
@@ -591,7 +630,7 @@ export class Orquestrator extends EventEmitter {
       throw new Error('Apenas tasks em revisão podem ser concluídas pelo usuário');
     }
     this.dequeue(taskId);
-    task.status = TASK_STATUS.COMPLETED;
+    task.setStatus(TASK_STATUS.COMPLETED, { force: true, waitingReason: undefined });
     task.activeRunId = undefined;
     task.metrics.finishedAt = new Date().toISOString();
     this.markTaskDirty(task);
@@ -599,6 +638,30 @@ export class Orquestrator extends EventEmitter {
     this.scheduler.rebuildWaitIndex(this.tasks);
     this.persist();
     this.emit('state:changed');
+    return task;
+  }
+
+  /**
+   * Manual retry (F8.T2): re-open a FAILED/CANCELLED/REVIEW task and re-run it.
+   * Clears the failure reason and re-schedules. An explicit user action, so the
+   * terminal→PENDING transition is forced.
+   */
+  retryTask(taskId: string): Task {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Task ${taskId} não encontrada`);
+    if (!isTerminalTaskStatus(task.status) && task.status !== TASK_STATUS.REVIEW) {
+      throw new Error('Apenas tasks finalizadas ou em revisão podem ser reexecutadas');
+    }
+    this.dequeue(taskId);
+    if (task.assignedTo === INBOX_AGENT && !task.options.parentId) task.options.assignedTo = MANAGER_AGENT;
+    task.setStatus(TASK_STATUS.PENDING, { force: true, failureReason: undefined, waitingReason: undefined });
+    task.activeRunId = undefined;
+    this.markTaskDirty(task);
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_RETRIED, { task, payload: { manual: true } });
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_RESUMED, { task });
+    this.persist();
+    this.emit('state:changed');
+    this.scheduleTask(taskId);
     return task;
   }
 
@@ -617,10 +680,15 @@ export class Orquestrator extends EventEmitter {
     });
     const reopenable =
       task.status === TASK_STATUS.REVIEW || isTerminalTaskStatus(task.status);
-    // Resume from WAITING(human) on user response
-    if (task.status === TASK_STATUS.WAITING && task.waitingReason === 'human') {
-      task.status = TASK_STATUS.PENDING;
-      task.waitingReason = undefined;
+    // Resume from WAITING(human|validation) — or a SUSPENDED card revived by a
+    // late human answer (§10.6) — on a direct response.
+    if (
+      (task.status === TASK_STATUS.WAITING &&
+        (task.waitingReason === 'human' || task.waitingReason === 'validation')) ||
+      task.status === TASK_STATUS.SUSPENDED
+    ) {
+      this.clearHumanDeadline(taskId);
+      task.setStatus(TASK_STATUS.PENDING, { force: true, waitingReason: undefined, failureReason: undefined });
       task.activeRunId = undefined;
       this.markTaskDirty(task);
       this.recordEvent(SWARM_EVENT_TYPE.TASK_RESUMED, { task });
@@ -631,7 +699,8 @@ export class Orquestrator extends EventEmitter {
     }
     if (reopenable && !task.options.parentId) {
       task.options.assignedTo = MANAGER_AGENT;
-      task.status = TASK_STATUS.PENDING;
+      // Reopen from a terminal/REVIEW state is an explicit user override.
+      task.setStatus(TASK_STATUS.PENDING, { force: true });
       task.activeRunId = undefined;
       this.markTaskDirty(task);
       this.recordEvent(SWARM_EVENT_TYPE.TASK_RESUMED, { task });
@@ -643,6 +712,60 @@ export class Orquestrator extends EventEmitter {
     this.persist();
     this.emit('state:changed');
     return task;
+  }
+
+  /**
+   * Catch-up cursor (F7.T5): events with seq > sinceSeq, optionally scoped to a
+   * task (and its direct children). The in-memory `events` mirror the durable
+   * EventStore (rebuilt on load), so this works across server restarts.
+   */
+  getEventsSince(sinceSeq: number, taskId?: string): SwarmEvent[] {
+    return this.events.filter(
+      (e) => e.seq > sinceSeq && (!taskId || e.taskId === taskId || e.parentId === taskId),
+    );
+  }
+
+  /** Highest event seq emitted so far (the live cursor head). */
+  get latestSeq(): number {
+    return this.nextSeq - 1;
+  }
+
+  /**
+   * Append a human attachment to a task mid-conversation (F6.T4). Writes the
+   * bytes into the task's attachments/ dir, appends a user chat message carrying
+   * the AttachmentRef and emits MESSAGE_APPENDED so it is durable/replayable and
+   * the agent can read it on its next run. Dep-free (no multipart): the byte
+   * payload arrives as a Buffer decoded at the route boundary.
+   */
+  appendUserAttachment(taskId: string, fileName: string, data: Buffer, message?: string): AttachmentRef {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Task ${taskId} não encontrada`);
+    const ref = this.taskFileStore.writeAttachment(taskId, fileName, data);
+    const text = message?.trim() || `Anexo: ${ref.originalName}`;
+    task.appendChat('user', 'text', text, undefined, [ref]);
+    this.markTaskDirty(task);
+    this.recordEvent(SWARM_EVENT_TYPE.MESSAGE_APPENDED, {
+      task,
+      messages: [task.chat[task.chat.length - 1]],
+    });
+    // An attachment on a card awaiting the human is itself an answer → resume.
+    if (
+      (task.status === TASK_STATUS.WAITING &&
+        (task.waitingReason === 'human' || task.waitingReason === 'validation')) ||
+      task.status === TASK_STATUS.SUSPENDED
+    ) {
+      this.clearHumanDeadline(taskId);
+      task.setStatus(TASK_STATUS.PENDING, { force: true, waitingReason: undefined, failureReason: undefined });
+      task.activeRunId = undefined;
+      this.recordEvent(SWARM_EVENT_TYPE.TASK_RESUMED, { task });
+      this.persist();
+      this.emit('state:changed');
+      this.scheduleTask(taskId);
+      return ref;
+    }
+    this.persist();
+    this.emit('state:changed');
+    return ref;
   }
 
   /** Updates a task's runtime config (model/effort) and emits TASK_UPDATED. */
@@ -777,19 +900,175 @@ export class Orquestrator extends EventEmitter {
     return subtask;
   }
 
-  /**
-   * Only the orchestrator (Manager) decomposes work into subtasks. Specialized
-   * agents are leaf executors: they do the work and return, which keeps their
-   * context minimal and prevents trivial tasks from spawning runaway nesting.
-   */
+  requestSubtaskValidation(parentTask: Task, subtaskId: string, message: string): Task {
+    const subtask = this.requireDirectSubtask(parentTask, subtaskId);
+    const text = message.trim();
+    if (!text) throw new Error('Mensagem de validação vazia');
+
+    this.dequeue(subtask.taskId);
+    this.appendCreatorMessage(subtask, text);
+    // Parent-driven re-validation may reopen an already-completed subtask.
+    subtask.setStatus(TASK_STATUS.WAITING, { force: true, waitingReason: 'validation', failureReason: undefined });
+    subtask.activeRunId = undefined;
+    this.reopenWaitGroupsForSubtask(parentTask, subtask.taskId);
+    this.markTaskDirty(parentTask);
+    this.markTaskDirty(subtask);
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_WAITING, {
+      task: subtask,
+      payload: { waitingReason: 'validation', validatorTaskId: parentTask.taskId },
+    });
+    this.scheduler.rebuildWaitIndex(this.tasks);
+    this.persist();
+    this.emit('state:changed');
+    return subtask;
+  }
+
+  continueSubtask(parentTask: Task, subtaskId: string, message: string): Task {
+    const subtask = this.requireDirectSubtask(parentTask, subtaskId);
+    if (subtask.status !== TASK_STATUS.WAITING || subtask.waitingReason !== 'validation') {
+      throw new Error(`Subtask ${subtaskId} não está aguardando validação`);
+    }
+    const text = message.trim();
+    if (!text) throw new Error('Mensagem de continuação vazia');
+
+    this.appendCreatorMessage(subtask, text);
+    subtask.setStatus(TASK_STATUS.PENDING, { waitingReason: undefined });
+    subtask.activeRunId = undefined;
+    this.markTaskDirty(subtask);
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_RESUMED, { task: subtask });
+    this.persist();
+    this.emit('state:changed');
+    this.scheduleTask(subtask.taskId);
+    return subtask;
+  }
+
+  acceptSubtask(parentTask: Task, subtaskId: string, message?: string): Task {
+    const subtask = this.requireDirectSubtask(parentTask, subtaskId);
+    if (subtask.status === TASK_STATUS.COMPLETED) return subtask;
+
+    this.dequeue(subtask.taskId);
+    this.appendCreatorMessage(subtask, message);
+    subtask.setStatus(TASK_STATUS.COMPLETED, { force: true, waitingReason: undefined, failureReason: undefined });
+    subtask.activeRunId = undefined;
+    subtask.metrics.finishedAt = new Date().toISOString();
+    this.markTaskDirty(subtask);
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_COMPLETED, {
+      task: subtask,
+      messages: subtask.resultMessages,
+      payload: {
+        acceptedByTaskId: parentTask.taskId,
+        allowDuplicateTerminalEvent: true,
+      },
+    });
+    this.scheduler.rebuildWaitIndex(this.tasks);
+    this.persist();
+    this.emit('state:changed');
+    return subtask;
+  }
+
+  cancelSubtask(parentTask: Task, subtaskId: string, message?: string): Task {
+    const subtask = this.requireDirectSubtask(parentTask, subtaskId);
+    if (isTerminalTaskStatus(subtask.status)) return subtask;
+    this.dequeue(subtask.taskId);
+    this.appendCreatorMessage(subtask, message);
+    subtask.setStatus(TASK_STATUS.CANCELLED, { force: true, waitingReason: undefined, failureReason: 'cancelled_by_user' });
+    subtask.activeRunId = undefined;
+    subtask.metrics.finishedAt = new Date().toISOString();
+    this.markTaskDirty(subtask);
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_CANCELLED, {
+      task: subtask,
+      payload: {
+        cancelledByTaskId: parentTask.taskId,
+        allowDuplicateTerminalEvent: true,
+      },
+    });
+    this.scheduler.rebuildWaitIndex(this.tasks);
+    this.persist();
+    this.emit('state:changed');
+    return subtask;
+  }
+
   isOrchestrator(task: Task): boolean {
-    return task.options.assignedTo === MANAGER_AGENT;
+    return task.depth < MAX_TASK_DEPTH && task.subtaskIds.length < MAX_SUBTASKS_PER_TASK;
   }
 
   getSubtasks(task: Task): Task[] {
     return task.subtaskIds
       .map((tid) => this.tasks.get(tid))
       .filter((subtask): subtask is Task => Boolean(subtask));
+  }
+
+  private requireDirectSubtask(parentTask: Task, subtaskId: string): Task {
+    if (!parentTask.subtaskIds.includes(subtaskId)) {
+      throw new Error(`Task ${subtaskId} não é subtask direta de ${parentTask.taskId}`);
+    }
+    const subtask = this.tasks.get(subtaskId);
+    if (!subtask) throw new Error(`Subtask ${subtaskId} não encontrada`);
+    return subtask;
+  }
+
+  private appendCreatorMessage(task: Task, message?: string): void {
+    const text = message?.trim();
+    if (!text) return;
+    task.appendChat('user', 'text', text);
+    this.markTaskDirty(task);
+    this.recordEvent(SWARM_EVENT_TYPE.MESSAGE_APPENDED, {
+      task,
+      messages: [task.chat[task.chat.length - 1]],
+    });
+  }
+
+  /**
+   * Append a system-injected user instruction (retry/feedback/DoD) AND emit
+   * MESSAGE_APPENDED so a replay-from-events-only run reconstructs it faithfully
+   * (constraint #10 — no chat line bypasses the ledger).
+   */
+  private appendUserInstruction(task: Task, text: string, runtimeConfig?: RuntimeConfig): void {
+    task.appendChat('user', 'text', text, runtimeConfig);
+    this.markTaskDirty(task);
+    this.recordEvent(SWARM_EVENT_TYPE.MESSAGE_APPENDED, {
+      task,
+      messages: [task.chat[task.chat.length - 1]],
+    });
+  }
+
+  private reopenWaitGroupsForSubtask(parentTask: Task, subtaskId: string): void {
+    for (const run of parentTask.runs) {
+      for (const group of run.waitGroups) {
+        if (group.taskIds.includes(subtaskId)) {
+          group.status = WAIT_GROUP_STATUS.WAITING as 'WAITING';
+        }
+      }
+    }
+  }
+
+  /** Operational snapshot for /health (F7.T7) — observability for the operator. */
+  getOperationalStats(): {
+    running: number;
+    queued: number;
+    queueDepth: number;
+    activeRuns: number;
+    humanWaits: number;
+    waiting: number;
+    suspended: number;
+  } {
+    let waiting = 0;
+    let suspended = 0;
+    let activeRuns = 0;
+    for (const task of this.tasks.values()) {
+      if (task.status === TASK_STATUS.WAITING) waiting++;
+      if (task.status === TASK_STATUS.SUSPENDED) suspended++;
+      if (task.activeRunId) activeRuns++;
+    }
+    return {
+      running: this.runningTaskIds.size,
+      queued: this.queuedTaskIds.size,
+      queueDepth: this.taskQueue.length,
+      activeRuns,
+      humanWaits: this.humanDeadlines.size,
+      waiting,
+      suspended,
+    };
   }
 
   getRootTask(): Task | undefined {
@@ -852,7 +1131,7 @@ export class Orquestrator extends EventEmitter {
       this.queuedTaskIds.add(taskId);
       this.taskQueue.push(taskId);
       if (task.status !== TASK_STATUS.QUEUED) {
-        task.status = TASK_STATUS.QUEUED;
+        task.setStatus(TASK_STATUS.QUEUED);
         this.markTaskDirty(task);
         this.recordEvent(SWARM_EVENT_TYPE.TASK_QUEUED, { task });
         this.persist();
@@ -874,7 +1153,7 @@ export class Orquestrator extends EventEmitter {
     const startedAt = new Date().toISOString();
     const run = this.getOrCreateExecutionRun(task, startedAt);
     this.runningTaskIds.add(taskId);
-    task.status = TASK_STATUS.RUNNING;
+    task.setStatus(TASK_STATUS.RUNNING, { force: true, waitingReason: undefined });
     task.metrics.startedAt ??= startedAt;
     run.status = 'RUNNING';
     run.startedAt = startedAt;
@@ -906,12 +1185,49 @@ export class Orquestrator extends EventEmitter {
       task.metrics = addSessionStats(task.metrics, result.stats, startedAt, finishedAt);
       this.budget.trackUsage(task.taskId, result.stats.tokens?.input ?? 0, result.stats.tokens?.output ?? 0, result.stats.cost ?? 0);
       this.assertWithinBudget();
+      this.warnIfApproachingCeiling(task);
       this.assertWithinCardCeiling(task);
-      const decision = parseDecision(result.output);
-      // Check for stagnation before applying decision
-      const stagnationReason = this.checkForStagnation(task, result.output);
-      if (stagnationReason) {
+      let output = result.output;
+      let decision: AgentDecision;
+      try {
+        decision = parseDecision(output);
+      } catch (error) {
+        if (!(error instanceof AgentOutputInvalidError)) throw error;
+        this.recordInvalidAgentOutput(task, run, error);
+        const repairStartedAt = new Date().toISOString();
+        const repaired = await this.piClient.repairInvalidOutput(
+          agent,
+          task,
+          this,
+          error.message,
+          error.rawOutput,
+          controller.signal,
+        );
+        if (controller.signal.aborted || task.activeRunId !== run.runId || task.status !== TASK_STATUS.RUNNING) {
+          return;
+        }
+        const repairFinishedAt = new Date().toISOString();
+        task.metrics = addSessionStats(task.metrics, repaired.stats, repairStartedAt, repairFinishedAt);
+        this.budget.trackUsage(
+          task.taskId,
+          repaired.stats.tokens?.input ?? 0,
+          repaired.stats.tokens?.output ?? 0,
+          repaired.stats.cost ?? 0,
+        );
+        this.assertWithinBudget();
+        this.assertWithinCardCeiling(task);
+        output = repaired.output;
+        decision = parseDecision(output);
+      }
+      // Convergence monitor: break stagnation / endless-progression before applying.
+      const stagnationReason = this.checkForStagnation(task, output);
+      if (stagnationReason === 'stagnation') {
         this.failTask(task, run, 'Estagnação detectada: outputs muito similares entre epochs', 'stagnation');
+        this.persist();
+        return;
+      }
+      if (stagnationReason === 'max_epochs') {
+        this.failTask(task, run, 'Máximo de epochs sem completar atingido', 'attempts');
         this.persist();
         return;
       }
@@ -955,6 +1271,9 @@ export class Orquestrator extends EventEmitter {
       assignedTo: task.options.assignedTo,
       parentId: task.options.parentId,
       status: task.status,
+      waitingReason: task.waitingReason,
+      failureReason: task.failureReason,
+      evaluationVerdict: task.evaluationVerdict,
       depth: task.depth,
       maxDepth: MAX_TASK_DEPTH,
       canCreateSubtasks: task.depth < MAX_TASK_DEPTH && task.subtaskIds.length < MAX_SUBTASKS_PER_TASK,
@@ -990,7 +1309,8 @@ export class Orquestrator extends EventEmitter {
     return subtasks
       .map(
         (st) =>
-          `- ${st.taskId} ${st.options.title} (${st.options.assignedTo}) [${st.status}]: ` +
+          `- ${st.taskId} ${st.options.title} (${st.options.assignedTo}) [` +
+          `${st.waitingReason ? `${st.status}/${st.waitingReason}` : st.status}]: ` +
           `${formatMessages(st.resultMessages) || 'sem mensagens'}`,
       )
       .join('\n');
@@ -1008,6 +1328,7 @@ export class Orquestrator extends EventEmitter {
       title: md.title,
       assignedTo: md.assignedTo,
       status: md.status,
+      waitingReason: md.waitingReason,
       depth: md.depth,
       maxDepth: md.maxDepth,
       canCreateSubtasks: md.canCreateSubtasks,
@@ -1086,8 +1407,7 @@ export class Orquestrator extends EventEmitter {
 
   /**
    * Agent tools that mutate orchestration state (create_subtask, create_artifact).
-   * Returned as Pi-agnostic specs; the runner adapts them to Pi SDK tools so the
-   * Manager can actually decompose work into subtasks for specialized agents.
+   * Returned as Pi-agnostic specs; the runner adapts them to Pi SDK tools.
    */
   buildAgentTools(task: Task, includeDelegation: boolean): CustomToolSpec[] {
     const delegatable = this.getAgentNames().filter(
@@ -1095,8 +1415,7 @@ export class Orquestrator extends EventEmitter {
     );
     // post_message and create_artifact are available to EVERY agent (feedback and
     // file output are not orchestration). create_subtask is added only for tasks
-    // that orchestrate — executor subtasks just do the work and return, which
-    // keeps their context minimal and prevents runaway nesting.
+    // that still have delegation budget.
     const tools: CustomToolSpec[] = [
       {
         name: 'post_message',
@@ -1111,7 +1430,12 @@ export class Orquestrator extends EventEmitter {
           additionalProperties: false,
         },
         execute: async (params: Record<string, unknown>) => {
-          this.postAgentMessage(task, String(params.text));
+          const text = String(params.text);
+          // Idempotent on crash-resume: skip re-posting an identical line that is
+          // already the latest assistant message (the durable chat is the guard).
+          const last = task.chat[task.chat.length - 1];
+          if (last?.role === 'assistant' && last.text === text) return 'ok';
+          this.postAgentMessage(task, text);
           return 'ok';
         },
       },
@@ -1152,6 +1476,85 @@ export class Orquestrator extends EventEmitter {
           return JSON.stringify(this.toMetadata(subtask));
         },
       });
+    }
+    const directSubtaskIds = this.getSubtasks(task).map((subtask) => subtask.taskId);
+    if (directSubtaskIds.length > 0) {
+      tools.push(
+        {
+          name: 'request_subtask_validation',
+          description:
+            'Coloca uma subtask direta em WAITING/validation e registra nela o que está inválido. Use isto em vez de criar subtask RETRY.',
+          parameters: {
+            type: 'object',
+            properties: {
+              taskId: { type: 'string', enum: directSubtaskIds, description: 'TaskId da subtask direta.' },
+              message: { type: 'string', description: 'Feedback objetivo explicando o que não está válido.' },
+            },
+            required: ['taskId', 'message'],
+            additionalProperties: false,
+          },
+          execute: async (params: Record<string, unknown>) => {
+            const subtask = this.requestSubtaskValidation(task, String(params.taskId), String(params.message));
+            return JSON.stringify(this.toMetadata(subtask));
+          },
+        },
+        {
+          name: 'continue_subtask',
+          description:
+            'Responde uma subtask em WAITING/validation e agenda a mesma taskId para continuar. Não cria retry.',
+          parameters: {
+            type: 'object',
+            properties: {
+              taskId: { type: 'string', enum: directSubtaskIds, description: 'TaskId da subtask direta.' },
+              message: { type: 'string', description: 'Instrução objetiva para a subtask continuar.' },
+            },
+            required: ['taskId', 'message'],
+            additionalProperties: false,
+          },
+          execute: async (params: Record<string, unknown>) => {
+            const subtask = this.continueSubtask(task, String(params.taskId), String(params.message));
+            return JSON.stringify(this.toMetadata(subtask));
+          },
+        },
+        {
+          name: 'accept_subtask',
+          description:
+            'Aceita a entrega atual de uma subtask direta e marca a própria subtask como COMPLETED.',
+          parameters: {
+            type: 'object',
+            properties: {
+              taskId: { type: 'string', enum: directSubtaskIds, description: 'TaskId da subtask direta.' },
+              message: { type: 'string', description: 'Comentário opcional de aceite.' },
+            },
+            required: ['taskId'],
+            additionalProperties: false,
+          },
+          execute: async (params: Record<string, unknown>) => {
+            const message = typeof params.message === 'string' ? params.message : undefined;
+            const subtask = this.acceptSubtask(task, String(params.taskId), message);
+            return JSON.stringify(this.toMetadata(subtask));
+          },
+        },
+        {
+          name: 'cancel_subtask',
+          description:
+            'Cancela uma subtask direta após validação do criador.',
+          parameters: {
+            type: 'object',
+            properties: {
+              taskId: { type: 'string', enum: directSubtaskIds, description: 'TaskId da subtask direta.' },
+              message: { type: 'string', description: 'Comentário opcional de cancelamento.' },
+            },
+            required: ['taskId'],
+            additionalProperties: false,
+          },
+          execute: async (params: Record<string, unknown>) => {
+            const message = typeof params.message === 'string' ? params.message : undefined;
+            const subtask = this.cancelSubtask(task, String(params.taskId), message);
+            return JSON.stringify(this.toMetadata(subtask));
+          },
+        },
+      );
     }
     tools.push({
         name: 'create_artifact',
@@ -1198,13 +1601,13 @@ export class Orquestrator extends EventEmitter {
           task,
           messages: [task.chat[task.chat.length - 1]],
         });
-        // Park task in WAITING(human)
-        task.status = TASK_STATUS.WAITING;
-        task.waitingReason = 'human';
+        // Park task in WAITING(human) + register a deadline for the timeout monitor.
+        task.setStatus(TASK_STATUS.WAITING, { force: true, waitingReason: 'human' });
+        this.registerHumanDeadline(task);
         this.markTaskDirty(task);
         this.recordEvent(SWARM_EVENT_TYPE.TASK_WAITING, {
           task,
-          payload: { waitingReason: 'human' },
+          payload: { waitingReason: 'human', deadline: this.humanDeadlines.get(task.taskId) },
         });
         this.persist();
         this.emit('state:changed');
@@ -1226,8 +1629,12 @@ export class Orquestrator extends EventEmitter {
     for (const taskId of this.runningTaskIds) {
       const task = this.tasks.get(taskId);
       if (!task || isTerminalTaskStatus(task.status)) continue;
-      task.status = TASK_STATUS.PENDING;
+      task.setStatus(TASK_STATUS.PENDING, { force: true });
       this.markTaskDirty(task);
+    }
+    if (this.deadlineTimer) {
+      clearInterval(this.deadlineTimer);
+      this.deadlineTimer = undefined;
     }
     this.persist();
     this.emit('state:changed');
@@ -1332,7 +1739,7 @@ export class Orquestrator extends EventEmitter {
 
   private pumpQueue(): void {
     if (this.shuttingDown) return;
-    while (this.runningTaskIds.size < MAX_CONCURRENCY && this.taskQueue.length > 0) {
+    while (this.taskQueue.length > 0) {
       const taskId = this.taskQueue.shift();
       if (!taskId) continue;
       this.queuedTaskIds.delete(taskId);
@@ -1363,25 +1770,23 @@ export class Orquestrator extends EventEmitter {
         task.resultMessages = task.appendAgentMessages([
           { type: 'text', text: `Retry maximo atingido: ${decision.instructions ?? ''}` },
         ]);
-        this.failTask(task, run, 'Retry maximo atingido');
+        this.failTask(task, run, 'Retry maximo atingido', 'attempts');
         this.persist();
         return;
       }
 
       const rc = normalizeRuntimeConfig({ model: decision.model, effort: decision.effort }, this.allowedModels);
       task.retryCount += 1;
-      task.status = TASK_STATUS.PENDING;
+      task.setStatus(TASK_STATUS.PENDING, { waitingReason: undefined });
       // Auto-escalate if agent didn't explicitly request a change
       const currentConfig = this.resolveRuntimeConfig(task, this.agents.get(task.options.assignedTo));
       const effectiveRc = rc ?? escalateConfig(currentConfig);
       task.options.runtimeConfig = { ...(task.options.runtimeConfig ?? {}), ...effectiveRc };
-      task.appendChat(
-        'user',
-        'text',
+      this.appendUserInstruction(
+        task,
         decision.instructions ?? 'Reexecute a task com a configuracao atualizada.',
         rc,
       );
-      this.markTaskDirty(task);
       this.recordEvent(SWARM_EVENT_TYPE.TASK_RETRY_REQUESTED, {
         task,
         runId: run.runId,
@@ -1403,7 +1808,7 @@ export class Orquestrator extends EventEmitter {
       task.resultMessages = task.appendAgentMessages(decision.messages);
       this.startOrUpdateWaitRun(task, run, waitGroups, task.resultMessages);
       this.announceDelegation(task, waitGroups);
-      task.status = TASK_STATUS.WAITING;
+      task.setStatus(TASK_STATUS.WAITING, { force: true, waitingReason: 'subtasks' });
       this.markTaskDirty(task);
       this.recordEvent(SWARM_EVENT_TYPE.TASK_WAITING, {
         task,
@@ -1444,14 +1849,13 @@ export class Orquestrator extends EventEmitter {
       if (!isSimpleTask) {
         // Force retry with delegation instruction
         task.retryCount += 1;
-        task.status = TASK_STATUS.PENDING;
-        task.appendChat(
-          'user', 'text',
+        task.setStatus(TASK_STATUS.PENDING, { waitingReason: undefined });
+        this.appendUserInstruction(
+          task,
           'Voce e o ORQUESTRADOR. NAO faca o trabalho diretamente. ' +
           'Crie subtasks via create_subtask para cada parte do trabalho, delegue aos agentes especializados, ' +
           'e retorne status waiting com waitGroups. So responda completed depois de consolidar os resultados das subtasks.',
         );
-        this.markTaskDirty(task);
         this.recordEvent(SWARM_EVENT_TYPE.TASK_RETRY_REQUESTED, {
           task, runId: run.runId,
           payload: { reason: 'Manager completou sem delegar - forçando retry com instrução de delegação' },
@@ -1466,8 +1870,26 @@ export class Orquestrator extends EventEmitter {
       }
     }
 
+    // Independent-evaluation gate (§8.2): a Manager root that produced work must
+    // pass through segregated QA + Code Reviewer subtasks before it can reach
+    // REVIEW. The first time we hit completion we spawn the evaluators and wait;
+    // when they approve, completion proceeds. Disabled by default (andaime §1.2).
+    if (
+      isManagerRoot &&
+      this.evaluationEnabled &&
+      this.requiresEvaluation(task) &&
+      !this.hasDoubleApproval(task) &&
+      !this.hasPendingEvaluators(task)
+    ) {
+      this.spawnEvaluators(task, run, decision.messages, triggerEvents);
+      return;
+    }
+
     // Sanitize result messages: remove raw technical errors before showing to user
     const sanitizedMessages = sanitizeMessages(decision.messages);
+
+    // Record an evaluator's verdict (QA / Code Reviewer subtask) for the gate.
+    if (decision.verdict) task.evaluationVerdict = decision.verdict;
 
     this.markEventsProcessed(task, triggerEvents);
     task.resultMessages = task.appendAgentMessages(sanitizedMessages);
@@ -1482,14 +1904,40 @@ export class Orquestrator extends EventEmitter {
     // hands it off to Revisão (REVIEW); the user later completes or reopens it.
     // Subtasks (and non-Manager roots) complete normally so wait groups resolve.
     if (isManagerRoot) {
-      task.status = TASK_STATUS.REVIEW;
+      // Definition of Done (§11): gate the REVIEW handoff. If unmet, send back for
+      // correction (bounded by retries) instead of declaring victory prematurely.
+      const dod = this.checkDoD(task);
+      if (!dod.passed && task.retryCount < MAX_TASK_RETRIES) {
+        task.retryCount += 1;
+        task.setStatus(TASK_STATUS.PENDING, { force: true, waitingReason: undefined });
+        task.activeRunId = undefined;
+        this.appendUserInstruction(
+          task,
+          `Definition of Done nao satisfeita: ${dod.failures.join('; ')}. Corrija e conclua novamente.`,
+        );
+        this.recordEvent(SWARM_EVENT_TYPE.TASK_RETRY_REQUESTED, {
+          task,
+          runId: run.runId,
+          payload: { reason: `DoD: ${dod.failures.join('; ')}`, dod: true },
+        });
+        this.recordEvent(SWARM_EVENT_TYPE.TASK_RETRIED, {
+          task,
+          runId: run.runId,
+          payload: { retryCount: task.retryCount },
+        });
+        this.persist();
+        this.scheduleTask(task.taskId);
+        return;
+      }
+      this.recordClosingProgressEntry(task, dod);
+      task.setStatus(TASK_STATUS.REVIEW, { force: true, waitingReason: undefined });
       this.recordEvent(SWARM_EVENT_TYPE.TASK_REVIEW, {
         task,
         runId: run.runId,
         messages: task.resultMessages,
       });
     } else {
-      task.status = TASK_STATUS.COMPLETED;
+      task.setStatus(TASK_STATUS.COMPLETED, { force: true, waitingReason: undefined });
       this.recordEvent(SWARM_EVENT_TYPE.TASK_COMPLETED, {
         task,
         runId: run.runId,
@@ -1499,20 +1947,31 @@ export class Orquestrator extends EventEmitter {
     this.persist();
   }
 
-  /** Check Definition of Done before allowing REVIEW/COMPLETED. */
+  /**
+   * Definition of Done (§11) gate, enforced before a Manager root reaches REVIEW.
+   * Checks the cumulative, machine-verifiable criteria:
+   *  - tree closure (no open subtasks),
+   *  - independent evaluation (QA + Code Reviewer both approved, when required),
+   *  - artifact integrity (every declared artifact exists on disk),
+   *  - budget sanity,
+   *  - memory consolidation (a closing progress-log entry).
+   * The auto-seeded single scope-spec item is advisory (the agent rarely flips
+   * it), so it never hard-blocks; an explicit multi-item scope-spec does.
+   */
   private checkDoD(task: Task): { passed: boolean; failures: string[] } {
     const failures: string[] = [];
 
-    // 1. Scope-spec all satisfied
+    // 1. Explicit (decomposed) scope-spec must be fully satisfied. A lone
+    //    auto-seeded item stays advisory so it never blocks indefinitely.
     const scopeSpec = this.taskFileStore.loadScopeSpec(task.taskId);
-    if (scopeSpec.length > 0) {
+    if (scopeSpec.length > 1) {
       const unsatisfied = scopeSpec.filter((item) => !item.satisfied);
       if (unsatisfied.length > 0) {
         failures.push(`Scope-spec incompleto: ${unsatisfied.length} itens nao atendidos`);
       }
     }
 
-    // 2. No open subtasks
+    // 2. Tree closure — no open subtasks.
     const openSubtasks = task.subtaskIds.filter((id) => {
       const st = this.tasks.get(id);
       return st && !isTerminalTaskStatus(st.status);
@@ -1521,7 +1980,19 @@ export class Orquestrator extends EventEmitter {
       failures.push(`${openSubtasks.length} subtasks ainda abertas`);
     }
 
-    // 3. Within budget
+    // 3. Independent evaluation gate (when required by routing).
+    if (this.evaluationEnabled && this.requiresEvaluation(task) && !this.hasDoubleApproval(task)) {
+      failures.push('Avaliacao independente pendente (QA + Code Reviewer devem aprovar)');
+    }
+
+    // 4. Artifact integrity — every declared artifact exists on disk.
+    for (const artifact of task.artifacts) {
+      if (!existsSync(this.sandbox.resolve(artifact.path))) {
+        failures.push(`Artefato declarado ausente em disco: ${artifact.path}`);
+      }
+    }
+
+    // 5. Budget sanity.
     if (!this.budget.isWithinBudget()) {
       failures.push('Budget global excedido');
     }
@@ -1549,7 +2020,7 @@ export class Orquestrator extends EventEmitter {
     if (messages.length > 0) task.resultMessages = task.appendAgentMessages(messages);
     this.startOrUpdateWaitRun(task, run, waitGroups, task.resultMessages);
     this.announceDelegation(task, waitGroups);
-    task.status = TASK_STATUS.WAITING;
+    task.setStatus(TASK_STATUS.WAITING, { force: true, waitingReason: 'subtasks' });
     this.markTaskDirty(task);
     this.recordEvent(SWARM_EVENT_TYPE.TASK_WAITING, {
       task,
@@ -1558,6 +2029,14 @@ export class Orquestrator extends EventEmitter {
     });
     this.persist();
     this.resumeIfWaitSatisfied(task);
+  }
+
+  private recordInvalidAgentOutput(task: Task, run: TaskRun, error: AgentOutputInvalidError): void {
+    this.recordEvent(SWARM_EVENT_TYPE.AGENT_OUTPUT_INVALID, {
+      task,
+      runId: run.runId,
+      payload: { error: error.message, output: error.rawOutput.slice(0, 4000) },
+    });
   }
 
   private handleRunFailure(
@@ -1586,11 +2065,7 @@ export class Orquestrator extends EventEmitter {
       this.recordEvent(SWARM_EVENT_TYPE.RUN_FAILED, { task, runId: run.runId, payload: { error: message } });
     }
     if (isInvalidOutput) {
-      this.recordEvent(SWARM_EVENT_TYPE.AGENT_OUTPUT_INVALID, {
-        task,
-        runId: run.runId,
-        payload: { error: message, output: (error as AgentOutputInvalidError).rawOutput.slice(0, 4000) },
-      });
+      this.recordInvalidAgentOutput(task, run, error as AgentOutputInvalidError);
     }
     if (isBudget) {
       this.recordEvent(SWARM_EVENT_TYPE.BUDGET_EXCEEDED, { task, runId: run.runId, payload: { error: message } });
@@ -1617,13 +2092,16 @@ export class Orquestrator extends EventEmitter {
 
     if (!isBudget && task.technicalRetryCount < MAX_TECHNICAL_RETRIES) {
       task.technicalRetryCount += 1;
-      task.status = TASK_STATUS.PENDING;
-      task.appendChat(
-        'user',
-        'text',
+      // Auto-escalate model/effort on repeated technical failures (§3.2).
+      if (task.technicalRetryCount >= 1) {
+        const escalated = escalateConfig(this.resolveRuntimeConfig(task, this.agents.get(task.options.assignedTo)));
+        task.options.runtimeConfig = { ...(task.options.runtimeConfig ?? {}), ...escalated };
+      }
+      task.setStatus(TASK_STATUS.PENDING, { force: true, waitingReason: undefined });
+      this.appendUserInstruction(
+        task,
         `A execucao anterior falhou: ${sanitizeErrorMessage(message)}. Reexecute mantendo o objetivo original. Retorne somente JSON puro valido no contrato especificado.`,
       );
-      this.markTaskDirty(task);
       this.recordEvent(SWARM_EVENT_TYPE.TASK_RETRY_REQUESTED, {
         task,
         runId: run.runId,
@@ -1642,13 +2120,15 @@ export class Orquestrator extends EventEmitter {
     task.resultMessages = task.appendAgentMessages([
       { type: 'text', text: `Falha ao executar task. ${sanitizeErrorMessage(message)}` },
     ]);
-    this.failTask(task, run, message);
+    // Map the terminal reason per the canonical motivo→estado table (§3 PLAN).
+    const failureReason = error instanceof CeilingExceededError || isBudget ? 'ceiling' : 'attempts';
+    this.failTask(task, run, message, failureReason);
     this.persist();
   }
 
   private failTask(task: Task, run: TaskRun, reason: string, failureReason?: import('../domain/task.js').FailureReason): void {
-    task.status = TASK_STATUS.FAILED;
-    task.failureReason = failureReason;
+    // Failure is a sink: force the transition (it must never itself throw).
+    task.setStatus(TASK_STATUS.FAILED, { force: true, waitingReason: undefined, failureReason });
     task.metrics.finishedAt = new Date().toISOString();
     run.status = 'FAILED';
     run.completedAt = run.completedAt ?? new Date().toISOString();
@@ -1659,9 +2139,180 @@ export class Orquestrator extends EventEmitter {
       task,
       runId: run.runId,
       messages: task.resultMessages,
-      payload: { error: reason },
+      payload: { error: reason, ...(failureReason ? { failureReason } : {}) },
     });
     this.scheduler.rebuildWaitIndex(this.tasks);
+  }
+
+  // -----------------------------------------------------------------------
+  // Private: human-in-the-loop deadlines (§10.6)
+  // -----------------------------------------------------------------------
+
+  /** Register (or refresh) the SUSPENDED deadline for a WAITING(human) card. */
+  private registerHumanDeadline(task: Task): void {
+    const deadline = new Date(Date.now() + HUMAN_TIMEOUT_MS).toISOString();
+    this.humanDeadlines.set(task.taskId, deadline);
+    this.ensureDeadlineMonitor();
+  }
+
+  private clearHumanDeadline(taskId: string): void {
+    this.humanDeadlines.delete(taskId);
+  }
+
+  private ensureDeadlineMonitor(): void {
+    if (this.deadlineTimer || this.shuttingDown) return;
+    this.deadlineTimer = setInterval(() => this.checkHumanDeadlines(), DEADLINE_SWEEP_MS);
+    // Do not keep the event loop alive solely for the sweep (tests, CLI runs).
+    this.deadlineTimer.unref?.();
+  }
+
+  /**
+   * Sweep WAITING(human) cards whose deadline elapsed → SUSPENDED (§10.6).
+   * Exposed for deterministic testing with an injected clock.
+   */
+  checkHumanDeadlines(now: number = Date.now()): void {
+    let changed = false;
+    for (const [taskId, deadline] of [...this.humanDeadlines.entries()]) {
+      const task = this.tasks.get(taskId);
+      if (!task || task.status !== TASK_STATUS.WAITING || task.waitingReason !== 'human') {
+        this.humanDeadlines.delete(taskId);
+        continue;
+      }
+      if (now >= new Date(deadline).getTime()) {
+        task.setStatus(TASK_STATUS.SUSPENDED, { force: true, failureReason: 'human_timeout' });
+        task.activeRunId = undefined;
+        this.humanDeadlines.delete(taskId);
+        this.markTaskDirty(task);
+        this.recordEvent(SWARM_EVENT_TYPE.TASK_SUSPENDED, {
+          task,
+          payload: { reason: 'human_timeout' },
+        });
+        changed = true;
+      }
+    }
+    if (this.humanDeadlines.size === 0 && this.deadlineTimer) {
+      clearInterval(this.deadlineTimer);
+      this.deadlineTimer = undefined;
+    }
+    if (changed) {
+      this.scheduler.rebuildWaitIndex(this.tasks);
+      this.persist();
+      this.emit('state:changed');
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Private: independent evaluation gate (§8.2/§11) — opt-in
+  // -----------------------------------------------------------------------
+
+  private static readonly MAX_EVAL_ROUNDS = 2;
+  private evaluationRounds = new Map<string, number>();
+
+  private evaluatorAgents(): string[] {
+    return ['Code Reviewer', 'QA'].filter((name) => this.agents.has(name));
+  }
+
+  private requiresEvaluation(task: Task): boolean {
+    return (
+      !task.options.parentId &&
+      task.options.assignedTo === MANAGER_AGENT &&
+      (task.artifacts.length > 0 || task.subtaskIds.length > 0)
+    );
+  }
+
+  private directEvaluators(task: Task): Task[] {
+    const names = new Set(this.evaluatorAgents());
+    return this.getSubtasks(task).filter((st) => names.has(st.options.assignedTo));
+  }
+
+  private hasPendingEvaluators(task: Task): boolean {
+    return this.directEvaluators(task).some((st) => !isTerminalTaskStatus(st.status));
+  }
+
+  /** Both QA and Code Reviewer (their latest round) completed with verdict approved. */
+  private hasDoubleApproval(task: Task): boolean {
+    const evaluators = this.evaluatorAgents();
+    if (evaluators.length === 0) return true; // none configured → no gate
+    return evaluators.every((name) => {
+      const subs = this.directEvaluators(task).filter((st) => st.options.assignedTo === name);
+      const latest = subs[subs.length - 1];
+      return Boolean(
+        latest && latest.status === TASK_STATUS.COMPLETED && latest.evaluationVerdict === 'approved',
+      );
+    });
+  }
+
+  /**
+   * Spawn segregated QA + Code Reviewer subtasks over the produced work and park
+   * the Manager waiting on them. Bounded by MAX_EVAL_ROUNDS so cross-rejection
+   * can't loop forever (it also surfaces to the convergence monitor via epochs).
+   */
+  private spawnEvaluators(
+    task: Task,
+    run: TaskRun,
+    messages: AgentOutputMessage[],
+    triggerEvents: SwarmEvent[],
+  ): void {
+    const round = (this.evaluationRounds.get(task.taskId) ?? 0) + 1;
+    this.evaluationRounds.set(task.taskId, round);
+    if (round > Orquestrator.MAX_EVAL_ROUNDS) {
+      // Did not converge — fall through to the normal completion path (the gate
+      // is satisfied by giving up, so the human reviewer decides).
+      this.postAgentMessage(
+        task,
+        'Avaliacao independente nao convergiu apos os rounds configurados; encaminhando para revisao humana.',
+      );
+      this.evaluationRounds.delete(task.taskId);
+      this.finishManagerReview(task, run, messages, triggerEvents);
+      return;
+    }
+    const artifactList = task.artifacts.map((a) => `- ${a.path} (${a.fileType}): ${a.description}`).join('\n');
+    const reviewContext = [
+      'Avalie o trabalho entregue de forma CETICA e independente.',
+      'Resultado do executor:',
+      ...messages.map((m) => m.text ?? ''),
+      artifactList ? `Artefatos:\n${artifactList}` : 'Sem artefatos.',
+      'Retorne JSON com verdict ("approved" ou "rejected"), criteria[] e feedback acionavel.',
+    ].join('\n');
+
+    const created: string[] = [];
+    for (const name of this.evaluatorAgents()) {
+      const title = `${name}: revisao (round ${round})`;
+      const sub = this.spawnSubtask(task, name, title, reviewContext);
+      created.push(sub.taskId);
+    }
+    this.postAgentMessage(task, `Avaliacao independente: delegada a ${this.evaluatorAgents().join(' + ')}.`);
+    this.coerceToWait(task, run, messages, created, triggerEvents, 'avaliacao independente');
+  }
+
+  /** Normal Manager → REVIEW handoff (shared by the gate's give-up path). */
+  private finishManagerReview(
+    task: Task,
+    run: TaskRun,
+    messages: AgentOutputMessage[],
+    triggerEvents: SwarmEvent[],
+  ): void {
+    this.markEventsProcessed(task, triggerEvents);
+    task.resultMessages = task.appendAgentMessages(sanitizeMessages(messages));
+    this.completeActiveRun(task, run);
+    this.markTaskDirty(task);
+    this.recordEvent(SWARM_EVENT_TYPE.RUN_COMPLETED, { task, runId: run.runId, messages: task.resultMessages });
+    const dod = this.checkDoD(task);
+    this.recordClosingProgressEntry(task, dod);
+    task.setStatus(TASK_STATUS.REVIEW, { force: true, waitingReason: undefined });
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_REVIEW, { task, runId: run.runId, messages: task.resultMessages });
+    this.persist();
+  }
+
+  /** Memory consolidation (§11): write a closing entry to the progress-log. */
+  private recordClosingProgressEntry(task: Task, dod: { passed: boolean; failures: string[] }): void {
+    const summary = task.resultMessages.map((m) => m.text ?? '').join(' ').slice(0, 500);
+    this.taskFileStore.appendProgressLog(task.taskId, {
+      ts: new Date().toISOString(),
+      epoch: task.runs.length,
+      action: 'closing',
+      detail: `DoD=${dod.passed ? 'ok' : dod.failures.join('; ')}; resumo=${summary}`,
+    });
   }
 
   // -----------------------------------------------------------------------
@@ -1907,6 +2558,9 @@ export class Orquestrator extends EventEmitter {
       runId: this.nextId('run'),
       status: 'RUNNING',
       epoch: task.runs.length + 1,
+      // Immutable governance snapshot for this run (§1.5).
+      governance: { ...this.governance },
+      idempotencyKeys: [],
       waitGroups: [],
       resultMessages: [],
       createdAt: startedAt,
@@ -1965,6 +2619,8 @@ export class Orquestrator extends EventEmitter {
         payload: { group },
       });
     }
+    // Epoch boundary (parked waiting) → heartbeat with accumulated metrics.
+    this.emitHeartbeat(task, run);
   }
 
   private completeActiveRun(task: Task, run: TaskRun): void {
@@ -1973,7 +2629,28 @@ export class Orquestrator extends EventEmitter {
     run.checkpointSeq = this.nextSeq - 1; // last event seq
     for (const group of run.waitGroups) group.status = WAIT_GROUP_STATUS.PROCESSED;
     task.activeRunId = undefined;
+    this.emitHeartbeat(task, run);
     this.scheduler.rebuildWaitIndex(this.tasks);
+  }
+
+  /**
+   * Heartbeat between epochs (§3.6): publishes accumulated consumption metrics
+   * and the epoch checkpoint seq so the UI/telemetry stays observable and a
+   * restart can reason about the last valid checkpoint.
+   */
+  private emitHeartbeat(task: Task, run: TaskRun): void {
+    run.checkpointSeq = run.checkpointSeq ?? this.nextSeq - 1;
+    this.recordEvent(SWARM_EVENT_TYPE.HEARTBEAT, {
+      task,
+      runId: run.runId,
+      payload: {
+        epoch: run.epoch,
+        checkpointSeq: run.checkpointSeq,
+        tokens: task.metrics.tokens,
+        cost: task.metrics.cost,
+        durationMs: task.metrics.durationMs,
+      },
+    });
   }
 
   // -----------------------------------------------------------------------
@@ -2094,37 +2771,98 @@ export class Orquestrator extends EventEmitter {
       if (event.taskId) {
         const task = this.tasks.get(event.taskId);
         if (!task) continue;
-        // Status transitions
+        // Status transitions (force: restoration, not a live transition).
         if (event.type === SWARM_EVENT_TYPE.TASK_QUEUED) task.status = TASK_STATUS.QUEUED;
         if (event.type === SWARM_EVENT_TYPE.TASK_STARTED) task.status = TASK_STATUS.RUNNING;
-        if (event.type === SWARM_EVENT_TYPE.TASK_WAITING) task.status = TASK_STATUS.WAITING;
-        if (event.type === SWARM_EVENT_TYPE.TASK_SUSPENDED) task.status = TASK_STATUS.SUSPENDED;
-        if (event.type === SWARM_EVENT_TYPE.TASK_COMPLETED) task.status = TASK_STATUS.COMPLETED;
+        if (event.type === SWARM_EVENT_TYPE.TASK_WAITING) {
+          task.status = TASK_STATUS.WAITING;
+          task.waitingReason =
+            (event.payload?.waitingReason as import('../domain/task.js').TaskWaitingReason | undefined) ??
+            task.waitingReason ?? 'subtasks';
+        }
+        if (event.type === SWARM_EVENT_TYPE.TASK_SUSPENDED) {
+          task.status = TASK_STATUS.SUSPENDED;
+          task.failureReason = 'human_timeout';
+        }
+        if (event.type === SWARM_EVENT_TYPE.TASK_RESUMED) {
+          task.status = TASK_STATUS.PENDING;
+          task.waitingReason = undefined;
+          task.failureReason = undefined;
+        }
+        if (event.type === SWARM_EVENT_TYPE.TASK_COMPLETED) {
+          task.status = TASK_STATUS.COMPLETED;
+          task.waitingReason = undefined;
+        }
         if (event.type === SWARM_EVENT_TYPE.TASK_FAILED) {
           task.status = TASK_STATUS.FAILED;
-          task.failureReason = (event.payload?.failureReason as import('../domain/task.js').FailureReason) ?? undefined;
+          task.failureReason = (event.payload?.failureReason as import('../domain/task.js').FailureReason) ?? task.failureReason;
         }
         if (event.type === SWARM_EVENT_TYPE.TASK_CANCELLED) {
           task.status = TASK_STATUS.CANCELLED;
           task.failureReason = 'cancelled_by_user';
         }
         if (event.type === SWARM_EVENT_TYPE.TASK_REVIEW) task.status = TASK_STATUS.REVIEW;
-        // Chat reconstruction from events
-        if (event.type === SWARM_EVENT_TYPE.MESSAGE_APPENDED && event.messages) {
+        // --- Run reconstruction (epochs + wait groups) ---
+        if (event.type === SWARM_EVENT_TYPE.RUN_STARTED && event.runId) {
+          if (!task.runs.some((r) => r.runId === event.runId)) {
+            task.runs.push({
+              runId: event.runId,
+              status: 'RUNNING',
+              epoch: task.runs.length + 1,
+              waitGroups: [],
+              resultMessages: [],
+              createdAt: event.ts,
+              startedAt: event.ts,
+            });
+          }
+          task.activeRunId = event.runId;
+        }
+        if (event.type === SWARM_EVENT_TYPE.WAIT_GROUP_REGISTERED && event.runId && event.payload?.group) {
+          const run = task.runs.find((r) => r.runId === event.runId);
+          const g = event.payload.group as AgentWaitGroup;
+          if (run && !run.waitGroups.some((wg) => wg.waitId === g.waitId)) {
+            run.waitGroups.push({ waitId: g.waitId, mode: g.mode, taskIds: [...g.taskIds], processedEventIds: [], status: WAIT_GROUP_STATUS.WAITING as 'WAITING' });
+            run.status = 'WAITING';
+            task.activeRunId = event.runId;
+          }
+        }
+        if ((event.type === SWARM_EVENT_TYPE.RUN_COMPLETED) && event.runId) {
+          const run = task.runs.find((r) => r.runId === event.runId);
+          if (run) { run.status = 'COMPLETED'; run.completedAt = event.ts; for (const wg of run.waitGroups) wg.status = WAIT_GROUP_STATUS.PROCESSED; }
+          if (task.activeRunId === event.runId) task.activeRunId = undefined;
+        }
+        if ((event.type === SWARM_EVENT_TYPE.RUN_FAILED || event.type === SWARM_EVENT_TYPE.RUN_TIMEOUT) && event.runId) {
+          const run = task.runs.find((r) => r.runId === event.runId);
+          if (run) { run.status = event.type === SWARM_EVENT_TYPE.RUN_TIMEOUT ? 'TIMEOUT' : 'FAILED'; run.completedAt = event.ts; }
+        }
+        // --- Metrics reconstruction from heartbeat (latest wins) ---
+        if (event.type === SWARM_EVENT_TYPE.HEARTBEAT && event.payload) {
+          const tokens = event.payload.tokens as TaskMetrics['tokens'] | undefined;
+          if (tokens) task.metrics.tokens = { ...tokens };
+          if (typeof event.payload.cost === 'number') task.metrics.cost = event.payload.cost;
+          if (typeof event.payload.durationMs === 'number') task.metrics.durationMs = event.payload.durationMs;
+        }
+        // Chat reconstruction from MESSAGE_APPENDED + terminal/run message payloads.
+        const chatBearing =
+          event.type === SWARM_EVENT_TYPE.MESSAGE_APPENDED ||
+          event.type === SWARM_EVENT_TYPE.RUN_COMPLETED ||
+          event.type === SWARM_EVENT_TYPE.TASK_COMPLETED ||
+          event.type === SWARM_EVENT_TYPE.TASK_REVIEW ||
+          event.type === SWARM_EVENT_TYPE.TASK_FAILED;
+        if (chatBearing && event.messages) {
           for (const msg of event.messages) {
-            const exists = task.chat.some((c) => c.ts === msg.ts && c.role === msg.role && c.text === msg.text);
+            const exists = task.chat.some(
+              (c) => (msg.eventId && c.eventId === msg.eventId) || (c.ts === msg.ts && c.role === msg.role && c.text === msg.text),
+            );
             if (!exists) task.chat.push(msg);
           }
+          if (event.type !== SWARM_EVENT_TYPE.MESSAGE_APPENDED) task.resultMessages = event.messages;
         }
         // Artifact reconstruction
         if (event.type === SWARM_EVENT_TYPE.ARTIFACT_CREATED && event.payload?.artifact) {
           const artifact = event.payload.artifact as import('../domain/task.js').TaskArtifact;
           const exists = task.artifacts.some((a) => a.path === artifact.path);
           if (!exists) task.artifacts.push(artifact);
-        }
-        // Failure reason from TASK_FAILED payload
-        if (event.type === SWARM_EVENT_TYPE.TASK_FAILED && event.payload?.failureReason) {
-          task.failureReason = event.payload.failureReason as import('../domain/task.js').FailureReason;
         }
       }
     }
@@ -2161,13 +2899,19 @@ export class Orquestrator extends EventEmitter {
   private recoverStatusesAfterCrash(): void {
     for (const task of this.tasks.values()) {
       if (task.status === TASK_STATUS.RUNNING || task.status === TASK_STATUS.QUEUED) {
-        task.status = TASK_STATUS.PENDING;
+        task.setStatus(TASK_STATUS.PENDING, { force: true });
         this.markTaskDirty(task);
       }
-      if (task.status === TASK_STATUS.WAITING && !this.hasValidActiveWait(task)) {
-        task.status = TASK_STATUS.PENDING;
+      if (task.status === TASK_STATUS.WAITING && task.waitingReason !== 'human' && !this.hasValidActiveWait(task)) {
+        // WAITING(human) is preserved across restart (the deadline monitor still
+        // tracks it); only stale subtask-waits with no live dependency are reset.
+        task.setStatus(TASK_STATUS.PENDING, { force: true });
         task.activeRunId = undefined;
         this.markTaskDirty(task);
+      }
+      // Re-register human deadlines so the timeout survives a restart.
+      if (task.status === TASK_STATUS.WAITING && task.waitingReason === 'human') {
+        this.registerHumanDeadline(task);
       }
     }
     this.flushDirtyTasks();
@@ -2199,8 +2943,16 @@ export class Orquestrator extends EventEmitter {
     ]);
   }
 
-  /** Check if task has stagnated across consecutive runs. */
-  private checkForStagnation(task: Task, currentOutput: string): 'stagnation' | null {
+  /**
+   * Convergence monitor (§5.3 / §10.3). Returns:
+   *  - 'max_epochs' when the card burned more epochs than allowed without ever
+   *    completing (divergent-but-never-converging "endless progression", PF4),
+   *  - 'stagnation' when recent epochs are near-identical (circular iteration),
+   *  - null otherwise (productive iteration).
+   */
+  private checkForStagnation(task: Task, currentOutput: string): 'stagnation' | 'max_epochs' | null {
+    const gov = this.getActiveRun(task)?.governance ?? this.governance;
+    if (task.runs.length >= gov.maxEpochsWithoutCompletion) return 'max_epochs';
     if (task.runs.length < 2) return null;
     const signals: RunSignal[] = task.runs
       .filter((r) => r.resultMessages.length > 0)
@@ -2210,7 +2962,7 @@ export class Orquestrator extends EventEmitter {
       }));
     // Add current output
     signals.push({ output: currentOutput, epoch: task.runs.length + 1 });
-    return checkStagnation(signals);
+    return checkStagnation(signals, CONVERGENCE_THETA, STAGNATION_EPOCHS);
   }
 
   // -----------------------------------------------------------------------
@@ -2228,21 +2980,31 @@ export class Orquestrator extends EventEmitter {
       payload?: Record<string, unknown>;
     } = {},
   ): SwarmEvent {
+    const allowDuplicateTerminalEvent = args.payload?.allowDuplicateTerminalEvent === true;
     if (
+      !allowDuplicateTerminalEvent &&
       (type === SWARM_EVENT_TYPE.TASK_COMPLETED ||
         type === SWARM_EVENT_TYPE.TASK_FAILED ||
         type === SWARM_EVENT_TYPE.TASK_CANCELLED) &&
       args.task
     ) {
       const alreadyRecorded = this.events.some(
-        (event) => event.type === type && event.taskId === args.task?.taskId,
+        (event) =>
+          event.type === type &&
+          event.taskId === args.task?.taskId &&
+          event.runId === args.runId,
       );
       if (alreadyRecorded) {
         return this.events.find(
-          (event) => event.type === type && event.taskId === args.task?.taskId,
+          (event) =>
+            event.type === type &&
+            event.taskId === args.task?.taskId &&
+            event.runId === args.runId,
         ) as SwarmEvent;
       }
     }
+    const payload = args.payload ? { ...args.payload } : undefined;
+    if (payload) delete payload.allowDuplicateTerminalEvent;
 
     const event: SwarmEvent = {
       seq: this.nextSeq++,
@@ -2255,7 +3017,7 @@ export class Orquestrator extends EventEmitter {
       ts: new Date().toISOString(),
       messages: args.messages,
       processedByTaskIds: [],
-      payload: args.payload,
+      payload,
     };
     this.events.push(event);
     this.eventStore.append(event);
@@ -2280,18 +3042,36 @@ export class Orquestrator extends EventEmitter {
     }
   }
 
+  private cardCeiling(task: Task): { maxCost: number; maxActiveMs: number } {
+    const gov = this.getActiveRun(task)?.governance ?? this.governance;
+    // maxCost 0 = unlimited (fall back to the global budget cap if finite).
+    const maxCost = gov.maxCost > 0 ? gov.maxCost : (Number.isFinite(MAX_TOTAL_COST) ? MAX_TOTAL_COST : 0);
+    return { maxCost, maxActiveMs: gov.maxActiveMs };
+  }
+
+  /** Per-card cost/time ceiling (§10.5): aborts only the offending card. */
   private assertWithinCardCeiling(task: Task): void {
-    const ceiling = { maxCost: MAX_TOTAL_COST, maxActiveMs: RUN_TIMEOUT_MS * MAX_TASK_RETRIES };
+    const ceiling = this.cardCeiling(task);
     const reason = checkCardCeiling(task.metrics, ceiling);
     if (reason) {
       this.recordEvent(SWARM_EVENT_TYPE.BUDGET_EXCEEDED, {
         task,
-        payload: { scope: 'card', cost: task.metrics.cost, durationMs: task.metrics.durationMs },
+        payload: { scope: 'card', cost: task.metrics.cost, durationMs: task.metrics.durationMs, ceiling },
       });
-      throw new BudgetExceededError(
+      throw new CeilingExceededError(
         `Card ceiling excedido: cost=${task.metrics.cost} duration=${task.metrics.durationMs}ms`,
       );
     }
+  }
+
+  /** Graceful degradation (§10.5, M1): warn once when nearing the card ceiling. */
+  private warnIfApproachingCeiling(task: Task): void {
+    const ceiling = this.cardCeiling(task);
+    if (!isApproachingCeiling(task.metrics, ceiling, CEILING_WARNING_RATIO)) return;
+    const last = task.chat[task.chat.length - 1];
+    const warning = `⚠️ Aproximando do teto do card (custo/tempo). Finalize o trabalho essencial e deixe um handoff antes do corte.`;
+    if (last?.role === 'assistant' && last.text === warning) return;
+    this.postAgentMessage(task, warning);
   }
 
   private isQuiescent(): boolean {

@@ -1,13 +1,13 @@
 ---
 fase: F8
 slug: 08-e2e-coverage-and-validation
-status: pending
+status: done
 depends_on: [F0, F1, F2, F3, F4, F5, F6, F7]
 ---
 
 # F8 — Cobertura HTTP/WS, Auth, Cenário A Completo e Validação Viva (§12)
 
-**Status da fase:** `pending`
+**Status da fase:** `done` (implementado 2026-06-24 — ver PLAN.md §7.5; validação viva D7 é operacional, gated por chave)
 **Objetivo:** Fechar as lacunas de teste de borda (integração de rotas HTTP via `inject`, broadcast/subscribe do WS, contrato de erro central, **decisão de auth**), conduzir o **Cenário A do §12** ponta a ponta pelo Fastify+WS reais com agentes mock DeepSeek, e selar com **um run de validação viva** real em `provider=deepseek` / `deepseek-v4-flash` / `effort=high`.
 **Depende de:** F0–F7.
 
@@ -81,4 +81,3 @@ F0 trouxe o primeiro e2e e o harness; as fases seguintes adicionaram capacidades
 - [ ] `npm test` (root+web) verde; `typecheck`+`lint` limpos.
 - [ ] **`ponytail-review`** sobre o diff final; achados endereçados/justificados.
 - [ ] `graphify update` após o fechamento.
-</content>

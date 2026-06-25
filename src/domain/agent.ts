@@ -5,4 +5,6 @@ export interface Agent {
   role: string;
   runtimeConfig: RuntimeConfig;
   tools: string[];
+  /** Explicit prohibitions injected into the system prompt (§8.3 guardrails). */
+  mustNot?: string[];
 }

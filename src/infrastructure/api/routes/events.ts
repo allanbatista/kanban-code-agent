@@ -32,6 +32,16 @@ export function registerEventRoutes(
       }
     };
 
+    // Catch-up (F7.T5): EventSource auto-sends Last-Event-ID on reconnect; replay
+    // everything missed during the disconnect before the live stream resumes.
+    const lastEventId = Number(request.headers['last-event-id']);
+    if (Number.isFinite(lastEventId) && lastEventId > 0) {
+      for (const event of orquestrator.getEventsSince(lastEventId)) {
+        if (reply.raw.destroyed) break;
+        reply.raw.write(`event: event\ndata: ${JSON.stringify(event)}\nid: ${event.seq}\n\n`);
+      }
+    }
+
     // Send current state on connect
     const state = [...orquestrator.tasks.values()].map((t) => orquestrator.toMetadata(t));
     const stateData = JSON.stringify({ tasks: state });
@@ -78,6 +88,15 @@ export function registerEventRoutes(
     });
 
     reply.raw.write(`event: connected\ndata: {}\n\n`);
+
+    // Catch-up scoped to this task before the live stream (F7.T5).
+    const lastEventId = Number(request.headers['last-event-id']);
+    if (Number.isFinite(lastEventId) && lastEventId > 0) {
+      for (const event of orquestrator.getEventsSince(lastEventId, taskId)) {
+        if (reply.raw.destroyed) break;
+        reply.raw.write(`event: event\ndata: ${JSON.stringify(event)}\nid: ${event.seq}\n\n`);
+      }
+    }
 
     // Send initial task state
     const task = orquestrator.tasks.get(taskId);

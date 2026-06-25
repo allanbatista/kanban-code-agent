@@ -29,7 +29,6 @@ Variáveis de ambiente:
 - `SWARM_PORT` — porta do servidor (default: 3000)
 - `SWARM_DATA_DIR` — diretório de dados (default: `.swarm`)
 - `SWARM_LOG_LEVEL` — nível de log (default: `info`)
-- `SWARM_MAX_CONCURRENCY` — tasks simultâneas (default: 3)
 - `SWARM_RUN_TIMEOUT_MS` — timeout por run (default: 300000)
 
 ### Modo Runner (CLI)
@@ -146,7 +145,6 @@ Crie `swarm.yml` na raiz do projeto:
 port: 3000
 dataDir: .swarm
 logLevel: info
-maxConcurrency: 3
 runTimeoutMs: 300000
 models:
   fast:

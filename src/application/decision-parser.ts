@@ -209,5 +209,22 @@ export function parseDecision(rawOutput: string): AgentDecision {
     throw new AgentOutputInvalidError('"effort" must be a string when present', rawOutput);
   }
 
+  // Evaluation verdict (optional — QA / Code Reviewer contract).
+  if (
+    obj.verdict !== undefined &&
+    (typeof obj.verdict !== 'string' || !['approved', 'rejected'].includes(obj.verdict as string))
+  ) {
+    throw new AgentOutputInvalidError(
+      `Invalid "verdict" (got: ${JSON.stringify(obj.verdict)})`,
+      rawOutput,
+    );
+  }
+  if (obj.criteria !== undefined && !Array.isArray(obj.criteria)) {
+    throw new AgentOutputInvalidError('"criteria" must be an array when present', rawOutput);
+  }
+  if (obj.feedback !== undefined && typeof obj.feedback !== 'string') {
+    throw new AgentOutputInvalidError('"feedback" must be a string when present', rawOutput);
+  }
+
   return { ...obj, status, messages: obj.messages } as unknown as AgentDecision;
 }

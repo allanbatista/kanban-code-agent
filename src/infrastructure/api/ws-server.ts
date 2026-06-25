@@ -1,18 +1,27 @@
+import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import type { Orquestrator } from '../../application/orquestrator.js';
 import type { SwarmEvent } from '../../domain/events.js';
 import type { TaskMetadata } from '../../domain/task.js';
 
+// Versioned wire contract (F7.T4): bump when the envelope shape changes so the
+// contract test (and clients) can detect drift / require a migration.
+export const WS_SCHEMA_VERSION = 1;
+
 // --- Message Types ---
 
-interface ClientMessage {
-  type: 'subscribe';
-  taskId?: string;
-}
+// Inbound frames are validated (F8.T2): malformed frames are dropped, not trusted.
+const clientMessageSchema = z.object({
+  type: z.enum(['subscribe', 'unsubscribe']),
+  taskId: z.string().min(1).max(128).optional(),
+  sinceSeq: z.number().int().nonnegative().optional(),
+});
+type ClientMessage = z.infer<typeof clientMessageSchema>;
 
 interface ServerEventMessage {
   type: 'event';
+  schemaVersion: number;
   event: SwarmEvent;
   // Current metadata of the event's task, so the client applies the change
   // incrementally (no full refetch). Absent when the task no longer exists
@@ -22,7 +31,10 @@ interface ServerEventMessage {
 
 interface ServerStateMessage {
   type: 'state';
+  schemaVersion: number;
   tasks: TaskMetadata[];
+  // Highest seq known to the server, so the client seeds its resume cursor.
+  seq: number;
 }
 
 // --- Connected Client ---
@@ -38,6 +50,27 @@ export function registerWebSocket(
 ): void {
   const clients = new Set<ConnectedClient>();
 
+  const send = (socket: WebSocket, payload: unknown): void => {
+    if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(payload));
+  };
+
+  const eventMessage = (event: SwarmEvent): ServerEventMessage => {
+    const affected = event.taskId ? orquestrator.tasks.get(event.taskId) : undefined;
+    return {
+      type: 'event',
+      schemaVersion: WS_SCHEMA_VERSION,
+      event,
+      task: affected ? orquestrator.toMetadata(affected) : undefined,
+    };
+  };
+
+  const stateMessage = (taskId?: string): ServerStateMessage => {
+    const tasks = taskId
+      ? [orquestrator.tasks.get(taskId)].filter(Boolean).map((t) => orquestrator.toMetadata(t!))
+      : [...orquestrator.tasks.values()].map((t) => orquestrator.toMetadata(t));
+    return { type: 'state', schemaVersion: WS_SCHEMA_VERSION, tasks, seq: orquestrator.latestSeq };
+  };
+
   fastify.get(
     '/ws',
     { websocket: true },
@@ -45,74 +78,58 @@ export function registerWebSocket(
       const client: ConnectedClient = { socket };
       clients.add(client);
 
-      // Ensure socket.send exists before using it
       if (typeof socket.send !== 'function') {
         console.error('WebSocket socket missing send method');
         clients.delete(client);
         return;
       }
 
-      // Send full state on connect (auto-reconnect friendly)
-      const tasks = [...orquestrator.tasks.values()].map((t) => orquestrator.toMetadata(t));
-      const stateMessage: ServerStateMessage = { type: 'state', tasks };
-      if (socket.readyState === socket.OPEN) {
-        socket.send(JSON.stringify(stateMessage));
-      }
+      // Send full state on connect (auto-reconnect friendly).
+      send(socket, stateMessage());
 
-      // Handle incoming messages
       socket.on('message', (raw: Buffer | ArrayBuffer | Buffer[]) => {
+        let parsed: unknown;
         try {
-          const message: ClientMessage = JSON.parse(raw.toString());
-
-          if (message.type === 'subscribe') {
-            client.subscribedTaskId = message.taskId;
-            // Re-send state scoped to subscription
-            const filtered = message.taskId
-              ? [orquestrator.tasks.get(message.taskId)]
-                  .filter(Boolean)
-                  .map((t) => orquestrator.toMetadata(t!))
-              : tasks;
-            const scopedState: ServerStateMessage = { type: 'state', tasks: filtered };
-            if (socket.readyState === socket.OPEN) {
-              socket.send(JSON.stringify(scopedState));
-            }
-          }
+          parsed = JSON.parse(raw.toString());
         } catch {
-          // Ignore malformed messages
+          return; // ignore malformed JSON
+        }
+        const result = clientMessageSchema.safeParse(parsed);
+        if (!result.success) return; // ignore frames that violate the contract
+        const message: ClientMessage = result.data;
+        if (message.type === 'unsubscribe') {
+          client.subscribedTaskId = undefined;
+          return;
+        }
+        if (message.type === 'subscribe') {
+          client.subscribedTaskId = message.taskId;
+          // Catch-up: replay events missed during a disconnect, in seq order,
+          // sourced from the durable ledger view (survives server restart).
+          if (typeof message.sinceSeq === 'number') {
+            const missed = orquestrator.getEventsSince(message.sinceSeq, message.taskId);
+            for (const event of missed) send(socket, eventMessage(event));
+          }
+          // Always (re)send the scoped snapshot so the client reconciles state.
+          send(socket, stateMessage(message.taskId));
         }
       });
 
-      // Handle disconnect
-      socket.on('close', () => {
-        clients.delete(client);
-      });
-
-      socket.on('error', () => {
-        clients.delete(client);
-      });
+      socket.on('close', () => clients.delete(client));
+      socket.on('error', () => clients.delete(client));
     },
   );
 
   // Broadcast every recorded event to subscribed clients so the board updates
-  // in real time (one push per event, in order).
+  // in real time (one push per event, in seq order).
   orquestrator.on('event', (event: SwarmEvent) => {
     if (!event) return;
-
-    const affected = event.taskId ? orquestrator.tasks.get(event.taskId) : undefined;
-    const eventMessage: ServerEventMessage = {
-      type: 'event',
-      event,
-      task: affected ? orquestrator.toMetadata(affected) : undefined,
-    };
-    const data = JSON.stringify(eventMessage);
+    const data = JSON.stringify(eventMessage(event));
 
     for (const client of clients) {
       if (client.socket.readyState !== client.socket.OPEN) {
         clients.delete(client);
         continue;
       }
-
-      // Filter by subscription
       if (
         client.subscribedTaskId &&
         event.taskId !== client.subscribedTaskId &&
@@ -120,7 +137,6 @@ export function registerWebSocket(
       ) {
         continue;
       }
-
       try {
         client.socket.send(data);
       } catch {

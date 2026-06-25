@@ -7,7 +7,7 @@ depends_on: [F0]
 
 # F1 — Máquina de Estados da Task no Domínio (§4)
 
-**Status da fase:** `pending`
+**Status da fase:** `done` (implementado 2026-06-24 — ver PLAN.md §7.5 e DEFERRED.md para cortes conscientes)
 **Objetivo:** Tornar o modelo de estados do §4 **cidadão de primeira classe no domínio**: uma tabela de transições com guardas/invariantes, o estado faltante **`SUSPENDED`** (Suspensa por Timeout), `WAITING` **diferenciado** (subtask vs humano/dependência) e um discriminador `failureReason` em `FAILED`. Assim as fases seguintes (estagnação, tetos, HITL, DoD) têm estados legais para onde transicionar.
 **Depende de:** F0.
 
@@ -63,4 +63,3 @@ Hoje `task.status` é um campo público mutável sem guarda; toda a lógica de t
 - [ ] Round-trip de serialização e replay-equivalência do novo shape testados.
 - [ ] `npm test` verde (e2e de F0 sem regressão); `typecheck`+`lint` limpos.
 - [ ] **`ponytail-review`** sobre o diff; achados endereçados/justificados.
-</content>

@@ -82,7 +82,7 @@ export function ProjectDetail() {
                 onClick={() => navigate(`/?task=${task.id}&tab=chat`)}
               >
                 <span className="flex-1 text-sm truncate">{task.title}</span>
-                <StatusBadge status={task.status} />
+                <StatusBadge status={task.status} waitingReason={task.waitingReason} />
                 <span className="text-xs text-muted-foreground/70">#{task.id.slice(0, 8)}</span>
               </div>
             ))

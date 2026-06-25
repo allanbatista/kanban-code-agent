@@ -20,7 +20,6 @@ interface Settings {
   };
   providers: ProviderConfig[];
   advanced: {
-    maxConcurrency: number;
     runTimeoutMs: number;
     maxTaskDepth: number;
     maxSubtasksPerTask: number;
@@ -38,28 +37,27 @@ const defaultSettings: Settings = {
   providers: [
     {
       name: 'fast',
-      provider: 'openrouter',
-      modelId: 'openai/gpt-5.4-nano',
+      provider: 'deepseek',
+      modelId: 'deepseek-v4-flash',
       apiKey: '',
       enabled: true,
     },
     {
       name: 'balanced',
-      provider: 'openrouter',
-      modelId: 'deepseek/deepseek-v4-flash',
+      provider: 'deepseek',
+      modelId: 'deepseek-v4-flash',
       apiKey: '',
       enabled: true,
     },
     {
       name: 'deep',
-      provider: 'openrouter',
-      modelId: 'deepseek/deepseek-v4-pro',
+      provider: 'deepseek',
+      modelId: 'deepseek-v4-pro',
       apiKey: '',
       enabled: true,
     },
   ],
   advanced: {
-    maxConcurrency: 3,
     runTimeoutMs: 300000,
     maxTaskDepth: 5,
     maxSubtasksPerTask: 10,
@@ -90,7 +88,6 @@ const updateSettingsBody = z.object({
   }).optional(),
   providers: z.array(providerConfigSchema).optional(),
   advanced: z.object({
-    maxConcurrency: z.number().int().min(1).max(50).optional(),
     runTimeoutMs: z.number().int().min(1000).optional(),
     maxTaskDepth: z.number().int().min(1).max(20).optional(),
     maxSubtasksPerTask: z.number().int().min(1).max(100).optional(),

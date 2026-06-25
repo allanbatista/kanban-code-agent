@@ -7,7 +7,7 @@ depends_on: [F0, F1]
 
 # F4 — Tetos por-Card (Custo + Tempo), Budget Persistido e Condições de Parada (§10)
 
-**Status da fase:** `pending`
+**Status da fase:** `done` (implementado 2026-06-24 — ver PLAN.md §7.5 e DEFERRED.md para cortes conscientes)
 **Objetivo:** Mover as travas de governança do §10 para o domínio: impor **tetos por-card** de **custo** e de **tempo de computação ativa acumulada** (não só global), **persistir e reidratar** o budget acumulado para que os tetos **sobrevivam a restart**, e abortar **apenas o card infrator** (sem derrubar os irmãos). Falhar de forma limpa e observável.
 **Depende de:** F0, F1.
 
@@ -78,4 +78,3 @@ depends_on: [F0, F1]
 - [ ] Tools com efeito colateral idempotentes na retomada (sem duplicar artefatos/mensagens/eventos).
 - [ ] `npm test` verde (mock + e2e); `typecheck`+`lint` limpos.
 - [ ] **`ponytail-review`** sobre o diff; achados endereçados/justificados.
-</content>

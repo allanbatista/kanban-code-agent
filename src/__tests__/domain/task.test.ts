@@ -113,15 +113,17 @@ describe('Task.serialize', () => {
   it('includes modified fields', () => {
     const task = new Task(defaultOptions, false);
     task.status = 'RUNNING';
+    task.waitingReason = 'validation';
     task.subtaskIds.push('task_sub-1');
     task.retryCount = 2;
-    task.piSessionFile = '/path/to/session';
+    task.evaluationVerdict = 'approved';
 
     const serialized = task.serialize();
     expect(serialized.status).toBe('RUNNING');
+    expect(serialized.waitingReason).toBe('validation');
     expect(serialized.subtaskIds).toEqual(['task_sub-1']);
     expect(serialized.retryCount).toBe(2);
-    expect(serialized.piSessionFile).toBe('/path/to/session');
+    expect(serialized.evaluationVerdict).toBe('approved');
   });
 });
 
@@ -129,9 +131,10 @@ describe('Task.fromSerialized', () => {
   it('reconstructs identical task from serialized data', () => {
     const original = new Task(defaultOptions, false);
     original.status = 'RUNNING';
+    original.waitingReason = 'validation';
     original.subtaskIds.push('task_sub-1', 'task_sub-2');
     original.retryCount = 3;
-    original.piSessionFile = '/session';
+    original.evaluationVerdict = 'rejected';
 
     const serialized = original.serialize();
     const restored = Task.fromSerialized(serialized);
@@ -139,9 +142,10 @@ describe('Task.fromSerialized', () => {
     expect(restored.taskId).toBe(original.taskId);
     expect(restored.title).toBe(original.title);
     expect(restored.status).toBe('RUNNING');
+    expect(restored.waitingReason).toBe('validation');
     expect(restored.subtaskIds).toEqual(['task_sub-1', 'task_sub-2']);
     expect(restored.retryCount).toBe(3);
-    expect(restored.piSessionFile).toBe('/session');
+    expect(restored.evaluationVerdict).toBe('rejected');
   });
 
   it('handles missing optional fields gracefully', () => {

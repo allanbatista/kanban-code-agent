@@ -96,12 +96,12 @@ describe('State Machine', () => {
       }
     });
 
-    it('rejects QUEUED → PENDING', () => {
-      expect(canTransition(TASK_STATUS.QUEUED, TASK_STATUS.PENDING)).toBe(false);
+    it('allows QUEUED → PENDING (crash recovery / move)', () => {
+      expect(canTransition(TASK_STATUS.QUEUED, TASK_STATUS.PENDING)).toBe(true);
     });
 
-    it('rejects RUNNING → PENDING', () => {
-      expect(canTransition(TASK_STATUS.RUNNING, TASK_STATUS.PENDING)).toBe(false);
+    it('allows RUNNING → PENDING (retry)', () => {
+      expect(canTransition(TASK_STATUS.RUNNING, TASK_STATUS.PENDING)).toBe(true);
     });
   });
 
@@ -121,6 +121,38 @@ describe('State Machine', () => {
       const task = makeTask(TASK_STATUS.COMPLETED);
       try { transitionTask(task, TASK_STATUS.RUNNING); } catch {}
       expect(task.status).toBe(TASK_STATUS.COMPLETED);
+    });
+  });
+
+  describe('Task.setStatus (guarded)', () => {
+    it('allows a legal transition', () => {
+      const task = makeTask(TASK_STATUS.PENDING);
+      task.setStatus(TASK_STATUS.QUEUED);
+      expect(task.status).toBe(TASK_STATUS.QUEUED);
+    });
+
+    it('throws on an illegal transition and preserves status', () => {
+      const task = makeTask(TASK_STATUS.PENDING);
+      expect(() => task.setStatus(TASK_STATUS.COMPLETED)).toThrow(/Illegal transition/i);
+      expect(task.status).toBe(TASK_STATUS.PENDING);
+    });
+
+    it('force bypasses the guard (reopen / restore)', () => {
+      const task = makeTask(TASK_STATUS.COMPLETED);
+      task.setStatus(TASK_STATUS.PENDING, { force: true });
+      expect(task.status).toBe(TASK_STATUS.PENDING);
+    });
+
+    it('sets failureReason and waitingReason atomically', () => {
+      const task = makeTask(TASK_STATUS.RUNNING);
+      task.setStatus(TASK_STATUS.FAILED, { force: true, failureReason: 'ceiling' });
+      expect(task.status).toBe(TASK_STATUS.FAILED);
+      expect(task.failureReason).toBe('ceiling');
+    });
+
+    it('treats a self-transition as a no-op (no throw)', () => {
+      const task = makeTask(TASK_STATUS.RUNNING);
+      expect(() => task.setStatus(TASK_STATUS.RUNNING)).not.toThrow();
     });
   });
 

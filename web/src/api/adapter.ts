@@ -18,6 +18,9 @@ export function apiTaskToTask(api: ApiTask): Task {
     assignedTo: agentSlug(api.assignedTo),
     parentId: api.parentId,
     status: api.status as TaskStatus,
+    waitingReason: api.waitingReason ?? api.metadata?.waitingReason,
+    failureReason: (api as { failureReason?: Task['failureReason'] }).failureReason ?? (api.metadata as { failureReason?: Task['failureReason'] } | undefined)?.failureReason,
+    evaluationVerdict: (api.metadata as { evaluationVerdict?: Task['evaluationVerdict'] } | undefined)?.evaluationVerdict,
     depth: api.depth,
     subtaskIds: Array.isArray(api.subtaskIds) ? api.subtaskIds : [],
     runtimeConfig: {
@@ -54,6 +57,9 @@ export function metadataToTask(meta: any): Task {
     assignedTo: agentSlug(meta.assignedTo),
     parentId: meta.parentId,
     status: meta.status as TaskStatus,
+    waitingReason: meta.waitingReason,
+    failureReason: meta.failureReason,
+    evaluationVerdict: meta.evaluationVerdict,
     depth: meta.depth,
     subtaskIds: Array.isArray(meta.subtaskIds) ? meta.subtaskIds : [],
     runtimeConfig: {
@@ -88,6 +94,7 @@ function apiChatToChat(msg: ApiChatMessage): ChatMessage {
     type: msg.type === 'artifact' ? 'artifact' : msg.type === 'event' ? 'event' : 'text',
     text: msg.text,
     artifacts: msg.artifacts?.map(apiArtifactToArtifact),
+    attachments: (msg as { attachments?: ApiAttachment[] }).attachments?.map(apiAttachmentToAttachment),
     refTaskId: msg.refTaskId,
   };
 }
@@ -200,7 +207,6 @@ export function apiSettingsToAppearance(api: ApiSettings): AppearanceSettings {
 
 export function apiSettingsToAdvanced(api: ApiSettings): AdvancedSettings {
   return {
-    maxConcurrency: api.advanced.maxConcurrency,
     runTimeoutMs: api.advanced.runTimeoutMs,
     maxTaskDepth: api.advanced.maxTaskDepth,
     maxSubtasks: api.advanced.maxSubtasksPerTask,

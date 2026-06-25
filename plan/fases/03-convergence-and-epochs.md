@@ -7,7 +7,7 @@ depends_on: [F0, F1]
 
 # F3 — Epochs, Monitor de Convergência/Estagnação e Escalonamento (§5.3, §10.3)
 
-**Status da fase:** `pending`
+**Status da fase:** `done` (implementado 2026-06-24 — ver PLAN.md §7.5 e DEFERRED.md para cortes conscientes)
 **Objetivo:** Tornar o loop **seguro contra estagnação**: rotular runs como **epochs** com um **sinal de progresso**, detectar loops circulares (Δ(epoch_n, n−1) < θ) e quebrá-los para `FAILED(reason=stagnation)` **antes** de esgotar o contador de retry, e adicionar uma **escada de escalonamento automático** de modelo/effort (fast→balanced→deep, sobe effort) em falhas repetidas.
 **Depende de:** F0, F1.
 
@@ -70,4 +70,3 @@ Grep: 0 ocorrências de `convergen`/`stagnat`/`epoch`. O orquestrator tem retry,
 - [ ] Restart retoma do último checkpoint válido (epoch N), não do início do card.
 - [ ] `npm test` verde (mock + e2e); `typecheck`+`lint` limpos.
 - [ ] **`ponytail-review`** sobre o diff; heurística marcada com `ponytail:` (teto + upgrade).
-</content>

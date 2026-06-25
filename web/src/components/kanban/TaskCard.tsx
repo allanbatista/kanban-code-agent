@@ -118,7 +118,7 @@ export function TaskCard({ task }: TaskCardProps) {
 
         {/* Status + ancestors */}
         <div className="flex items-center justify-between gap-1">
-          <StatusBadge status={task.status} />
+          <StatusBadge status={task.status} waitingReason={task.waitingReason} />
           {(rootId !== task.id || parentId) && (
             <div className="flex items-center gap-1">
               {parentId && parentId !== rootId && (

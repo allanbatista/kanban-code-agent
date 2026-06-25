@@ -44,6 +44,7 @@ interface LayoutNode {
   id: string;
   title: string;
   status: string;
+  waitingReason?: Task['waitingReason'];
   assignedTo: string;
   icon: string;
   color: string;
@@ -99,6 +100,7 @@ function buildDag(rootTask: Task, allTasks: Task[], familyColors: Record<string,
       id: task.id,
       title: task.title,
       status: task.status,
+      waitingReason: task.waitingReason,
       assignedTo: task.assignedTo,
       color: AGENT_COLORS[task.assignedTo] ?? '#94a3b8',
       icon: AGENT_ICONS[task.assignedTo] ?? 'Bot',
@@ -134,6 +136,7 @@ function buildDag(rootTask: Task, allTasks: Task[], familyColors: Record<string,
         id: node.id,
         label: node.title,
         status: node.status as TaskStatus,
+        waitingReason: node.waitingReason,
         agent: node.assignedTo,
         icon: node.icon,
         color: node.color,

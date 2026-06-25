@@ -9,24 +9,21 @@ describe('WorkerPool', () => {
   let pool: WorkerPool;
 
   beforeEach(() => {
-    pool = new WorkerPool(2, 5000);
+    pool = new WorkerPool(5000);
   });
 
   afterEach(() => {
     pool.cancelAll();
   });
 
-  describe('concurrency limit', () => {
-    it('executes at most maxConcurrency tasks simultaneously', async () => {
+  describe('parallel execution', () => {
+    it('starts all enqueued tasks immediately without a concurrency ceiling', async () => {
       const running = new Set<string>();
-      const completed: string[] = [];
-      const pool2 = new WorkerPool(2, 1000);
+      const pool2 = new WorkerPool(1000);
 
       const makeRunner = (id: string) => async () => {
         running.add(id);
-        await delay(100);
-        completed.push(id);
-        running.delete(id);
+        await new Promise(() => {});
       };
 
       pool2.enqueue('a', makeRunner('a'));
@@ -36,37 +33,29 @@ describe('WorkerPool', () => {
       pool2.enqueue('e', makeRunner('e'));
 
       await delay(20);
-      expect(running.size).toBeLessThanOrEqual(2);
+      expect(running.size).toBe(5);
+      expect(pool2.activeCount).toBe(5);
+      expect(pool2.pendingCount).toBe(0);
 
-      // Wait for all to complete
-      while (completed.length < 5) {
-        await delay(50);
-      }
-      expect(completed).toHaveLength(5);
       pool2.cancelAll();
     });
 
-    it('maxConcurrency=1 runs tasks sequentially', async () => {
-      const pool1 = new WorkerPool(1, 1000);
-      const order: string[] = [];
+    it('does not keep a pending queue for parallel tasks', async () => {
+      const pool1 = new WorkerPool(1000);
 
-      pool1.enqueue('a', async () => { order.push('a-start'); await delay(30); order.push('a-end'); });
-      pool1.enqueue('b', async () => { order.push('b-start'); await delay(10); order.push('b-end'); });
+      pool1.enqueue('a', () => new Promise(() => {}));
+      pool1.enqueue('b', () => new Promise(() => {}));
 
-      // Wait for completion
-      while (order.length < 4) {
-        await delay(20);
-      }
-
-      expect(order[0]).toBe('a-start');
-      expect(order[order.length - 1]).toBe('b-end');
+      await delay(20);
+      expect(pool1.activeCount).toBe(2);
+      expect(pool1.pendingCount).toBe(0);
       pool1.cancelAll();
     });
   });
 
   describe('timeout', () => {
     it('aborts task via AbortController after timeout', async () => {
-      const poolTimeout = new WorkerPool(1, 100);
+      const poolTimeout = new WorkerPool(100);
 
       poolTimeout.enqueue('timeout-task', () => new Promise(() => {}));
 
@@ -79,22 +68,22 @@ describe('WorkerPool', () => {
   });
 
   describe('cancel', () => {
-    it('removes pending task from queue', () => {
-      pool = new WorkerPool(1, 5000);
+    it('has no pending queue to cancel', () => {
+      pool = new WorkerPool(5000);
       pool.enqueue('blocker', () => new Promise(() => {}));
       pool.enqueue('pending-a', () => Promise.resolve());
       pool.enqueue('pending-b', () => Promise.resolve());
 
-      expect(pool.pendingCount).toBe(2);
+      expect(pool.pendingCount).toBe(0);
       pool.cancel('pending-a');
-      expect(pool.pendingCount).toBe(1);
+      expect(pool.pendingCount).toBe(0);
       pool.cancel('pending-b');
       expect(pool.pendingCount).toBe(0);
       pool.cancelAll();
     });
 
     it('cancels active running task via AbortController', () => {
-      pool = new WorkerPool(1, 5000);
+      pool = new WorkerPool(5000);
       pool.enqueue('active', () => new Promise(() => {}));
       expect(pool.activeCount).toBe(1);
       pool.cancel('active');
@@ -107,14 +96,14 @@ describe('WorkerPool', () => {
 
   describe('cancelAll', () => {
     it('clears all active and pending tasks', () => {
-      pool = new WorkerPool(2, 5000);
+      pool = new WorkerPool(5000);
       pool.enqueue('a', () => new Promise(() => {}));
       pool.enqueue('b', () => new Promise(() => {}));
-      pool.enqueue('c', () => Promise.resolve());
-      pool.enqueue('d', () => Promise.resolve());
+      pool.enqueue('c', () => new Promise(() => {}));
+      pool.enqueue('d', () => new Promise(() => {}));
 
-      expect(pool.activeCount).toBe(2);
-      expect(pool.pendingCount).toBe(2);
+      expect(pool.activeCount).toBe(4);
+      expect(pool.pendingCount).toBe(0);
 
       pool.cancelAll();
       expect(pool.activeCount).toBe(0);
@@ -124,7 +113,7 @@ describe('WorkerPool', () => {
 
   describe('activeCount / pendingCount', () => {
     it('shows correct active count while tasks running', async () => {
-      pool = new WorkerPool(2, 5000);
+      pool = new WorkerPool(5000);
       const completed: string[] = [];
 
       pool.enqueue('slow-a', async () => { await delay(200); completed.push('a'); });
@@ -141,7 +130,7 @@ describe('WorkerPool', () => {
     });
 
     it('pending count decreases as tasks complete', async () => {
-      pool = new WorkerPool(1, 5000);
+      pool = new WorkerPool(5000);
       const completed: string[] = [];
 
       pool.enqueue('a', async () => { await delay(50); completed.push('a'); });
@@ -157,7 +146,7 @@ describe('WorkerPool', () => {
 
   describe('completion', () => {
     it('all tasks complete successfully', async () => {
-      pool = new WorkerPool(3, 5000);
+      pool = new WorkerPool(5000);
       const completed: string[] = [];
 
       for (let i = 0; i < 10; i++) {
@@ -175,7 +164,7 @@ describe('WorkerPool', () => {
     });
 
     it('handles runner errors without breaking pool', async () => {
-      pool = new WorkerPool(2, 5000);
+      pool = new WorkerPool(5000);
       const completed: string[] = [];
 
       pool.enqueue('fail', () => Promise.reject(new Error('runner error')));

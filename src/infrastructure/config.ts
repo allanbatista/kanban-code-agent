@@ -15,7 +15,6 @@ export interface SwarmConfig {
   port: number;
   dataDir: string;
   logLevel: string;
-  maxConcurrency: number;
   runTimeoutMs: number;
   models: {
     fast: ModelConfig;
@@ -35,7 +34,6 @@ const DEFAULTS: SwarmConfig = {
   // Structure: .swarm/{events,tasks,state.snapshot.json}
   dataDir: resolve(homedir(), '.kca'),
   logLevel: 'info',
-  maxConcurrency: 3,
   runTimeoutMs: 300_000,
   models: {
     // Pi SDK native providers (provider name + bare model id). The deepseek
@@ -81,8 +79,6 @@ interface FileConfigRaw {
   'data_dir'?: string;
   logLevel?: string;
   'log_level'?: string;
-  maxConcurrency?: number;
-  'max_concurrency'?: number;
   runTimeoutMs?: number;
   'run_timeout_ms'?: number;
   models?: {
@@ -100,8 +96,6 @@ function normalizeFileConfig(raw: FileConfigRaw): Partial<SwarmConfig> {
   else if (typeof raw['data_dir'] === 'string') result.dataDir = raw['data_dir'];
   if (typeof raw.logLevel === 'string') result.logLevel = raw.logLevel;
   else if (typeof raw['log_level'] === 'string') result.logLevel = raw['log_level'];
-  if (typeof raw.maxConcurrency === 'number') result.maxConcurrency = raw.maxConcurrency;
-  else if (typeof raw['max_concurrency'] === 'number') result.maxConcurrency = raw['max_concurrency'];
   if (typeof raw.runTimeoutMs === 'number') result.runTimeoutMs = raw.runTimeoutMs;
   else if (typeof raw['run_timeout_ms'] === 'number') result.runTimeoutMs = raw['run_timeout_ms'];
 
@@ -175,8 +169,7 @@ function parseSimpleYamlConfig(content: string): Partial<SwarmConfig> {
       const value = match[2].trim().replace(/^['"]|['"]$/g, '');
 
       const numVal = Number(value);
-      if (key === 'port' || key === 'max_concurrency' || key === 'maxConcurrency' ||
-          key === 'run_timeout_ms' || key === 'runTimeoutMs') {
+      if (key === 'port' || key === 'run_timeout_ms' || key === 'runTimeoutMs') {
         raw[key] = Number.isFinite(numVal) ? numVal : value;
       } else {
         raw[key] = value;
@@ -213,9 +206,6 @@ function readEnvOverrides(): Partial<SwarmConfig> {
   const logLevel = process.env['SWARM_LOG_LEVEL'];
   if (typeof logLevel === 'string' && logLevel.trim()) overrides.logLevel = logLevel.trim();
 
-  const maxConcurrency = readPositiveIntEnv('SWARM_MAX_CONCURRENCY');
-  if (maxConcurrency !== undefined) overrides.maxConcurrency = maxConcurrency;
-
   const runTimeoutMs = readPositiveIntEnv('SWARM_RUN_TIMEOUT_MS');
   if (runTimeoutMs !== undefined) overrides.runTimeoutMs = runTimeoutMs;
 
@@ -238,7 +228,6 @@ function mergeConfig(fileConfig: Partial<SwarmConfig>, envOverrides: Partial<Swa
     port: envOverrides.port ?? fileConfig.port ?? DEFAULTS.port,
     dataDir: envOverrides.dataDir ?? fileConfig.dataDir ?? DEFAULTS.dataDir,
     logLevel: envOverrides.logLevel ?? fileConfig.logLevel ?? DEFAULTS.logLevel,
-    maxConcurrency: envOverrides.maxConcurrency ?? fileConfig.maxConcurrency ?? DEFAULTS.maxConcurrency,
     runTimeoutMs: envOverrides.runTimeoutMs ?? fileConfig.runTimeoutMs ?? DEFAULTS.runTimeoutMs,
     models: {
       fast: {
@@ -275,9 +264,6 @@ function validateConfig(config: SwarmConfig): void {
   }
   if (typeof config.dataDir !== 'string' || !config.dataDir.trim()) {
     throw new Error('SWARM_DATA_DIR nao pode ser vazio');
-  }
-  if (!Number.isInteger(config.maxConcurrency) || config.maxConcurrency < 1) {
-    throw new Error(`SWARM_MAX_CONCURRENCY deve ser >= 1, recebeu: ${config.maxConcurrency}`);
   }
   if (!Number.isInteger(config.runTimeoutMs) || config.runTimeoutMs < 1000) {
     throw new Error(`SWARM_RUN_TIMEOUT_MS deve ser >= 1000, recebeu: ${config.runTimeoutMs}`);

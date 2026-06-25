@@ -15,6 +15,9 @@ const WS_URL = import.meta.env.VITE_WS_URL ?? defaultWsUrl();
 
 export interface WsEvent {
   type: 'event' | 'state';
+  schemaVersion?: number;
+  /** Highest seq known to the server (sent on state messages) — seeds the resume cursor. */
+  seq?: number;
   event?: {
     seq: number;
     eventId: string;
@@ -128,6 +131,9 @@ export function createWsClient(options?: { taskId?: string }): WsClient {
   const maxReconnectDelay = 30000;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
+  // Resume cursor (F7.T5): highest seq applied. On reconnect we ask the server to
+  // replay everything after it, so events missed during the disconnect are not lost.
+  let lastSeq = 0;
 
   function connect() {
     if (closed) return;
@@ -140,9 +146,13 @@ export function createWsClient(options?: { taskId?: string }): WsClient {
       reconnectDelay = 1000;
       console.info('[ws] connected', WS_URL);
       notifyStatus(true);
-      // subscribe when connected
+      // subscribe when connected; resume from the last applied seq if reconnecting.
       if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'subscribe', taskId: options?.taskId }));
+        socket.send(JSON.stringify({
+          type: 'subscribe',
+          taskId: options?.taskId,
+          ...(lastSeq > 0 ? { sinceSeq: lastSeq } : {}),
+        }));
       }
     };
 
@@ -151,15 +161,19 @@ export function createWsClient(options?: { taskId?: string }): WsClient {
         const message: WsEvent = JSON.parse(raw.data as string);
 
         if (message.type === 'event' && message.event) {
+          if (typeof message.event.seq === 'number') lastSeq = Math.max(lastSeq, message.event.seq);
           console.debug('[ws] event', message.event.type, 'task=' + (message.event.taskId ?? '-'));
           for (const handler of eventHandlers) {
             handler(message.event as WsEvent['event'] & object, message.task);
           }
         }
 
-        if (message.type === 'state' && message.tasks) {
-          for (const handler of stateHandlers) {
-            handler(message.tasks as WsEvent['tasks'] & object);
+        if (message.type === 'state') {
+          if (typeof message.seq === 'number') lastSeq = Math.max(lastSeq, message.seq);
+          if (message.tasks) {
+            for (const handler of stateHandlers) {
+              handler(message.tasks as WsEvent['tasks'] & object);
+            }
           }
         }
       } catch {

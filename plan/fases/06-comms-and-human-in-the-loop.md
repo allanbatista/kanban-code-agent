@@ -7,7 +7,7 @@ depends_on: [F0, F1, F2, F5]
 
 # F6 — Comunicação pelo Chat, Escalonamento, HITL e Artefatos do Humano (§9.3, §10.6)
 
-**Status da fase:** `pending`
+**Status da fase:** `done` (implementado 2026-06-24 — ver PLAN.md §7.5 e DEFERRED.md para cortes conscientes)
 **Objetivo:** Completar o protocolo orientado a eventos do §9.3 **mantendo o chat como a ÚNICA interface agente↔humano**: um filho pode **perguntar ao pai** (e escalar para avô/Produto/Usuário) via o chat + eventos de orquestração enquanto **desidrata**; o pai acorda num **escopo isolado de resposta**; o humano responde **pelo próprio chat**; há **timeout de governança** que estaciona o card em **`SUSPENDED`** (§10.6); e o humano pode **anexar artefatos** ao chat (na criação **e** durante a conversa).
 **Depende de:** F0, F1, F2, F5.
 
@@ -75,4 +75,3 @@ A base resolve dependências **de dados** entre subtasks sem deadlock (wait grou
 - [ ] Humano anexa artefatos na criação **e** mid-conversa (upload real, evented, lido pelo agente).
 - [ ] `npm test` verde (mock + e2e); `typecheck`+`lint` limpos.
 - [ ] **`ponytail-review`** sobre o diff; achados endereçados/justificados.
-</content>

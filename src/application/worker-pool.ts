@@ -1,5 +1,5 @@
 /**
- * Worker pool — concurrency control, timeout, cancel.
+ * Worker pool — timeout and cancel for concurrently running tasks.
  * Pure scheduling logic, no domain dependencies.
  */
 
@@ -11,26 +11,16 @@ export class RunTimeoutError extends Error {
 }
 
 export class WorkerPool {
-  private readonly maxConcurrency: number;
   private readonly runTimeoutMs: number;
   private readonly active = new Map<string, AbortController>();
-  private readonly pending: Array<{ taskId: string; runner: () => Promise<void> }> = [];
 
-  constructor(maxConcurrency: number, runTimeoutMs: number) {
-    this.maxConcurrency = maxConcurrency;
+  constructor(runTimeoutMs: number) {
     this.runTimeoutMs = runTimeoutMs;
   }
 
   enqueue(taskId: string, runner: () => Promise<void>): void {
     if (this.active.has(taskId)) return; // already running
-    if (
-      this.pending.some((entry) => entry.taskId === taskId) ||
-      this.pending.length === 0
-    ) {
-      // will be handled by pump
-    }
-    this.pending.push({ taskId, runner });
-    this.pump();
+    this.executeOne(taskId, runner);
   }
 
   cancel(taskId: string): void {
@@ -39,9 +29,6 @@ export class WorkerPool {
       controller.abort();
       this.active.delete(taskId);
     }
-    // Remove from pending
-    const idx = this.pending.findIndex((entry) => entry.taskId === taskId);
-    if (idx !== -1) this.pending.splice(idx, 1);
   }
 
   cancelAll(): void {
@@ -49,7 +36,6 @@ export class WorkerPool {
       controller.abort();
     }
     this.active.clear();
-    this.pending.length = 0;
   }
 
   get activeCount(): number {
@@ -57,15 +43,7 @@ export class WorkerPool {
   }
 
   get pendingCount(): number {
-    return this.pending.length;
-  }
-
-  private pump(): void {
-    while (this.active.size < this.maxConcurrency && this.pending.length > 0) {
-      const entry = this.pending.shift();
-      if (!entry) break;
-      this.executeOne(entry.taskId, entry.runner);
-    }
+    return 0;
   }
 
   private executeOne(taskId: string, runner: () => Promise<void>): void {
@@ -83,8 +61,6 @@ export class WorkerPool {
       .finally(() => {
         clearTimeout(timeoutId);
         this.active.delete(taskId);
-        // Pump next pending
-        process.nextTick(() => this.pump());
       });
   }
 }

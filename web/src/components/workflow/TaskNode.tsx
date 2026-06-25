@@ -2,12 +2,13 @@ import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import * as LucideIcons from 'lucide-react';
 import { StatusBadge } from '@/components/kanban/StatusBadge';
 import { cn } from '@/lib/utils';
-import type { TaskStatus } from '@/components/kanban/StatusBadge';
+import type { TaskStatus, TaskWaitingReason } from '@/components/kanban/StatusBadge';
 
 export interface TaskNodeData extends Record<string, unknown> {
   id: string;
   label: string;
   status: TaskStatus;
+  waitingReason?: TaskWaitingReason;
   agent: string;
   icon: string;
   color: string;
@@ -21,7 +22,7 @@ export type WorkflowTaskNode = Node<TaskNodeData, 'taskNode'>;
 const iconMap = LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string }>>;
 
 export function TaskNode({ data, selected }: NodeProps<WorkflowTaskNode>) {
-  const { id, label, status, agent, icon, color, treeColor, isRoot, metrics } = data;
+  const { id, label, status, waitingReason, agent, icon, color, treeColor, isRoot, metrics } = data;
   const AgentIcon = iconMap[icon] ?? LucideIcons.Bot;
 
   return (
@@ -35,7 +36,7 @@ export function TaskNode({ data, selected }: NodeProps<WorkflowTaskNode>) {
     >
       <Handle type="target" position={Position.Top} className="!bg-muted-foreground" />
       <div className="mb-1.5 flex items-center gap-1.5">
-        <StatusBadge status={status} />
+        <StatusBadge status={status} waitingReason={waitingReason} />
         <span className="ml-auto font-mono text-[10px] text-muted-foreground/50">{id}</span>
       </div>
       <p className="truncate text-sm font-medium leading-tight text-foreground/95">{label}</p>

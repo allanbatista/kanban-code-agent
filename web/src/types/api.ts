@@ -5,7 +5,8 @@ export interface ApiTask {
   title: string;
   assignedTo: string;
   parentId?: string;
-  status: 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+  status: 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'REVIEW' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+  waitingReason?: 'subtasks' | 'human' | 'validation';
   depth: number;
   subtaskIds: string[];
   runtimeConfig: { model?: string; effort?: string };
@@ -15,6 +16,7 @@ export interface ApiTask {
     assignedTo: string;
     parentId?: string;
     status: string;
+    waitingReason?: 'subtasks' | 'human' | 'validation';
     depth: number;
     maxDepth: number;
     canCreateSubtasks: boolean;
@@ -110,7 +112,6 @@ export interface ApiSettings {
   };
   providers: ApiProviderConfig[];
   advanced: {
-    maxConcurrency: number;
     runTimeoutMs: number;
     maxTaskDepth: number;
     maxSubtasksPerTask: number;
