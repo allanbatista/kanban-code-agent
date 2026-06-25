@@ -1,6 +1,7 @@
 # Spec & Plano — Isolamento de Tasks, Projetos e Gerenciamento de Agentes
 
-> Status: **parte implementada, parte proposta** · Escopo: arquitetura de
+> Status: **parte implementada, parte proposta** · Revisado contra o código vivo
+> em 2026-06-24 · Escopo: arquitetura de
 > isolamento de execução, modelo de projetos, integração Git e ciclo de vida da
 > task.
 > Princípio guia: **lazy-but-correct** — a solução mais simples que sustenta
@@ -27,20 +28,23 @@
 | Guard `activeRunId` (descartar output de run superada) | §3.6 idempotência/checkpoints; §13.4 "estado vive no ledger" | **feito** (3 pontos) |
 | Tetos de custo/tempo/profundidade/estagnação | §10 condições de parada; §5.3 monitor de convergência | **feito** (governança + convergência) |
 | Estado `REVIEW` + gate de avaliação dupla | §4 "Em Revisão/Validação"; §8.2 avaliador independente; §11 DoD | estado **feito**; gate de **merge** proposto |
+| DoD antes de `REVIEW` + fechamento em `progress-log` | §11 Definição de Conclusão; §3.5 artefatos de continuidade | **feito**; escopo explícito ainda parcial |
+| Contrato de Task antes da execução | §9.1 "acordar pronto antes de começar" | **parcial**: `scope-spec` existe; negociação executor↔avaliador ainda não |
 | Merge num único escritor no branch protegido | §11 "consolidado ao destino principal" | **proposto** (Fase 2) |
 | Injeção de credencial git "nunca vazar" | §6 "o sandbox restringe"; §7 "o Harness garante" | **proposto** (Fase 4) |
 | Auth de API (bearer token opt-in) | §7 "o Harness garante" (controle de acesso) | **feito** (`SWARM_AUTH_TOKEN`) |
 | Event log append-only + snapshot reconstruível | §1.3 Kanban como SSOT; §3.3 ledger durável | **feito** (tasks); **projetos ainda não** |
 
-A leitura curta: **a continuidade, a governança e o estado já são fiéis ao
-`PROJECT.md`**; o que falta é o **isolamento físico** (processo + worktree +
-credencial git) — a camada "mãos/sandbox" que hoje roda in-process.
+A leitura curta: **a continuidade, a governança, o DoD e os estados já estão bem
+próximos do `PROJECT.md`**; o que falta é o **isolamento físico** (processo +
+worktree + credencial git), o **SSOT de projetos** e o **contrato pré-execução**
+que transforma "pronto" em escopo verificável antes de construir.
 
 ---
 
 ## 1. Objetivo e escopo
 
-Entregar quatro capacidades, em ordem de risco crescente:
+Entregar cinco capacidades, em ordem de risco crescente:
 
 1. **Projetos** com config minimalista (slug, git URL, branch) e relação N:N com
    tasks. *(o store já está unificado; falta o schema git e o link na task)*
@@ -50,6 +54,8 @@ Entregar quatro capacidades, em ordem de risco crescente:
    no branch protegido *(proposto)*.
 4. **Gate de merge** sobre o estado `REVIEW` **já existente** e **injeção segura
    de credenciais** *(proposto)*.
+5. **Contrato de Task pré-execução** usando o `scope-spec` já existente, sem novo
+   estado de máquina *(parcial; ajuste transversal)*.
 
 Fora de escopo (YAGNI, ver §11): multi-host, autoscaling de agentes, pipeline de
 deploy real, secret manager externo.
@@ -75,8 +81,10 @@ deploy real, secret manager externo.
 | Eventos | ✅ **29 tipos** (`types.ts:88`). Já incluem `TASK_REVIEW`, `TASK_SUSPENDED`, `RUN_TIMEOUT`, `BUDGET_EXCEEDED`, `HEARTBEAT`, `RUN_CANCELLED`, `TASK_ARCHIVED`. | Faltam só git/projeto/worker: `WORKTREE_*`, `COMMIT_*`, `BRANCH_MERGED`, `MERGE_BLOCKED`, `PROJECT_*`, `TASK_PROJECT_LINKED`, `WORKER_*`. |
 | Auth de API | ✅ **Bearer token opt-in** (`middleware/auth.ts`, `http-server.ts:91-93`) via `SWARM_AUTH_TOKEN`. No-op quando ausente. | Cobre acesso à API, **não** credencial git. Ver §3.5. |
 | Continuidade | ✅ scope-spec.json / progress-log.jsonl / env-resume.json por task (`task-file-store.ts:151-191`), reidratados a cada run (`orquestrator.ts:1172-1177`) e injetados no prompt (`prompt-builder.ts:67-99`). | Reidratação já existe; o isolamento só precisa **preservá-la** (§5.4). |
+| Contrato de Task / DoD | ✅ `ensureScopeSpec` cria um `scope-spec.json` mínimo (`orquestrator.ts:2935`); `checkDoD` bloqueia `REVIEW` se um scope explícito multi-item estiver incompleto, houver subtask aberta, avaliação pendente, artefato ausente ou budget estourado (`:1960`). | O DoD existe; falta o **contrato pré-execução** do PROJECT.md §9.1. O item auto-semeado é só consultivo. |
 | Governança | ✅ `Governance` value object com 7 tetos (`domain/governance.ts`), snapshot imutável por run (`run.ts:13`, `orquestrator.ts:2562`); budget + convergência gated antes de `applyDecision`. | Os hard ceilings do `PROJECT.md` §10 **já operam**. |
 | Gate de avaliação | ✅ **opt-in** via `SWARM_EVALUATION_GATE=1` (`orquestrator.ts:433`). Ligado, um Manager root precisa passar QA + Code Review (avaliadores independentes) antes de chegar a `REVIEW` (gate `:1907`/`:1951`). | Implementa o avaliador independente do `PROJECT.md` §8.2 e o DoD §11. É o gate natural onde o merge git pendura (§3.1). |
+| Config de timeout | `config.ts` lê/valida `SWARM_RUN_TIMEOUT_MS`, mas `Orquestrator` também lê `RUN_TIMEOUT_MS` direto do env (`orquestrator.ts:145`) e passa ao `WorkerPool` vestigial. | Duas fontes conceituais e nenhuma enforça timeout hoje. Fase 3 deve unificar config + governança. |
 | Agente "Manager" | É um *papel de IA* (prompt/modelo), não um processo. | A proposta introduz hierarquia de **processos** Master/Manager/Worker. |
 
 **Decisão de terminologia** (evita ambiguidade com o agente de IA "Manager"):
@@ -110,6 +118,24 @@ Onde exatamente cada mudança encaixa — lido no código, com linhas atuais:
 | **Emissão de evento** | `recordEvent(type, { task, parentId, runId, waitId, messages, payload })` (`:2972`) | Assinatura **estruturada** (não posicional). Dedup de eventos terminais salvo `payload.allowDuplicateTerminalEvent` (`:2983-`). Novos tipos em `SWARM_EVENT_TYPE` (`types.ts:88`). |
 | **Rota de projeto** ✅ unificada | `http-server.ts:130` `registerProjectRoutes(fastify, new ProjectFileStore(...))`; `routes/projects.ts:25` recebe store | **Já injeta** o store. Resta o schema (Zod valida só name/description/taskIds, `routes/projects.ts:7-17`). |
 | **Eventos existentes** ✅ | `domain/types.ts:88` `SWARM_EVENT_TYPE` (**29 tipos**) | Reusar convenção e o envelope `SwarmEvent` (`events.ts:4-25`: seq/eventId/type/taskId/parentId/runId/waitId/ts/messages/processedByTaskIds/payload). Snapshot em `version:2`. |
+
+### 2.2 Gaps reais contra o `PROJECT.md`
+
+O que ainda não bate com a especificação conceitual:
+
+1. **SSOT de projetos:** tasks são event-sourced; projetos ainda são CRUD em
+   `.kanban-data/projects/*.json`, fora do ledger do Kanban (§1.3/§3.3).
+2. **Sandbox físico:** `PathSandbox` protege paths, mas ferramentas rodam no
+   mesmo processo; não há `systemd-run`, `ReadWritePaths`, CPU/memória ou kill
+   externo (§1.5/§6/§7).
+3. **Contrato de Task prévio:** existe `scope-spec.json` e DoD, mas não existe
+   etapa persistida "executor propõe / avaliador aprova" antes da execução
+   (§9.1). O caminho preguiçoso é reaproveitar `scope-spec`, não criar estado novo.
+4. **Concorrência e timeout:** o texto do AGENTS fala em `WorkerPool`, mas a
+   implementação real agenda por `pumpQueue`; timeout configurado não aborta run
+   hoje (§10).
+5. **Integração ao destino principal:** `REVIEW` existe, mas ainda não há branch,
+   commit, merge, SHA ou lock por projeto (§11).
 
 ---
 
@@ -389,7 +415,42 @@ interface Governance {
   **não** pelos campos do snapshot — os campos `maxDepth`/`maxSubtasksPerTask`
   ficam duplicados/inertes. Surfacing como dívida.
 
-### 4.4 Layout de diretórios (ATUAL vs PROPOSTO)
+### 4.4 Contrato de Task e DoD
+
+O `PROJECT.md` §9.1 pede um contrato antes da execução: "o que será construído" +
+"como será verificado". A implementação atual já tem metade disso:
+
+- `scope-spec.json` existe e é carregado em toda run. Quando só há o item
+  auto-semeado (`obj`), ele é **consultivo** para não travar o fluxo.
+- Se o `scope-spec` for decomposto em múltiplos itens, `checkDoD` exige todos
+  `satisfied=true` antes de `REVIEW`.
+- `recordClosingProgressEntry` grava o fechamento no `progress-log.jsonl`.
+
+Alvo mínimo, sem criar uma máquina nova:
+
+```ts
+interface ScopeSpecItem {
+  id: string;
+  description: string;
+  verification?: string; // comando, teste manual ou evidência esperada
+  satisfied: boolean;
+  verifiedAt?: string;
+}
+```
+
+Regras:
+- Task simples pode continuar com 1 item consultivo.
+- Task complexa deve decompor `scope-spec` antes do primeiro trabalho de código.
+- QA/Code Reviewer aprovam contra `verification`; sem aprovação, não entra em
+  `REVIEW`.
+- Não criar estado `CONTRACTING`; usar `PENDING/QUEUED` + eventos/artefatos já
+  existentes até uma falha real exigir mais.
+
+`ponytail:` reaproveitar `scope-spec`. Teto: histórico de negociação fica pobre.
+Upgrade: evento `TASK_CONTRACT_UPDATED` com `proposedBy/approvedBy` quando a
+auditoria precisar distinguir versões do contrato.
+
+### 4.5 Layout de diretórios (ATUAL vs PROPOSTO)
 
 > Raiz real = `<dataDir>/.swarm/` onde `dataDir` default = `~/.kca`
 > (`config.ts:32-35`; override `SWARM_DATA_DIR`/`data_dir`). **Não** é `./.swarm/`
@@ -512,7 +573,9 @@ isolamento implica **três** coisas, não só relocar execução:
    drena a fila inteira sem limite. (Reaproveitar/reativar o `WorkerPool`, hoje
    vestigial, ou um semáforo simples.)
 3. **Restaurar o timeout por run** (hoje morto): armar abort por
-   `gov.maxActiveMs`/`RuntimeMaxSec`.
+   `gov.maxActiveMs`/`RuntimeMaxSec` e remover a ambiguidade entre
+   `config.runTimeoutMs`, `RUN_TIMEOUT_MS` local do Orquestrator e snapshot de
+   governança.
 
 O guard de descarte de run superada (`:1181`/`:1206`/`:1238`) **tem de ser
 preservado nos três pontos** através da fronteira de processo: o Master descarta
@@ -586,6 +649,7 @@ entram no event log ⇒ rastreável do pedido ao merge.
 | 0 | `infrastructure/api/routes/projects.ts` | Zod com slug/gitUrl/branch (store **já injetado**) | parcial — só Zod |
 | 0 | `domain/task.ts`, `domain/types.ts` | + `projectIds` em `TaskOptions` + `serialize/fromSerialized` | TODO |
 | 0 | `domain/types.ts` + CRUD de projeto | eventos `PROJECT_*` + rotear CRUD pelo event log (hoje file-only) | TODO (maior do que parecia) |
+| 0 | `infrastructure/persistence/task-file-store.ts`, `application/orquestrator.ts` | formalizar `scope-spec.verification` como contrato pré-execução mínimo | TODO |
 | 1 | `infrastructure/persistence/task-file-store.ts` | + `ensureWorkspaceDir`, helper de worktree path (hook em `ensureTaskDir:282`) | TODO |
 | 2 | `infrastructure/git/git-repo.ts` *(novo)* | mirror/fetch/worktree/branch/commit/merge (`node:child_process`) | TODO |
 | 2 | `application/orquestrator.ts` | hook pré-run (`:1171`, criar worktree) e pós-task (`:1235` `applyDecision`, reconciliar/merge) | TODO |
@@ -650,10 +714,11 @@ WORKER_SPAWNED / WORKER_EXITED { taskId, runId, unit, code }
 | ~~T0.3~~ | ~~Trocar `Map` por `ProjectFileStore` na rota~~ | — | ✅ **FEITO** (`http-server.ts:130`); resta só ampliar o Zod (slug/gitUrl/branch) em `routes/projects.ts:7-17` |
 | T0.4 | `projectIds?: string[]` em `TaskOptions` + `serialize/fromSerialized` | `task.ts:45-52,233-267`, `types.ts` | Teste: round-trip preserva `projectIds`; default `[]` |
 | T0.5 | Eventos `PROJECT_*`/`TASK_PROJECT_LINKED` + **rotear CRUD de projeto pelo event log** + projeção no snapshot | `types.ts`, `project-file-store.ts`, `snapshot-store.ts` | `recordEvent` emite; **replay a partir do log reconstrói projeto + link** (não só leitura de arquivo) |
-| T0.6 | UI: campos slug/gitUrl/branch no form + seletor multi-projeto na task; **remover** o fallback de substring (`ProjectDetail.tsx:33-37`) | `web/` | Manual: criar projeto com git, linkar 0/1/N; associação por `projectIds` |
+| T0.6 | Formalizar contrato mínimo no `scope-spec`: `verification`, geração para task complexa, DoD lendo o campo | `task-file-store.ts`, `orquestrator.ts`, `prompt-builder.ts` | Teste: scope multi-item incompleto bloqueia `REVIEW`; item satisfeito com evidência passa |
+| T0.7 | UI: campos slug/gitUrl/branch no form + seletor multi-projeto na task; **remover** o fallback de substring (`ProjectDetail.tsx:33-37`) | `web/` | Manual: criar projeto com git, linkar 0/1/N; associação por `projectIds` |
 
 > UI base **já existe** (`web/.../projects/`: Grid, Card, Dialog, Detail; CRUD via
-> `api/client.ts:108-138`). T0.6 só adiciona campos git + seletor e remove o
+> `api/client.ts:108-138`). T0.7 só adiciona campos git + seletor e remove o
 > heurístico — não reconstrói os componentes.
 
 ### Fase 1 — Workspace isolado por task
@@ -683,7 +748,7 @@ WORKER_SPAWNED / WORKER_EXITED { taskId, runId, unit, code }
 | T3.2 | `WorkerSupervisor` (interface) + `SystemdSupervisor` + `InprocSupervisor` | `infrastructure/process/worker-supervisor.ts` *(novo)* | Teste: `inproc` idêntico ao atual; `systemd` spawna unit (skip se indisponível) |
 | T3.3 | Flag `SWARM_ISOLATION=systemd\|inproc` (default `inproc`) | `config.ts` | Teste: env override; default seguro |
 | T3.4 | Substituir os **2** call-sites (`:1178` run, `:1198` repair) pelo supervisor, preservando o guard nos **3** pontos (`:1181/:1206/:1238`) | `orquestrator.ts` | Teste: output de unit superada descartado (invariante `activeRunId`) |
-| T3.5 | **Teto de concorrência real** no `pumpQueue` (`:1740`) via nova env `SWARM_MAX_CONCURRENT_RUNS` (default 4; hoje **não existe** — concorrência é ilimitada) + **timeout real** por run (derivado de `gov.maxActiveMs`/`RuntimeMaxSec`) | `orquestrator.ts`, `worker-pool.ts`, `config.ts` | Teste: N+1 runs enfileiram quando N=teto; run que excede o tempo é abortada |
+| T3.5 | **Teto de concorrência real** no `pumpQueue` (`:1740`) via nova env `SWARM_MAX_CONCURRENT_RUNS` (default 4; hoje **não existe** — concorrência é ilimitada) + **timeout real** por run (derivado de `gov.maxActiveMs`/`RuntimeMaxSec`) + uma única fonte de config | `orquestrator.ts`, `worker-pool.ts`, `config.ts` | Teste: N+1 runs enfileiram quando N=teto; run que excede o tempo é abortada; env/file produzem o mesmo timeout efetivo |
 | T3.6 | Limites systemd (`RuntimeMaxSec←gov.maxActiveMs`, `MemoryMax/CPUQuota/ReadWritePaths`) + cancel via `systemctl stop` | `worker-supervisor.ts` | Manual: estourar memória mata a unit; cancel encerra |
 | T3.7 | Reconexão pós-restart: snapshot guarda unit/socket; boot reidrata budget/métricas (`reseedBudget`) e reconcilia | `orquestrator.ts`, `snapshot-store.ts` | Teste: restart com run ativa não duplica execução nem zera custo |
 
@@ -754,6 +819,8 @@ WORKER_SPAWNED / WORKER_EXITED { taskId, runId, unit, code }
 |------|-----------|
 | **Concorrência hoje é ilimitada** (`pumpQueue` sem teto) | Fase 3 introduz teto real; **não** assumir que `WorkerPool` já controla (é vestigial) |
 | **Timeout por run não enforça hoje** | Fase 3 restaura abort por `gov.maxActiveMs`/`RuntimeMaxSec` |
+| **Config de timeout duplicada** (`config.ts` vs `orquestrator.ts`) | Fase 3 escolhe uma fonte efetiva e testa env + arquivo |
+| **Contrato pré-execução incompleto** | Reusar `scope-spec.verification`; só criar evento dedicado se auditoria exigir |
 | **Dois call-sites in-process** (run + repair) | Isolar ambos; preservar o guard nos 3 pontos |
 | **Worker morre antes de flush** ⇒ convergência perde sinal | Worker persiste `run.resultMessages` ao ledger antes de o Master superar a unit |
 | **Restart zera custo acumulado** | `reseedBudget` + refold de `HEARTBEAT` no boot antes de re-spawnar |
@@ -779,6 +846,8 @@ WORKER_SPAWNED / WORKER_EXITED { taskId, runId, unit, code }
 - **Eventos `TASK_REVIEW_APPROVED/REJECTED` dedicados** — adiado se a transição
   `REVIEW→COMPLETED`/retry já bastar para a auditoria; adicionar só quando o
   veredito precisar de payload próprio (by/feedback).
+- **Estado `CONTRACTING`** — adiado; `scope-spec` + eventos existentes cobrem o
+  contrato inicial sem ampliar a máquina de estados.
 - **Limpeza da duplicação de governança** (`maxDepth`/`maxSubtasksPerTask` inertes
   no snapshot vs constantes de módulo) — adiado, mas registrado (§4.3).
 
@@ -798,3 +867,5 @@ WORKER_SPAWNED / WORKER_EXITED { taskId, runId, unit, code }
    vazam) + auth de API bearer-token (`SWARM_AUTH_TOKEN`). Para git: proposta
    `systemd-creds`/`LoadCredentialEncrypted` + `GIT_ASKPASS`; Vault só com
    multi-host.
+5. **Contrato/DoD**: DoD antes de `REVIEW` já existe; contrato pré-execução ainda
+   deve reaproveitar `scope-spec` com `verification`, sem novo estado.
