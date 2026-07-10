@@ -6,6 +6,8 @@ import type {
   ApiProject,
   ApiProjectListResponse,
   ApiSettings,
+  ApiCodexStatus,
+  ApiCodexDeviceLogin,
   ApiHealth,
 } from '@/types/api';
 
@@ -195,6 +197,25 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(data),
     });
+  },
+
+  // --- Codex shared auth ---
+
+  getCodexStatus(): Promise<ApiCodexStatus> {
+    return request<ApiCodexStatus>('/api/settings/codex/status');
+  },
+
+  codexLogin(
+    data: { method: 'apiKey'; apiKey: string } | { method: 'deviceCode' },
+  ): Promise<{ ok?: boolean } & Partial<ApiCodexDeviceLogin>> {
+    return request('/api/settings/codex/login', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  codexLogout(): Promise<{ ok: boolean }> {
+    return request('/api/settings/codex/logout', { method: 'POST' });
   },
 
   // --- Health ---

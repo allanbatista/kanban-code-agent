@@ -230,11 +230,20 @@ function serializeRunConfig(config: AgentRunConfig): SerializableRunConfig {
   };
 }
 
-async function listenToolServer(socketPath: string, tools: CustomToolSpec[]): Promise<Server> {
+// Exportado para reuso pelo CodexAgentClient (mesmo tool-callback UDS). Alem do
+// POST /tool {name, params}, expoe GET /tools com os specs (name/description/
+// parameters) para o MCP bridge do Codex montar tools/list. Evita duplicar o
+// servidor entre supervisor e client.
+export async function listenToolServer(socketPath: string, tools: CustomToolSpec[]): Promise<Server> {
   rmSync(socketPath, { force: true });
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   const server = createServer(async (request, response) => {
     try {
+      if (request.method === 'GET' && request.url === '/tools') {
+        const specs = tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
+        sendJson(response, 200, { ok: true, tools: specs });
+        return;
+      }
       if (request.method !== 'POST' || request.url !== '/tool') {
         sendJson(response, 404, { ok: false, error: 'not_found' });
         return;
@@ -339,7 +348,7 @@ function listenUnix(server: Server, socketPath: string): Promise<void> {
   });
 }
 
-function closeServer(server: Server): Promise<void> {
+export function closeServer(server: Server): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });

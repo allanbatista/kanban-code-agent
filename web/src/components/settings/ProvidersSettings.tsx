@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Eye, EyeOff, Plus } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { CodexSettings } from './CodexSettings';
 
 export function ProvidersSettings() {
   const { fetchSettings, rawProviders, agentDefault, updateAgentDefault, providerKeyEdits, setProviderKey, saveSettings } = useSettingsStore();
@@ -54,6 +55,8 @@ export function ProvidersSettings() {
           </Select>
         </CardContent>
       </Card>
+
+      <CodexSettings />
 
       <Card>
         <CardContent className="p-0">

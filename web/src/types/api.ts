@@ -134,6 +134,19 @@ export interface ApiProviderConfig {
   enabled: boolean;
 }
 
+export interface ApiCodexStatus {
+  loggedIn: boolean;
+  method?: 'apiKey' | 'chatgpt';
+  email?: string;
+  plan?: string;
+}
+
+export interface ApiCodexDeviceLogin {
+  loginId: string;
+  verificationUrl: string;
+  userCode: string;
+}
+
 export interface ApiHealth {
   status: string;
   uptime: number;

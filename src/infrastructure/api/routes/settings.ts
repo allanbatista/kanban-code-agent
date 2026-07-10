@@ -1,7 +1,8 @@
 import { z } from 'zod';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { Orquestrator } from '../../../application/orquestrator.js';
 import type { Settings, SettingsStore } from '../../persistence/settings-store.js';
+import { CodexAuthManager, CodexBinaryMissingError, LoginBusyError } from '../../security/codex-auth.js';
 
 // --- Zod Schemas ---
 
@@ -52,13 +53,32 @@ function toSettingsResponse(settings: Settings) {
 
 // --- Route Registration ---
 
+const codexLoginBody = z.discriminatedUnion('method', [
+  z.object({ method: z.literal('apiKey'), apiKey: z.string().min(1) }),
+  z.object({ method: z.literal('deviceCode') }),
+]);
+
+// Mapeia erros de auth do Codex para status HTTP claros (nunca vaza a key).
+function replyCodexError(reply: FastifyReply, err: unknown) {
+  if (err instanceof CodexBinaryMissingError) {
+    return reply.status(503).send({ error: 'Codex CLI não instalado (defina SWARM_CODEX_BIN).' });
+  }
+  if (err instanceof LoginBusyError) {
+    return reply.status(409).send({ error: 'Já existe um login do Codex em andamento.' });
+  }
+  return reply.status(500).send({ error: err instanceof Error ? err.message : 'Erro no login do Codex.' });
+}
+
 export interface SettingsRouteDeps {
   settingsStore: SettingsStore;
   orquestrator: Orquestrator;
+  /** Injecao para testes; default cria do dataDir do orquestrator. */
+  codexAuth?: CodexAuthManager;
 }
 
 export function registerSettingsRoutes(fastify: FastifyInstance, deps: SettingsRouteDeps): void {
   const { settingsStore, orquestrator } = deps;
+  const codexAuth = deps.codexAuth ?? new CodexAuthManager(orquestrator.sandbox.getBaseDir());
 
   // GET /api/settings — settings persistidos (keys mascaradas)
   fastify.get('/api/settings', async () => {
@@ -97,5 +117,36 @@ export function registerSettingsRoutes(fastify: FastifyInstance, deps: SettingsR
     orquestrator.setDefaultAgent(settings.agent);
 
     return toSettingsResponse(settings);
+  });
+
+  // --- Auth compartilhada do Codex (CODEX_HOME em .swarm/auth/codex) ---
+
+  // POST /api/settings/codex/login — {method:'apiKey', apiKey} | {method:'deviceCode'}
+  fastify.post('/api/settings/codex/login', async (request, reply) => {
+    const body = codexLoginBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
+    }
+    try {
+      if (body.data.method === 'apiKey') {
+        await codexAuth.loginWithApiKey(body.data.apiKey);
+        return { ok: true };
+      }
+      // deviceCode: devolve URL+código para a UI exibir; status reporta a conclusão.
+      return await codexAuth.startDeviceCodeLogin();
+    } catch (err) {
+      return replyCodexError(reply, err);
+    }
+  });
+
+  // GET /api/settings/codex/status — nunca inclui tokens/keys.
+  fastify.get('/api/settings/codex/status', async () => {
+    return codexAuth.readStatus();
+  });
+
+  // POST /api/settings/codex/logout — remove o auth.json compartilhado.
+  fastify.post('/api/settings/codex/logout', async () => {
+    codexAuth.logout();
+    return { ok: true };
   });
 }

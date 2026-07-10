@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import type { FastifyInstance } from 'fastify';
 
 import { Orquestrator } from '../../../application/orquestrator.js';
@@ -280,5 +281,90 @@ describe('API auth (F8.T2, opt-in)', () => {
     const ok = await server.inject({ method: 'GET', url: '/api/tasks', headers: { authorization: 'Bearer secret-123' } });
     expect(ok.statusCode).toBe(200);
     expect((await server.inject({ method: 'GET', url: '/health' })).statusCode).toBe(200);
+  });
+});
+
+// --- Codex shared auth (F1.3): rotas com stub do codex CLI honrando CODEX_HOME ---
+
+const FAKE_CODEX = fileURLToPath(new URL('../../_helpers/fake-codex-cli.mjs', import.meta.url));
+
+describe('Codex auth routes (F1.3)', () => {
+  let dir: string;
+  let server: FastifyInstance;
+  const savedBin = process.env.SWARM_CODEX_BIN;
+  const savedDelay = process.env.SWARM_FAKE_CODEX_DELAY_MS;
+
+  function authPath(): string {
+    return join(dir, '.swarm', 'auth', 'codex', 'auth.json');
+  }
+  function start(bin: string): void {
+    process.env.SWARM_CODEX_BIN = bin;
+    dir = mkdtempSync(join(tmpdir(), 'api-codex-'));
+    ({ server } = build(dir));
+  }
+
+  afterEach(async () => {
+    if (server) await server.close();
+    if (savedBin === undefined) delete process.env.SWARM_CODEX_BIN; else process.env.SWARM_CODEX_BIN = savedBin;
+    if (savedDelay === undefined) delete process.env.SWARM_FAKE_CODEX_DELAY_MS; else process.env.SWARM_FAKE_CODEX_DELAY_MS = savedDelay;
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* noop */ }
+  });
+
+  it('apiKey login writes auth.json (0600) and status reports logged in without leaking the key', async () => {
+    start(FAKE_CODEX);
+    const login = await server.inject({
+      method: 'POST',
+      url: '/api/settings/codex/login',
+      payload: { method: 'apiKey', apiKey: 'sk-secret-abc123' },
+    });
+    expect(login.statusCode).toBe(200);
+    expect(existsSync(authPath())).toBe(true);
+    // Resposta nunca contém a key.
+    expect(login.payload).not.toContain('sk-secret-abc123');
+
+    const status = await server.inject({ method: 'GET', url: '/api/settings/codex/status' });
+    expect(status.statusCode).toBe(200);
+    const body = status.json();
+    expect(body.loggedIn).toBe(true);
+    expect(body.method).toBe('apiKey');
+    // Nunca devolve tokens/keys.
+    expect(status.payload).not.toContain('sk-secret-abc123');
+  });
+
+  it('status is false before login and logout removes the auth.json', async () => {
+    start(FAKE_CODEX);
+    const before = await server.inject({ method: 'GET', url: '/api/settings/codex/status' });
+    expect(before.json().loggedIn).toBe(false);
+
+    await server.inject({ method: 'POST', url: '/api/settings/codex/login', payload: { method: 'apiKey', apiKey: 'sk-x' } });
+    expect(existsSync(authPath())).toBe(true);
+
+    const logout = await server.inject({ method: 'POST', url: '/api/settings/codex/logout' });
+    expect(logout.statusCode).toBe(200);
+    expect(existsSync(authPath())).toBe(false);
+    expect((await server.inject({ method: 'GET', url: '/api/settings/codex/status' })).json().loggedIn).toBe(false);
+  });
+
+  it('returns 503 when the codex binary is absent', async () => {
+    start('/nonexistent/definitely-not-codex-xyz');
+    const res = await server.inject({ method: 'POST', url: '/api/settings/codex/login', payload: { method: 'apiKey', apiKey: 'sk-x' } });
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('rejects a second concurrent login with 409', async () => {
+    process.env.SWARM_FAKE_CODEX_DELAY_MS = '400';
+    start(FAKE_CODEX);
+    const [a, b] = await Promise.all([
+      server.inject({ method: 'POST', url: '/api/settings/codex/login', payload: { method: 'apiKey', apiKey: 'sk-a' } }),
+      server.inject({ method: 'POST', url: '/api/settings/codex/login', payload: { method: 'apiKey', apiKey: 'sk-b' } }),
+    ]);
+    const codes = [a.statusCode, b.statusCode].sort();
+    expect(codes).toEqual([200, 409]);
+  });
+
+  it('rejects an invalid login body with 400', async () => {
+    start(FAKE_CODEX);
+    const res = await server.inject({ method: 'POST', url: '/api/settings/codex/login', payload: { method: 'apiKey' } });
+    expect(res.statusCode).toBe(400);
   });
 });
