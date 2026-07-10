@@ -21,6 +21,39 @@ const PARTIAL = JSON.stringify({
 });
 const USAGE = { inputTokens: 12, outputTokens: 7, totalTokens: 19 };
 
+// Valida o outputSchema recebido contra as regras strict da OpenAI que quebraram
+// em producao: em TODO objeto com `properties`, `additionalProperties` deve ser
+// false e `required` deve conter todas as chaves de `properties` (recursivo).
+// Devolve a mensagem de erro 400-style na primeira violacao, ou null se valido.
+function validateStrictSchema(schema, path = []) {
+  if (!schema || typeof schema !== 'object') return null;
+  const ctx = () => `(${path.map((p) => `'${p}'`).join(',')})`;
+  const props = schema.properties;
+  if (props && typeof props === 'object') {
+    const keys = Object.keys(props);
+    if (keys.length > 0) {
+      if (schema.additionalProperties !== false) {
+        return `In context=${ctx()}, 'additionalProperties' is required to be supplied and to be false.`;
+      }
+      const required = Array.isArray(schema.required) ? schema.required : [];
+      for (const key of keys) {
+        if (!required.includes(key)) {
+          return `In context=${ctx()}, 'required' is required to be supplied and to be an array including every key in properties. Missing '${key}'.`;
+        }
+      }
+    }
+    for (const key of keys) {
+      const err = validateStrictSchema(props[key], [...path, 'properties', key]);
+      if (err) return err;
+    }
+  }
+  if (schema.items) {
+    const err = validateStrictSchema(schema.items, [...path, 'items']);
+    if (err) return err;
+  }
+  return null;
+}
+
 function emit(message) {
   process.stdout.write(JSON.stringify(message) + '\n');
 }
@@ -92,10 +125,19 @@ function handle(message) {
     case 'thread/start':
       respond(message.id, { thread: { id: 'thr_fake', sessionId: 'thr_fake' } });
       break;
-    case 'turn/start':
+    case 'turn/start': {
       respond(message.id, { turn: { id: 'turn_fake', status: 'inProgress', items: [] } });
+      // Espelha o backend real: outputSchema que viola strict derruba o turno.
+      const schemaError = message.params?.outputSchema
+        ? validateStrictSchema(message.params.outputSchema)
+        : null;
+      if (schemaError) {
+        completed('failed', { error: { message: `400 invalid_json_schema: ${schemaError}` } });
+        break;
+      }
       runTurn();
       break;
+    }
     case 'turn/interrupt':
       respond(message.id, null);
       completed('interrupted');

@@ -3,6 +3,7 @@ import { spawn as realSpawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { CodexAgentClient } from '../../application/codex-client.js';
+import { CodexRunner, DECISION_OUTPUT_SCHEMA } from '../../cli/codex-runner.js';
 import { RoutingAgentClient } from '../../cli/orquestrator-factory.js';
 import { RunCancelledError } from '../../application/pi-client.js';
 import type { AgentClient } from '../../application/agent-client.js';
@@ -133,6 +134,50 @@ describe('CodexAgentClient (fake app-server)', () => {
       orquestrator.shutdown();
       cleanup();
     }
+  });
+
+  // O fake app-server agora valida o outputSchema com as MESMAS regras strict que
+  // quebraram em producao (400 invalid_json_schema). Prova que o schema real passa
+  // e que um schema nao-strict derruba o turno — a regressao nao volta a passar.
+  it('aceita o DECISION_OUTPUT_SCHEMA real (strict-compliant) sem derrubar o turno', async () => {
+    const captured = newCaptured();
+    const runner = new CodexRunner({ codexHome: '/tmp/kca-codexhome', spawn: makeSpawn('success', captured) });
+    const result = await runner.runTurn({
+      cwd: process.cwd(),
+      model: 'm',
+      effort: 'low',
+      sandboxPolicy: 'workspaceWrite',
+      outputSchema: DECISION_OUTPUT_SCHEMA,
+      prompt: 'oi',
+    });
+    expect(JSON.parse(result.output).status).toBe('completed');
+    await waitExit(captured.children[0]);
+  });
+
+  it('o fake app-server derruba o turno com 400 invalid_json_schema quando o outputSchema viola strict', async () => {
+    const captured = newCaptured();
+    const runner = new CodexRunner({ codexHome: '/tmp/kca-codexhome', spawn: makeSpawn('success', captured) });
+    // Reproduz o bug: chave 'messages' de properties ausente em required (nested).
+    const brokenSchema = {
+      type: 'object',
+      additionalProperties: false,
+      required: ['status'],
+      properties: {
+        status: { type: 'string' },
+        messages: { type: 'array', items: { type: 'string' } },
+      },
+    };
+    await expect(
+      runner.runTurn({
+        cwd: process.cwd(),
+        model: 'm',
+        effort: 'low',
+        sandboxPolicy: 'workspaceWrite',
+        outputSchema: brokenSchema,
+        prompt: 'oi',
+      }),
+    ).rejects.toThrow(/invalid_json_schema[\s\S]*Missing 'messages'/);
+    await waitExit(captured.children[0]);
   });
 
   it('cancela via AbortSignal (RunCancelledError) e mata o processo', async () => {

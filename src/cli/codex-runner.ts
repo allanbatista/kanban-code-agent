@@ -68,10 +68,31 @@ export interface CodexTurnResult {
 // Contrato de decisao espelhado de parseDecision/AgentDecision (decision-parser.ts,
 // domain/task.ts). Enviado como outputSchema no turn/start para que o Codex
 // devolva o objeto ja estruturado.
+//
+// STRICT MODE (OpenAI structured outputs): quando o codex app-server encaminha
+// isto como response_format json_schema em strict, o backend exige que TODA chave
+// de `properties` esteja em `required` — em cada nivel de aninhamento. A
+// opcionalidade real e expressa tornando o tipo nullable ({"type":["string","null"]});
+// enums nullable seguem a forma documentada pela OpenAI: {"type":["string","null"],
+// "enum":[...]} (o `null` vai no array de tipos, NAO no array do enum). O modelo
+// passa a emitir null para campos ausentes; runCodexTurn remove essas chaves antes
+// de o parseDecision ver a saida (stripNullFields).
 export const DECISION_OUTPUT_SCHEMA: Record<string, unknown> = {
   type: 'object',
   additionalProperties: false,
-  required: ['status', 'messages'],
+  required: [
+    'status',
+    'messages',
+    'waitGroups',
+    'waitMode',
+    'waitingForTaskIds',
+    'instructions',
+    'model',
+    'effort',
+    'verdict',
+    'criteria',
+    'feedback',
+  ],
   properties: {
     status: { type: 'string', enum: ['completed', 'waiting', 'retry'] },
     messages: {
@@ -86,8 +107,9 @@ export const DECISION_OUTPUT_SCHEMA: Record<string, unknown> = {
         },
       },
     },
+    // waitGroups: opcional -> array nullable.
     waitGroups: {
-      type: 'array',
+      type: ['array', 'null'],
       items: {
         type: 'object',
         additionalProperties: false,
@@ -99,26 +121,28 @@ export const DECISION_OUTPUT_SCHEMA: Record<string, unknown> = {
         },
       },
     },
-    waitMode: { type: 'string', enum: ['WAIT_ALL', 'ON_DEMAND'] },
-    waitingForTaskIds: { type: 'array', items: { type: 'string' } },
-    instructions: { type: 'string' },
-    model: { type: 'string', enum: ['fast', 'balanced', 'deep'] },
-    effort: { type: 'string', enum: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
-    verdict: { type: 'string', enum: ['approved', 'rejected'] },
+    // Enum nullable: `null` vai no array de tipos, nunca no array do enum.
+    waitMode: { type: ['string', 'null'], enum: ['WAIT_ALL', 'ON_DEMAND'] },
+    waitingForTaskIds: { type: ['array', 'null'], items: { type: 'string' } },
+    instructions: { type: ['string', 'null'] },
+    model: { type: ['string', 'null'], enum: ['fast', 'balanced', 'deep'] },
+    effort: { type: ['string', 'null'], enum: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
+    verdict: { type: ['string', 'null'], enum: ['approved', 'rejected'] },
     criteria: {
-      type: 'array',
+      type: ['array', 'null'],
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['name', 'passed'],
+        // `note` e opcional no contrato -> presente em required + tipo nullable.
+        required: ['name', 'passed', 'note'],
         properties: {
           name: { type: 'string' },
           passed: { type: 'boolean' },
-          note: { type: 'string' },
+          note: { type: ['string', 'null'] },
         },
       },
     },
-    feedback: { type: 'string' },
+    feedback: { type: ['string', 'null'] },
   },
 };
 
@@ -153,7 +177,42 @@ export async function runCodexTurn(
     signal: opts.signal,
   });
   // ponytail: cost=0 — o app-server nao reporta preco por token (so contagem).
-  return { output: result.output, stats: { tokens: result.usage, cost: 0 } };
+  // Com o schema strict o modelo emite null para campos ausentes; removemos
+  // essas chaves aqui, no ponto unico onde a saida do codex entra no caminho de
+  // decisao, antes de o parseDecision ver o JSON.
+  return { output: stripNullFields(result.output), stats: { tokens: result.usage, cost: 0 } };
+}
+
+// Remove recursivamente chaves com valor null de objetos (arrays sao percorridos,
+// elementos preservados). Necessario porque o outputSchema strict forca o modelo a
+// emitir {"waitGroups":null,...} para campos opcionais ausentes, e o parseDecision
+// trata `undefined` (ausente), nao `null`.
+function stripNulls(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripNulls);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, sub] of Object.entries(value as Record<string, unknown>)) {
+      if (sub === null) continue;
+      out[key] = stripNulls(sub);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Se `output` for JSON parseavel, remove chaves null-valued e re-serializa; senao
+ * (texto/markdown do caminho de fallback) devolve intacto. Ponto unico de limpeza
+ * da saida estruturada do codex antes do parseDecision.
+ */
+export function stripNullFields(output: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return output; // nao e JSON — deixa o caminho de texto/fallback intacto.
+  }
+  return JSON.stringify(stripNulls(parsed));
 }
 
 export function mapEffort(level: string): CodexEffort {
