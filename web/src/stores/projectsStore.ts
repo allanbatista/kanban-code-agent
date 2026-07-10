@@ -60,7 +60,8 @@ export const useProjectsStore = create<ProjectsState>((set, get) => ({
     await api.updateProject(id, data);
     set((state) => ({
       projects: state.projects.map((p) =>
-        p.id === id ? { ...p, ...data } : p,
+        // null limpa o devcontainerPath na API; no estado local vira undefined.
+        p.id === id ? { ...p, ...data, devcontainerPath: data.devcontainerPath ?? undefined } : p,
       ),
     }));
   },

@@ -110,7 +110,7 @@ export function CreateTaskDialog({ open, onOpenChange }: CreateTaskDialogProps) 
           </div>
           <div>
             <Label>Agent</Label>
-            <Select value={agent} onValueChange={setAgent}>
+            <Select value={agent} onValueChange={(v) => setAgent(v as typeof agent)}>
               <SelectTrigger className="mt-1">
                 <SelectValue />
               </SelectTrigger>
