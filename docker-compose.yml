@@ -1,0 +1,14 @@
+services:
+  kanban:
+    build: .
+    image: kanban-code-agent
+    container_name: kanban-code-agent
+    restart: unless-stopped
+    ports:
+      - '35000:35000'
+    env_file: .env
+    environment:
+      # Pinned here (not in .env) so the volume mount below always matches.
+      SWARM_DATA_DIR: /data
+    volumes:
+      - ./data:/data
