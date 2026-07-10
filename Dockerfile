@@ -11,7 +11,7 @@ COPY web ./web
 RUN cd web && pnpm run build && cd .. && pnpm run build:src
 
 FROM node:24-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates && rm -rf /var/lib/apt/lists/*
 # codex CLI pinado na versao validada (F1.3/F4.2) — agent codex + login no server.
 RUN npm i -g pnpm@10 @openai/codex@0.144.1
 WORKDIR /app
