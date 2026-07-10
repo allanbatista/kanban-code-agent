@@ -3,6 +3,7 @@ import { AtomicWriter } from '../filesystem/atomic-writer.js';
 import { PathSandbox } from '../filesystem/sandbox.js';
 import type { SwarmEvent } from '../../domain/events.js';
 import type { SerializedTask, Task } from '../../domain/task.js';
+import type { ProjectData } from './project-file-store.js';
 
 /**
  * Persisted snapshot state.
@@ -15,6 +16,7 @@ export interface SnapshotData {
   nextSeq: number;
   version: number;
   timestamp: string;
+  projects?: ProjectData[];
   // The event log is the append-only source of truth (events.jsonl); the
   // snapshot no longer embeds it. Kept optional only to read legacy snapshots.
   events?: SwarmEvent[];
@@ -43,6 +45,7 @@ export class SnapshotStore {
     tasks: Map<string, Task>,
     rootTaskIds: string[],
     nextSeq: number,
+    projects: Iterable<ProjectData> = [],
   ): void {
     const serializedTasks: SerializedTask[] = [];
     for (const task of tasks.values()) {
@@ -53,6 +56,7 @@ export class SnapshotStore {
       tasks: serializedTasks,
       rootTaskIds,
       nextSeq,
+      projects: [...projects],
       version: CURRENT_VERSION,
       timestamp: new Date().toISOString(),
     };

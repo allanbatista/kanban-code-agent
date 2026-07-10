@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // Set env vars before module imports (they are read at module init time)
@@ -12,7 +12,7 @@ import { INBOX_AGENT, Orquestrator } from '../../application/orquestrator.js';
 import { Task } from '../../domain/task.js';
 import { TASK_STATUS, SWARM_EVENT_TYPE, WAIT_GROUP_MODE, WAIT_GROUP_STATUS } from '../../domain/types.js';
 import type { Agent } from '../../domain/agent.js';
-import type { AgentRunResult, AgentRunner, AgentRunConfig, PiAgentClient } from '../../application/pi-client.js';
+import { RunCancelledError, type AgentRunResult, type AgentRunner, type AgentRunConfig, type PiAgentClient } from '../../application/pi-client.js';
 import type { SwarmEvent } from '../../domain/events.js';
 import type { TaskMetadata, AgentDecision } from '../../domain/task.js';
 import type { OrquestratorDeps } from '../../application/orquestrator.js';
@@ -135,6 +135,28 @@ describe('Orquestrator', () => {
       expect(created!.payload?.task).toBeDefined();
     });
 
+    it('emits PROJECT_CREATED and TASK_PROJECT_LINKED events', () => {
+      const client = createPiClient([]);
+      const deps = createDeps(dir, client);
+      const orc = new Orquestrator(deps);
+
+      const project = orc.createProject({ name: 'App', slug: 'app' });
+      const task = orc.createRootTask('Tarefa', 'agent-tester', undefined, [], undefined, [project.slug]);
+      const events = getEvents(orc);
+
+      expect(findEvent(events, SWARM_EVENT_TYPE.PROJECT_CREATED)).toBeDefined();
+      expect(findEvent(events, SWARM_EVENT_TYPE.TASK_PROJECT_LINKED, task.taskId)).toBeDefined();
+    });
+
+    it('rejects unknown projectIds', () => {
+      const client = createPiClient([]);
+      const deps = createDeps(dir, client);
+      const orc = new Orquestrator(deps);
+
+      expect(() => orc.createRootTask('Tarefa', 'agent-tester', undefined, [], undefined, ['missing']))
+        .toThrow('Projeto missing não encontrado');
+    });
+
     it('throws for unknown agent', () => {
       const client = createPiClient([]);
       const deps = createDeps(dir, client);
@@ -152,6 +174,27 @@ describe('Orquestrator', () => {
       expect(task.status).toBe(TASK_STATUS.QUEUED);
     });
 
+    it('runs task without project from its workspace', async () => {
+      let cwd = '';
+      const runner: AgentRunner = {
+        async run(config: AgentRunConfig): Promise<AgentRunResult> {
+          cwd = String(config.cwd);
+          return {
+            output: completedDecision('done'),
+            stats: { tokens: { input: 1, output: 1, total: 2 }, cost: 0 },
+          };
+        },
+      };
+      const orc = new Orquestrator(createDeps(dir, createPiClientWithRunner(runner)));
+
+      const task = orc.createRootTask('Tarefa', 'agent-tester');
+
+      await vi.waitFor(() => expect(task.status).toBe(TASK_STATUS.COMPLETED));
+      expect(task.projectIds).toEqual([]);
+      expect(basename(cwd)).toBe('workspace');
+      expect(basename(dirname(cwd))).toBe(task.taskId);
+    });
+
     it('accepts runtimeConfig', () => {
       const client = createPiClient([]);
       const deps = createDeps(dir, client);
@@ -163,13 +206,13 @@ describe('Orquestrator', () => {
   });
 
   describe('parallel scheduling', () => {
-    it('starts every queued task without an artificial concurrency ceiling', async () => {
+    it('respeita maxConcurrentRuns e enfileira N+1', async () => {
       const started = new Set<string>();
       let release!: () => void;
       const gate = new Promise<void>((resolve) => { release = resolve; });
       const runner: AgentRunner = {
         async run(config: AgentRunConfig): Promise<AgentRunResult> {
-          started.add(basename(String(config.cwd)));
+          started.add(basename(dirname(String(config.cwd))));
           await gate;
           return {
             output: completedDecision('done'),
@@ -177,12 +220,36 @@ describe('Orquestrator', () => {
           };
         },
       };
-      const orc = new Orquestrator(createDeps(dir, createPiClientWithRunner(runner)));
-      const tasks = Array.from({ length: 8 }, (_, i) => orc.createRootTask(`Task ${i}`, 'agent-tester'));
+      const orc = new Orquestrator(
+        createDeps(dir, createPiClientWithRunner(runner)),
+        { maxConcurrentRuns: 1 },
+      );
+      const tasks = Array.from({ length: 3 }, (_, i) => orc.createRootTask(`Task ${i}`, 'agent-tester'));
 
-      await vi.waitFor(() => expect(started.size).toBe(8));
+      await vi.waitFor(() => expect(started.size).toBe(1));
+      expect(tasks[0]!.status).toBe(TASK_STATUS.RUNNING);
+      expect(tasks[1]!.status).toBe(TASK_STATUS.QUEUED);
       release();
       await vi.waitFor(() => expect(tasks.every((task) => task.status === TASK_STATUS.COMPLETED)).toBe(true));
+    });
+
+    it('marca RUN_TIMEOUT quando a execução excede o limite', async () => {
+      const runner: AgentRunner = {
+        async run(config: AgentRunConfig): Promise<AgentRunResult> {
+          return new Promise((_resolve, reject) => {
+            config.signal?.addEventListener('abort', () => reject(new RunCancelledError()), { once: true });
+          });
+        },
+      };
+      const orc = new Orquestrator(
+        createDeps(dir, createPiClientWithRunner(runner)),
+        { runTimeoutMs: 20, maxConcurrentRuns: 1 },
+      );
+
+      const task = orc.createRootTask('Timeout', 'agent-tester');
+
+      await vi.waitFor(() => expect(task.status).toBe(TASK_STATUS.FAILED));
+      expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.RUN_TIMEOUT, task.taskId)).toBeDefined();
     });
   });
 
@@ -201,6 +268,20 @@ describe('Orquestrator', () => {
       expect(subtask.parentId).toBe(parent.taskId);
       expect(subtask.depth).toBe(1);
       expect(parent.subtaskIds).toContain(subtask.taskId);
+    });
+
+    it('inherits projectIds from parent', () => {
+      const client = createPiClient([]);
+      const deps = createDeps(dir, client);
+      const orc = new Orquestrator(deps);
+      orc.createProject({ name: 'App', slug: 'app' });
+      orc.createProject({ name: 'API', slug: 'api' });
+
+      const parent = orc.createRootTask('Parent', 'agent-tester', undefined, [], undefined, ['app', 'api']);
+      const subtask = orc.spawnSubtask(parent, 'agent-tester', 'Sub', 'Faca algo');
+
+      expect(subtask.projectIds).toEqual(['app', 'api']);
+      expect(orc.toMetadata(subtask).projectIds).toEqual(['app', 'api']);
     });
 
     it('increments depth correctly', () => {
@@ -245,7 +326,7 @@ describe('Orquestrator', () => {
       const stats = { tokens: { input: 1, output: 1, total: 2 }, cost: 0 };
       const runner: AgentRunner = {
         async run(config: AgentRunConfig): Promise<AgentRunResult> {
-          const taskId = basename(String(config.cwd));
+          const taskId = basename(dirname(String(config.cwd)));
           const title = config.prompt.match(/^Tarefa: (.+)$/m)?.[1] ?? '';
           const n = (calls[taskId] = (calls[taskId] ?? 0) + 1);
           const create = (config.customTools ?? []).find((tool) => tool.name === 'create_subtask');
@@ -697,6 +778,27 @@ describe('Orquestrator', () => {
       expect(recovered.title).toBe('Survive crash');
     });
 
+    it('replays project projection and task links from events', () => {
+      const client = createPiClient([]);
+      const deps = createDeps(dir, client);
+      const orc1 = new Orquestrator(deps);
+
+      const project = orc1.createProject({
+        name: 'App',
+        slug: 'app',
+        gitUrl: 'https://example.com/app.git',
+        defaultBranch: 'main',
+      });
+      const task = orc1.createRootTask('Linked', 'agent-tester', undefined, [], undefined, [project.slug]);
+      rmSync(join(dir, '.swarm/state.snapshot.json'), { force: true });
+      rmSync(join(dir, '.swarm/projects'), { recursive: true, force: true });
+
+      const orc2 = new Orquestrator(createDeps(dir, createPiClient([])), { stopWhenWaiting: true });
+
+      expect(orc2.getProject('app')?.gitUrl).toBe('https://example.com/app.git');
+      expect(orc2.tasks.get(task.taskId)?.projectIds).toEqual(['app']);
+    });
+
     it('recovered tasks have correct statuses (RUNNING->PENDING)', () => {
       const client = createPiClient([]);
       const deps = createDeps(dir, client);
@@ -1030,6 +1132,27 @@ describe('Orquestrator', () => {
 
       expect(() => orc.getTaskDir('../../../etc')).toThrow();
     });
+
+    it('returns task workspace path', () => {
+      const client = createPiClient([]);
+      const deps = createDeps(dir, client);
+      const orc = new Orquestrator(deps);
+
+      const task = orc.createRootTask('Task', 'agent-tester');
+      deps.taskFileStore.ensureTaskDir(task.taskId);
+      const workspaceDir = orc.getTaskWorkspaceDir(task.taskId);
+      expect(workspaceDir).toContain('.swarm');
+      expect(workspaceDir).toContain(task.taskId);
+      expect(basename(workspaceDir)).toBe('workspace');
+    });
+
+    it('throws workspace path for invalid task ID', () => {
+      const client = createPiClient([]);
+      const deps = createDeps(dir, client);
+      const orc = new Orquestrator(deps);
+
+      expect(() => orc.getTaskWorkspaceDir('../../../etc')).toThrow();
+    });
   });
 
   // -------------------------------------------------------------------
@@ -1322,6 +1445,57 @@ describe('Orquestrator user lifecycle', () => {
     expect(task.status).toBe(TASK_STATUS.REVIEW);
     expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_REVIEW, task.taskId)).toBeDefined();
     expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_COMPLETED, task.taskId)).toBeUndefined();
+  });
+
+  it('keeps Manager root out of REVIEW when scope verification evidence is missing', async () => {
+    const deps = managerDeps(createPiClient([completedDecision()]));
+    const orc = new Orquestrator(deps);
+    const task = orc.createRootTask('Root', 'Manager');
+    deps.taskFileStore.saveScopeSpec(task.taskId, [
+      { id: 'api', description: 'API pronta', verification: 'npm test api', satisfied: true },
+      {
+        id: 'ui',
+        description: 'UI pronta',
+        verification: 'smoke browser',
+        satisfied: true,
+        verifiedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      const retry = findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_RETRY_REQUESTED, task.taskId);
+      expect(retry?.payload?.reason).toContain('Scope-spec sem evidencia: 1 itens');
+    });
+    await vi.waitFor(() => {
+      expect(task.status).toBe(TASK_STATUS.FAILED);
+      const failed = findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_FAILED, task.taskId);
+      expect(failed?.payload?.reason).toContain('Scope-spec sem evidencia: 1 itens');
+    });
+  });
+
+  it('allows Manager root into REVIEW when scope verification evidence exists', async () => {
+    const deps = managerDeps(createPiClient([completedDecision()]));
+    const orc = new Orquestrator(deps);
+    const task = orc.createRootTask('Root', 'Manager');
+    deps.taskFileStore.saveScopeSpec(task.taskId, [
+      {
+        id: 'api',
+        description: 'API pronta',
+        verification: 'npm test api',
+        satisfied: true,
+        verifiedAt: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        id: 'ui',
+        description: 'UI pronta',
+        verification: 'smoke browser',
+        satisfied: true,
+        verifiedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ]);
+
+    await settle(task);
+    expect(task.status).toBe(TASK_STATUS.REVIEW);
   });
 
   it('completeTaskByUser turns REVIEW into COMPLETED', async () => {

@@ -15,6 +15,7 @@ const createTaskBody = z.object({
   message: z.string().min(1).max(10000),
   runtimeConfig: runtimeConfigSchema.optional(),
   attachmentPaths: z.array(z.string()).optional(),
+  projectIds: z.array(z.string().min(1).max(128)).optional(),
   // false (default) → task parked in Inbox; true → sent to the Manager.
   execute: z.boolean().optional(),
 });
@@ -23,6 +24,7 @@ const createTaskBody = z.object({
 const updateTaskBody = z.object({
   status: z.enum([TASK_STATUS.COMPLETED, TASK_STATUS.CANCELLED]).optional(),
   runtimeConfig: runtimeConfigSchema.optional(),
+  projectIds: z.array(z.string().min(1).max(128)).optional(),
   // The only user-permitted reassignments: park in Inbox or send to the Manager.
   assignedTo: z.enum(['inbox', 'manager']).optional(),
 });
@@ -45,6 +47,10 @@ const artifactParams = z.object({
   fileName: z.string().min(1).max(256).regex(/^[A-Za-z0-9._-]+$/, 'invalid file name'),
 });
 
+const artifactEditBody = z.object({
+  content: z.string().max(1_000_000),
+});
+
 // Dep-free attachment upload: base64 payload in JSON (no @fastify/multipart).
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024; // 5 MB
 const attachmentBody = z.object({
@@ -59,11 +65,48 @@ const attachmentBody = z.object({
 const CONTENT_TYPES: Record<string, string> = {
   markdown: 'text/markdown; charset=utf-8',
   md: 'text/markdown; charset=utf-8',
+  mdx: 'text/markdown; charset=utf-8',
   json: 'application/json; charset=utf-8',
   text: 'text/plain; charset=utf-8',
   txt: 'text/plain; charset=utf-8',
   csv: 'text/csv; charset=utf-8',
+  pdf: 'application/pdf',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  avif: 'image/avif',
 };
+
+const EDITABLE_ARTIFACT_TYPES = new Set([
+  'c',
+  'cpp',
+  'css',
+  'csv',
+  'go',
+  'h',
+  'html',
+  'java',
+  'javascript',
+  'js',
+  'json',
+  'markdown',
+  'md',
+  'mdx',
+  'py',
+  'rs',
+  'sh',
+  'sql',
+  'text',
+  'ts',
+  'tsx',
+  'txt',
+  'typescript',
+  'xml',
+  'yaml',
+  'yml',
+]);
 
 const listQuery = z.object({
   status: z.enum([
@@ -87,6 +130,7 @@ function toTaskResponse(task: Task, orquestrator: Orquestrator) {
     title: task.title,
     assignedTo: task.assignedTo,
     parentId: task.parentId,
+    projectIds: task.projectIds,
     status: task.status,
     waitingReason: task.waitingReason,
     depth: task.depth,
@@ -96,6 +140,20 @@ function toTaskResponse(task: Task, orquestrator: Orquestrator) {
     createdAt: task.metrics.startedAt ?? null,
     updatedAt: task.metrics.finishedAt ?? null,
   };
+}
+
+function extensionOf(fileName: string): string {
+  const index = fileName.lastIndexOf('.');
+  return index >= 0 ? fileName.slice(index + 1).toLowerCase() : '';
+}
+
+function artifactContentType(fileType: string | undefined, fileName: string): string | undefined {
+  return CONTENT_TYPES[(fileType ?? '').toLowerCase()] ?? CONTENT_TYPES[extensionOf(fileName)];
+}
+
+function isEditableArtifact(fileType: string | undefined, fileName: string): boolean {
+  const type = (fileType ?? '').toLowerCase();
+  return EDITABLE_ARTIFACT_TYPES.has(type) || EDITABLE_ARTIFACT_TYPES.has(extensionOf(fileName));
 }
 
 // --- Route Registration ---
@@ -144,13 +202,14 @@ export function registerTaskRoutes(
       return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
     }
 
-    const { message, runtimeConfig, attachmentPaths, execute } = body.data;
+    const { message, runtimeConfig, attachmentPaths, projectIds, execute } = body.data;
 
     try {
       const task = orquestrator.addTask({
         message,
         runtimeConfig: runtimeConfig as RuntimeConfig | undefined,
         attachmentPaths,
+        projectIds,
         execute,
       });
       reply.status(201);
@@ -202,6 +261,9 @@ export function registerTaskRoutes(
       if (body.data.runtimeConfig) {
         orquestrator.updateTaskRuntimeConfig(params.data.taskId, body.data.runtimeConfig as RuntimeConfig);
       }
+      if (body.data.projectIds) {
+        orquestrator.updateTaskProjects(params.data.taskId, body.data.projectIds);
+      }
     } catch (error) {
       return reply.status(400).send({
         error: 'Failed to update task',
@@ -231,6 +293,51 @@ export function registerTaskRoutes(
     } catch (error) {
       return reply.status(400).send({
         error: 'Failed to append message',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  // POST /api/tasks/:taskId/approve — approve REVIEW and complete/merge.
+  fastify.post('/api/tasks/:taskId/approve', async (request, reply) => {
+    const params = taskParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: 'Invalid params', issues: params.error.issues });
+    }
+    const task = orquestrator.tasks.get(params.data.taskId);
+    if (!task) return reply.status(404).send({ error: 'Task not found' });
+    if (task.status !== TASK_STATUS.REVIEW) return reply.status(409).send({ error: 'Task is not in REVIEW' });
+
+    try {
+      return toTaskResponse(orquestrator.completeTaskByUser(params.data.taskId), orquestrator);
+    } catch (error) {
+      return reply.status(400).send({
+        error: 'Failed to approve task',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  // POST /api/tasks/:taskId/reject — append feedback and reopen REVIEW.
+  fastify.post('/api/tasks/:taskId/reject', async (request, reply) => {
+    const params = taskParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: 'Invalid params', issues: params.error.issues });
+    }
+    const body = messageBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
+    }
+    const task = orquestrator.tasks.get(params.data.taskId);
+    if (!task) return reply.status(404).send({ error: 'Task not found' });
+    if (task.status !== TASK_STATUS.REVIEW) return reply.status(409).send({ error: 'Task is not in REVIEW' });
+
+    try {
+      const reopened = orquestrator.appendUserMessage(params.data.taskId, body.data.message);
+      return toTaskResponse(reopened, orquestrator);
+    } catch (error) {
+      return reply.status(400).send({
+        error: 'Failed to reject task',
         message: error instanceof Error ? error.message : String(error),
       });
     }
@@ -329,8 +436,8 @@ export function registerTaskRoutes(
       return reply.status(404).send({ error: 'Artifact not found' });
     }
     const artifact = task.artifacts.find((a) => a.path.endsWith(`/${params.data.fileName}`) || a.path.endsWith(params.data.fileName));
-    const safeType = artifact && CONTENT_TYPES[artifact.fileType];
-    // Inline only known-safe (non-executable) text types; everything else is a
+    const safeType = artifactContentType(artifact?.fileType, params.data.fileName);
+    // Inline only known-safe renderable types; everything else is a
     // forced download. Hardening headers prevent MIME-sniffing + active content.
     const contentType = safeType ?? 'application/octet-stream';
     const disposition = safeType ? 'inline' : 'attachment';
@@ -339,6 +446,40 @@ export function registerTaskRoutes(
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('Content-Security-Policy', "sandbox; default-src 'none'");
     return reply.send(content);
+  });
+
+  // PUT /api/tasks/:taskId/artifacts/:fileName — edit a text-like artifact
+  fastify.put('/api/tasks/:taskId/artifacts/:fileName', async (request, reply) => {
+    const params = artifactParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: 'Invalid params', issues: params.error.issues });
+    }
+    const body = artifactEditBody.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
+    }
+    const task = orquestrator.tasks.get(params.data.taskId);
+    if (!task) {
+      return reply.status(404).send({ error: 'Task not found' });
+    }
+    const artifact = task.artifacts.find((a) => a.path.endsWith(`/${params.data.fileName}`) || a.path.endsWith(params.data.fileName));
+    if (!artifact) {
+      return reply.status(404).send({ error: 'Artifact not found' });
+    }
+    if (!isEditableArtifact(artifact.fileType, params.data.fileName)) {
+      return reply.status(415).send({ error: 'Artifact is not editable as text' });
+    }
+    try {
+      return toTaskResponse(
+        orquestrator.updateArtifactContent(params.data.taskId, params.data.fileName, body.data.content),
+        orquestrator,
+      );
+    } catch (error) {
+      return reply.status(400).send({
+        error: 'Failed to update artifact',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   });
 
   // POST /api/tasks/archive — archive all tasks in a column status (Done/Cancel)

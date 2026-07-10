@@ -12,6 +12,7 @@ import type { TaskChatMessage, TaskArtifact, SerializedTask, AttachmentRef } fro
 export interface ScopeSpecItem {
   id: string;
   description: string;
+  verification?: string;
   satisfied: boolean;
   verifiedAt?: string;
 }
@@ -39,6 +40,7 @@ export interface EnvResume {
  *     session.jsonl     — session execution lines
  *     artifacts.yaml    — artifact manifest (JSON format)
  *     attachments/      — copied attachment files (UUID-prefixed)
+ *     workspace/        — cwd isolado para execução do agente
  *
  * All path operations go through PathSandbox.
  * All writes use AtomicWriter for crash safety.
@@ -283,9 +285,23 @@ export class TaskFileStore {
     this.assertSandbox();
     const taskDir = this.taskDir(taskId);
     const attachmentsDir = join(taskDir, 'attachments');
+    const workspaceDir = join(taskDir, 'workspace');
 
     this.ensureDir(taskDir);
     this.ensureDir(attachmentsDir);
+    this.ensureDir(workspaceDir);
+  }
+
+  /** Resolve the task workspace directory. */
+  getTaskWorkspaceDir(taskId: string): string {
+    this.assertSandbox();
+    return this.taskWorkspaceDir(taskId);
+  }
+
+  /** Resolve a project worktree under the task workspace. */
+  getTaskProjectWorkspaceDir(taskId: string, projectSlug: string): string {
+    this.assertSandbox();
+    return this.sandbox.resolveSubpath('.swarm', 'tasks', taskId, 'workspace', projectSlug);
   }
 
   // ---------------------------------------------------------------------------
@@ -299,7 +315,13 @@ export class TaskFileStore {
 
   /** Resolve the task's root directory. */
   private taskDir(taskId: string): string {
+    this.sandbox.validateTaskId(taskId);
     return this.sandbox.resolveSubpath('.swarm', 'tasks', taskId);
+  }
+
+  private taskWorkspaceDir(taskId: string): string {
+    this.sandbox.validateTaskId(taskId);
+    return this.sandbox.resolveSubpath('.swarm', 'tasks', taskId, 'workspace');
   }
 
   /** Read and parse a JSON file. Returns null if missing or corrupt. */

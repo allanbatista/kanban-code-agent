@@ -30,11 +30,8 @@ export function ProjectDetail() {
     );
   }
 
-  const projectTasks = tasks.filter(t =>
-    project.taskIds && project.taskIds.length > 0
-      ? project.taskIds.includes(t.id)
-      : t.title.toLowerCase().includes(project.name.toLowerCase())
-  );
+  const projectTasks = tasks.filter(t => t.projectIds.includes(project.id));
+  const runningTasks = projectTasks.filter(t => t.status === 'RUNNING');
 
   return (
     <PageContainer>
@@ -46,7 +43,7 @@ export function ProjectDetail() {
           <Folder className="h-5 w-5 text-primary" />
           <div className="flex-1">
             <h1 className="text-xl font-semibold">{project.name}</h1>
-            <p className="text-sm text-muted-foreground/75">{project.description}</p>
+            <p className="text-sm text-muted-foreground/75">{project.description || project.gitUrl || project.slug}</p>
           </div>
           <Button variant="outline" size="sm" className="gap-1" onClick={() => navigate(`/?project=${project.id}`)}>
             <ExternalLink className="h-3.5 w-3.5" /> Abrir Kanban
@@ -56,16 +53,16 @@ export function ProjectDetail() {
         <div className="grid gap-4 md:grid-cols-3 mb-6">
           <Card className="border-border/60 bg-card/40">
             <CardHeader className="pb-2"><CardTitle className="text-sm text-muted-foreground">ID</CardTitle></CardHeader>
-            <CardContent><p className="text-sm font-mono">{project.id}</p></CardContent>
+            <CardContent><p className="text-sm font-mono">{project.slug}</p></CardContent>
           </Card>
           <Card className="border-border/60 bg-card/40">
             <CardHeader className="pb-2"><CardTitle className="text-sm text-muted-foreground">Total de Tasks</CardTitle></CardHeader>
-            <CardContent><p className="text-2xl font-bold">{project.taskIds?.length ?? projectTasks.length}</p></CardContent>
+            <CardContent><p className="text-2xl font-bold">{projectTasks.length}</p></CardContent>
           </Card>
           <Card className="border-border/60 bg-card/40">
             <CardHeader className="pb-2"><CardTitle className="text-sm text-muted-foreground">Em Execução</CardTitle></CardHeader>
             <CardContent>
-              <p className="text-2xl font-bold text-emerald-400">{tasks.filter(t => t.status === 'RUNNING' && (project.taskIds?.includes(t.id) ?? true)).length}</p>
+              <p className="text-2xl font-bold text-emerald-400">{runningTasks.length}</p>
             </CardContent>
           </Card>
         </div>

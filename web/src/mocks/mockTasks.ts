@@ -9,6 +9,7 @@ function createMockTask(overrides: Partial<Task>): Task {
     assignedTo: '',
     status: 'PENDING' as TaskStatus,
     depth: 0,
+    projectIds: [],
     subtaskIds: [],
     runtimeConfig: { model: 'balanced', effort: 'medium' },
     chat: [],

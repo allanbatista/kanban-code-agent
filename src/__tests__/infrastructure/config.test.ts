@@ -40,4 +40,13 @@ describe('Config data-root convention', () => {
     expect(config.models.deep.provider).toBe('deepseek');
     expect(config.models.deep.modelId).toBe('deepseek-v4-pro');
   });
+
+  it('defaults isolation to inproc and reads execution env overrides', () => {
+    process.env.SWARM_ISOLATION = 'systemd';
+    process.env.SWARM_MAX_CONCURRENT_RUNS = '2';
+    const config = loadConfig();
+
+    expect(config.isolation).toBe('systemd');
+    expect(config.maxConcurrentRuns).toBe(2);
+  });
 });

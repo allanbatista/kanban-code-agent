@@ -131,16 +131,26 @@ describe('TaskFileStore', () => {
   });
 
   describe('ensureTaskDir', () => {
-    it('creates task directory and attachments subfolder', () => {
+    it('creates task directory, attachments and workspace subfolders', () => {
       const { store, dir } = createStore();
 
       store.ensureTaskDir('task_99');
 
       const taskDir = join(dir, '.swarm', 'tasks', 'task_99');
       const attachmentsDir = join(taskDir, 'attachments');
+      const workspaceDir = join(taskDir, 'workspace');
 
       expect(existsSync(taskDir)).toBe(true);
       expect(existsSync(attachmentsDir)).toBe(true);
+      expect(existsSync(workspaceDir)).toBe(true);
+      expect(store.getTaskWorkspaceDir('task_99')).toBe(workspaceDir);
+      cleanup(dir);
+    });
+
+    it('rejects traversal when resolving task workspace', () => {
+      const { store, dir } = createStore();
+
+      expect(() => store.getTaskWorkspaceDir('../../../etc')).toThrow();
       cleanup(dir);
     });
   });
@@ -179,14 +189,15 @@ describe('TaskFileStore', () => {
     it('saves and loads scope-spec', () => {
       const { store, dir } = createStore();
       const spec = [
-        { id: 's1', description: 'Health check endpoint', satisfied: false },
-        { id: 's2', description: 'Returns 200 OK', satisfied: true, verifiedAt: new Date().toISOString() },
+        { id: 's1', description: 'Health check endpoint', verification: 'curl /health', satisfied: false },
+        { id: 's2', description: 'Returns 200 OK', verification: 'curl /health returns 200', satisfied: true, verifiedAt: new Date().toISOString() },
       ];
       store.saveScopeSpec('task_1', spec);
 
       const loaded = store.loadScopeSpec('task_1');
       expect(loaded).toHaveLength(2);
       expect(loaded[0].satisfied).toBe(false);
+      expect(loaded[0].verification).toBe('curl /health');
       expect(loaded[1].satisfied).toBe(true);
       cleanup(dir);
     });

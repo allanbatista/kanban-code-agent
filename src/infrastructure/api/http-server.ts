@@ -18,7 +18,6 @@ import { registerSettingsRoutes } from './routes/settings.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerReportRoutes } from './routes/reports.js';
 import { registerWebSocket } from './ws-server.js';
-import { ProjectFileStore } from '../persistence/project-file-store.js';
 
 // --- Types ---
 
@@ -127,7 +126,7 @@ export function createServer(
 
   registerTaskRoutes(fastify, orquestrator);
   registerAgentRoutes(fastify, orquestrator);
-  registerProjectRoutes(fastify, new ProjectFileStore(orquestrator.sandbox));
+  registerProjectRoutes(fastify, orquestrator);
   registerSettingsRoutes(fastify);
   registerEventRoutes(fastify, orquestrator);
   registerReportRoutes(fastify, orquestrator);

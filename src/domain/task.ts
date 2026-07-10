@@ -47,6 +47,7 @@ export interface TaskOptions {
   title: string;
   assignedTo: string;
   parentId?: string;
+  projectIds?: string[];
   depth: number;
   runtimeConfig?: RuntimeConfig;
 }
@@ -123,6 +124,7 @@ export interface TaskMetadata {
   title: string;
   assignedTo: string;
   parentId?: string;
+  projectIds: string[];
   status: TaskStatus;
   waitingReason?: TaskWaitingReason;
   failureReason?: FailureReason;
@@ -181,7 +183,7 @@ export class Task {
   evaluationVerdict?: EvaluationVerdict;
 
   constructor(options: TaskOptions, seedInitialMessage = true, attachments: AttachmentRef[] = []) {
-    this.options = { ...options };
+    this.options = { ...options, projectIds: normalizeProjectIds(options.projectIds) };
     if (seedInitialMessage) {
       this.appendChat('user', 'text', options.title, options.runtimeConfig, attachments);
     }
@@ -201,6 +203,10 @@ export class Task {
 
   get parentId(): string | undefined {
     return this.options.parentId;
+  }
+
+  get projectIds(): string[] {
+    return this.options.projectIds ?? [];
   }
 
   get depth(): number {
@@ -298,4 +304,8 @@ export class Task {
       cost: 0,
     };
   }
+}
+
+function normalizeProjectIds(projectIds: string[] | undefined): string[] {
+  return [...new Set((projectIds ?? []).map((id) => id.trim()).filter(Boolean))];
 }

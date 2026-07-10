@@ -84,6 +84,21 @@ export class PiAgentClient {
       envResume?: EnvResume | null;
     },
   ): Promise<AgentRunResult> {
+    return this.runner.run(this.buildRunConfig(agent, task, orquestrator, triggerEvents, signal, continuity));
+  }
+
+  buildRunConfig(
+    agent: Agent,
+    task: Task,
+    orquestrator: Orquestrator,
+    triggerEvents: SwarmEvent[],
+    signal?: AbortSignal,
+    continuity?: {
+      scopeSpec?: ScopeSpecItem[];
+      progressLog?: ProgressLogEntry[];
+      envResume?: EnvResume | null;
+    },
+  ): AgentRunConfig {
     const runtimeConfig = orquestrator.resolveRuntimeConfig(task, agent);
     const modelConfig = this.allowedModels[runtimeConfig.model];
     if (!modelConfig) {
@@ -91,7 +106,7 @@ export class PiAgentClient {
     }
 
     const metadata = orquestrator.toMetadata(task);
-    const taskDir = orquestrator.getTaskDir(task.taskId);
+    const taskWorkspaceDir = orquestrator.getTaskWorkspaceDir(task.taskId);
 
     // Any task with remaining delegation budget can become the parent of its own
     // subtasks. Depth/subtask ceilings still bound runaway nesting.
@@ -166,8 +181,8 @@ export class PiAgentClient {
     // Use agent-specific tools (from definition) + custom orchestration tools
     const tools = [...agent.tools, ...customTools.map((tool) => tool.name)];
 
-    return this.runner.run({
-      cwd: taskDir,
+    return {
+      cwd: taskWorkspaceDir,
       model: modelConfig,
       thinkingLevel: runtimeConfig.effort,
       tools,
@@ -177,7 +192,7 @@ export class PiAgentClient {
       sessionManager: undefined,
       resourceLoader: undefined,
       signal,
-    });
+    };
   }
 
   async repairInvalidOutput(
@@ -188,6 +203,17 @@ export class PiAgentClient {
     invalidOutput: string,
     signal?: AbortSignal,
   ): Promise<AgentRunResult> {
+    return this.runner.run(this.buildRepairRunConfig(agent, task, orquestrator, errorMessage, invalidOutput, signal));
+  }
+
+  buildRepairRunConfig(
+    agent: Agent,
+    task: Task,
+    orquestrator: Orquestrator,
+    errorMessage: string,
+    invalidOutput: string,
+    signal?: AbortSignal,
+  ): AgentRunConfig {
     const runtimeConfig = orquestrator.resolveRuntimeConfig(task, agent);
     const modelConfig = this.allowedModels[runtimeConfig.model];
     if (!modelConfig) {
@@ -202,8 +228,8 @@ export class PiAgentClient {
       `Saida anterior:\n${invalidOutput.slice(0, 4000)}`,
     ].join('\n\n');
 
-    return this.runner.run({
-      cwd: orquestrator.getTaskDir(task.taskId),
+    return {
+      cwd: orquestrator.getTaskWorkspaceDir(task.taskId),
       model: modelConfig,
       thinkingLevel: runtimeConfig.effort,
       tools: [],
@@ -213,7 +239,7 @@ export class PiAgentClient {
       sessionManager: undefined,
       resourceLoader: undefined,
       signal,
-    });
+    };
   }
 
   /**

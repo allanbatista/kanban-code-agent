@@ -37,6 +37,15 @@ import type { TaskFileStore } from '../infrastructure/persistence/task-file-stor
 import type { PathSandbox } from '../infrastructure/filesystem/sandbox.js';
 import type { Task as DomainTaskClass } from '../domain/task.js';
 import { Task as TaskImpl } from '../domain/task.js';
+import {
+  ProjectFileStore,
+  type CreateProjectInput,
+  type ProjectData,
+  type UpdateProjectInput,
+} from '../infrastructure/persistence/project-file-store.js';
+import { GitConflictError, GitRepo } from '../infrastructure/git/git-repo.js';
+import { WorkerSupervisor, type IsolationMode } from '../infrastructure/process/worker-supervisor.js';
+import { gitCredentialEnvFromRuntime } from '../infrastructure/security/credentials.js';
 
 // ---------------------------------------------------------------------------
 // Constants (matching PoC defaults)
@@ -142,7 +151,9 @@ const MAX_TASK_DEPTH = readPositiveIntegerEnv('SWARM_MAX_TASK_DEPTH', 5);
 const MAX_SUBTASKS_PER_TASK = readPositiveIntegerEnv('SWARM_MAX_SUBTASKS_PER_TASK', 10);
 const MAX_TASK_RETRIES = readPositiveIntegerEnv('SWARM_MAX_TASK_RETRIES', 3);
 const MAX_TECHNICAL_RETRIES = readPositiveIntegerEnv('SWARM_MAX_TECHNICAL_RETRIES', 2);
-const RUN_TIMEOUT_MS = readPositiveIntegerEnv('SWARM_RUN_TIMEOUT_MS', 300000);
+const DEFAULT_RUN_TIMEOUT_MS = readPositiveIntegerEnv('SWARM_RUN_TIMEOUT_MS', 300000);
+const DEFAULT_MAX_CONCURRENT_RUNS = readPositiveIntegerEnv('SWARM_MAX_CONCURRENT_RUNS', 4);
+const DEFAULT_ISOLATION: IsolationMode = process.env.SWARM_ISOLATION === 'systemd' ? 'systemd' : 'inproc';
 const RETRY_BASE_DELAY_MS = readPositiveIntegerEnv('SWARM_RETRY_BASE_DELAY_MS', 2000);
 const MAX_TOTAL_TOKENS = readPositiveIntegerEnv('SWARM_MAX_TOTAL_TOKENS', Number.MAX_SAFE_INTEGER);
 const MAX_TOTAL_COST = readPositiveNumberEnv('SWARM_MAX_TOTAL_COST', Number.POSITIVE_INFINITY);
@@ -169,12 +180,17 @@ export interface OrquestratorDeps {
   sandbox: PathSandbox;
   agents: Agent[];
   piClient: PiAgentClient;
+  gitRepo?: GitRepo;
+  workerSupervisor?: WorkerSupervisor;
   models?: Record<ModelAlias, { provider: string; modelId: string; description: string }>;
 }
 
 export interface OrquestratorOptions {
   resetState?: boolean;
   stopWhenWaiting?: boolean;
+  runTimeoutMs?: number;
+  maxConcurrentRuns?: number;
+  isolation?: IsolationMode;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +421,7 @@ function addSessionStats(
 export class Orquestrator extends EventEmitter {
   readonly agents = new Map<string, Agent>();
   readonly tasks = new Map<string, Task>();
+  readonly projects = new Map<string, ProjectData>();
   events: SwarmEvent[] = [];
   rootTaskIds: string[] = [];
 
@@ -436,14 +453,19 @@ export class Orquestrator extends EventEmitter {
   private readonly governance: Governance = createDefaultGovernance();
 
   private readonly scheduler = new Scheduler();
-  private readonly workerPool = new WorkerPool(RUN_TIMEOUT_MS);
+  private readonly workerPool: WorkerPool;
+  private readonly workerSupervisor: WorkerSupervisor;
+  private readonly runTimeoutMs: number;
   private readonly budget = new BudgetTracker(MAX_TOTAL_TOKENS, MAX_TOTAL_COST);
+  private readonly projectMergeLocks = new Set<string>();
 
   private readonly eventStore: EventStore;
   private readonly snapshotStore: SnapshotStore;
   readonly taskFileStore: TaskFileStore;
+  readonly projectFileStore: ProjectFileStore;
   readonly sandbox: PathSandbox;
   readonly piClient: PiAgentClient;
+  readonly gitRepo: GitRepo;
   private readonly allowedModels: Record<ModelAlias, { provider: string; modelId: string; description: string }>;
 
   private options: OrquestratorOptions;
@@ -455,7 +477,18 @@ export class Orquestrator extends EventEmitter {
     this.snapshotStore = deps.snapshotStore;
     this.taskFileStore = deps.taskFileStore;
     this.sandbox = deps.sandbox;
+    this.projectFileStore = new ProjectFileStore(deps.sandbox);
     this.piClient = deps.piClient;
+    this.gitRepo = deps.gitRepo ?? new GitRepo({ env: gitCredentialEnvFromRuntime(deps.sandbox.getBaseDir()) });
+    this.runTimeoutMs = options.runTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
+    this.workerPool = new WorkerPool(this.runTimeoutMs, options.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS);
+    this.workerSupervisor = deps.workerSupervisor ?? new WorkerSupervisor(this.piClient, {
+      mode: options.isolation ?? DEFAULT_ISOLATION,
+      runTimeoutMs: this.runTimeoutMs,
+      dataDir: deps.sandbox.getBaseDir(),
+      readWritePaths: [deps.sandbox.getBaseDir()],
+      encryptedCredential: process.env.SWARM_GIT_CREDENTIAL_ENCRYPTED,
+    });
     this.allowedModels = deps.models ?? ALLOWED_MODELS;
 
     for (const agent of deps.agents) {
@@ -468,6 +501,71 @@ export class Orquestrator extends EventEmitter {
     if (!options.resetState && !options.stopWhenWaiting) {
       this.scheduleReadyTasks();
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Project management
+  // -----------------------------------------------------------------------
+
+  listProjects(): ProjectData[] {
+    return [...this.projects.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  getProject(slug: string): ProjectData | null {
+    return this.projects.get(slug) ?? null;
+  }
+
+  createProject(input: CreateProjectInput): ProjectData {
+    const project = this.projectFileStore.createProject(input);
+    this.projects.set(project.slug, project);
+    this.recordEvent(SWARM_EVENT_TYPE.PROJECT_CREATED, { payload: { project } });
+    this.persist();
+    this.emit('state:changed');
+    return project;
+  }
+
+  updateProject(slug: string, input: UpdateProjectInput): ProjectData | null {
+    if (!this.projects.has(slug)) return null;
+    const project = this.projectFileStore.updateProject(slug, input);
+    if (!project) return null;
+    this.projects.set(project.slug, project);
+    this.recordEvent(SWARM_EVENT_TYPE.PROJECT_UPDATED, { payload: { project } });
+    this.persist();
+    this.emit('state:changed');
+    return project;
+  }
+
+  deleteProject(slug: string): boolean {
+    if (!this.projects.has(slug)) return false;
+    this.projects.delete(slug);
+    this.projectFileStore.deleteProject(slug);
+    for (const task of this.tasks.values()) {
+      if (!task.projectIds.includes(slug)) continue;
+      task.options.projectIds = task.projectIds.filter((projectId) => projectId !== slug);
+      this.markTaskDirty(task);
+      this.recordEvent(SWARM_EVENT_TYPE.TASK_PROJECT_LINKED, {
+        task,
+        payload: { projectIds: task.projectIds },
+      });
+    }
+    this.recordEvent(SWARM_EVENT_TYPE.PROJECT_DELETED, { payload: { slug } });
+    this.persist();
+    this.emit('state:changed');
+    return true;
+  }
+
+  updateTaskProjects(taskId: string, projectIds: string[]): Task {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Task ${taskId} não encontrada`);
+    task.options.projectIds = this.requireProjectIds(projectIds);
+    this.markTaskDirty(task);
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_PROJECT_LINKED, {
+      task,
+      payload: { projectIds: task.projectIds },
+    });
+    this.persist();
+    this.emit('state:changed');
+    return task;
   }
 
   // -----------------------------------------------------------------------
@@ -488,6 +586,7 @@ export class Orquestrator extends EventEmitter {
     title?: string;
     runtimeConfig?: RuntimeConfig;
     attachmentPaths?: string[];
+    projectIds?: string[];
     execute?: boolean;
   }): Task {
     const assignedTo = input.execute ? MANAGER_AGENT : INBOX_AGENT;
@@ -497,6 +596,7 @@ export class Orquestrator extends EventEmitter {
       input.runtimeConfig,
       input.attachmentPaths ?? [],
       input.message,
+      input.projectIds,
     );
     if (!input.title) void this.generateTaskTitle(task, input.message);
     return task;
@@ -513,13 +613,15 @@ export class Orquestrator extends EventEmitter {
     runtimeConfig?: RuntimeConfig,
     attachmentPaths: string[] = [],
     message?: string,
+    projectIds: string[] = [],
   ): Task {
     if (agentName !== INBOX_AGENT) this.assertAgentExists(agentName);
     const taskId = this.nextId('task');
     const attachments = this.copyTaskAttachments(taskId, attachmentPaths);
     const normalizedConfig = normalizeRuntimeConfig(runtimeConfig, this.allowedModels);
+    const linkedProjectIds = this.requireProjectIds(projectIds);
     const task = new TaskImpl(
-      { taskId, title, assignedTo: agentName, depth: 0, runtimeConfig: normalizedConfig },
+      { taskId, title, assignedTo: agentName, depth: 0, runtimeConfig: normalizedConfig, projectIds: linkedProjectIds },
       false,
       attachments,
     );
@@ -529,6 +631,12 @@ export class Orquestrator extends EventEmitter {
     this.rootTaskIds.push(task.taskId);
     this.markTaskDirty(task);
     this.recordEvent(SWARM_EVENT_TYPE.TASK_CREATED, { task, payload: { task: task.serialize() } });
+    if (task.projectIds.length > 0) {
+      this.recordEvent(SWARM_EVENT_TYPE.TASK_PROJECT_LINKED, {
+        task,
+        payload: { projectIds: task.projectIds },
+      });
+    }
     this.persist();
     this.emit('state:changed');
     this.scheduleTask(task.taskId);
@@ -563,7 +671,7 @@ export class Orquestrator extends EventEmitter {
     if (task.options.parentId) throw new Error('Apenas tasks raiz podem ser movidas');
     if (isTerminalTaskStatus(task.status)) throw new Error('Task finalizada não pode ser movida');
 
-    const wasActive = this.runningTaskIds.has(taskId) || this.queuedTaskIds.has(taskId);
+    const wasActive = this.runningTaskIds.has(taskId) || this.queuedTaskIds.has(taskId) || this.workerPool.has(taskId);
     // dequeue aborts any in-flight Pi run; the runTask result-guard discards
     // late output, so moving to the Inbox truly pauses execution.
     this.dequeue(taskId);
@@ -630,6 +738,7 @@ export class Orquestrator extends EventEmitter {
       throw new Error('Apenas tasks em revisão podem ser concluídas pelo usuário');
     }
     this.dequeue(taskId);
+    this.mergeIntegrationToDefault(task);
     task.setStatus(TASK_STATUS.COMPLETED, { force: true, waitingReason: undefined });
     task.activeRunId = undefined;
     task.metrics.finishedAt = new Date().toISOString();
@@ -801,6 +910,8 @@ export class Orquestrator extends EventEmitter {
       const familyIds = this.collectFamilyIds(root);
       for (const id of familyIds) {
         this.dequeue(id);
+        const member = this.tasks.get(id);
+        if (member) this.cleanupTaskGit(member);
         this.taskFileStore.archiveTask(id);
         this.tasks.delete(id);
       }
@@ -879,6 +990,7 @@ export class Orquestrator extends EventEmitter {
         title,
         assignedTo: agentName,
         parentId: parentTask.taskId,
+        projectIds: parentTask.projectIds,
         depth: parentTask.depth + 1,
         runtimeConfig: normalizeRuntimeConfig(runtimeConfig, this.allowedModels),
       },
@@ -1062,8 +1174,8 @@ export class Orquestrator extends EventEmitter {
     }
     return {
       running: this.runningTaskIds.size,
-      queued: this.queuedTaskIds.size,
-      queueDepth: this.taskQueue.length,
+      queued: this.queuedTaskIds.size + this.workerPool.pendingCount,
+      queueDepth: this.taskQueue.length + this.workerPool.pendingCount,
       activeRuns,
       humanWaits: this.humanDeadlines.size,
       waiting,
@@ -1083,6 +1195,186 @@ export class Orquestrator extends EventEmitter {
   getTaskDir(taskId: string): string {
     this.sandbox.validateTaskId(taskId);
     return this.sandbox.resolveSubpath('.swarm', 'tasks', taskId);
+  }
+
+  getTaskWorkspaceDir(taskId: string): string {
+    return this.taskFileStore.getTaskWorkspaceDir(taskId);
+  }
+
+  private prepareProjectWorktrees(task: Task, runId: string): void {
+    for (const projectId of task.projectIds) {
+      const project = this.projects.get(projectId);
+      if (!project?.gitUrl) continue;
+      const mirrorDir = this.sandbox.resolveSubpath('.swarm', 'projects', project.slug, 'repo.git');
+      const worktreeDir = this.taskFileStore.getTaskProjectWorkspaceDir(task.taskId, project.slug);
+      const branch = this.gitBranchForTask(task);
+      this.gitRepo.ensureMirror(project.gitUrl, mirrorDir);
+      const result = this.gitRepo.addWorktree(mirrorDir, worktreeDir, branch, project.defaultBranch);
+      if (!result.created) continue;
+      this.recordEvent(SWARM_EVENT_TYPE.WORKTREE_CREATED, {
+        task,
+        runId,
+        payload: {
+          slug: project.slug,
+          branch,
+          baseSha: result.baseSha,
+          path: this.sandbox.relativeTo(worktreeDir),
+        },
+      });
+    }
+  }
+
+  private commitProjectWorktrees(task: Task, runId: string): void {
+    for (const projectId of task.projectIds) {
+      const project = this.projects.get(projectId);
+      if (!project?.gitUrl) continue;
+      const worktreeDir = this.taskFileStore.getTaskProjectWorkspaceDir(task.taskId, project.slug);
+      if (!existsSync(worktreeDir) || !this.gitRepo.hasChanges(worktreeDir)) continue;
+      const sha = this.gitRepo.commitAll(worktreeDir, `kca: ${task.taskId}`);
+      this.recordEvent(SWARM_EVENT_TYPE.COMMIT_CREATED, {
+        task,
+        runId,
+        payload: {
+          slug: project.slug,
+          branch: this.gitBranchForTask(task),
+          sha,
+        },
+      });
+    }
+  }
+
+  private reconcileSubtaskBranches(
+    task: Task,
+    run: TaskRun,
+    messages: AgentOutputMessage[],
+    triggerEvents: SwarmEvent[],
+  ): boolean {
+    const subtasks = this.getSubtasks(task)
+      .filter((subtask) => subtask.status === TASK_STATUS.COMPLETED)
+      .sort((a, b) => a.taskId.localeCompare(b.taskId));
+    if (subtasks.length === 0) return true;
+
+    for (const projectId of task.projectIds) {
+      const project = this.projects.get(projectId);
+      if (!project?.gitUrl) continue;
+      const integrationDir = this.taskFileStore.getTaskProjectWorkspaceDir(task.taskId, project.slug);
+      if (!existsSync(integrationDir)) continue;
+      const into = this.gitBranchForTask(task);
+      const mirrorDir = this.sandbox.resolveSubpath('.swarm', 'projects', project.slug, 'repo.git');
+
+      for (const subtask of subtasks) {
+        if (!subtask.projectIds.includes(project.slug)) continue;
+        const from = this.gitBranchForTask(subtask);
+        try {
+          const fromSha = this.latestCommitSha(subtask.taskId, project.slug) ?? this.gitRepo.revParse(mirrorDir, from);
+          const sha = this.gitRepo.merge(integrationDir, fromSha);
+          this.recordEvent(SWARM_EVENT_TYPE.BRANCH_MERGED, {
+            task,
+            runId: run.runId,
+            payload: { slug: project.slug, from, into, sha },
+          });
+        } catch (error) {
+          if (!(error instanceof GitConflictError)) throw error;
+          const resolverAgent = this.agents.has('Engineer') ? 'Engineer' : task.assignedTo;
+          const resolver = this.spawnSubtask(
+            task,
+            resolverAgent,
+            `Resolver conflito ${project.slug}`,
+            `Resolva o conflito de merge entre ${from} e ${into} no projeto ${project.slug}.`,
+          );
+          this.recordEvent(SWARM_EVENT_TYPE.MERGE_BLOCKED, {
+            task,
+            runId: run.runId,
+            payload: { slug: project.slug, from, into, reason: 'conflict', resolverTaskId: resolver.taskId },
+          });
+          this.coerceToWait(task, run, messages, [resolver.taskId], triggerEvents, 'merge conflict');
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  private mergeIntegrationToDefault(task: Task): void {
+    for (const projectId of task.projectIds) {
+      const project = this.projects.get(projectId);
+      if (!project?.gitUrl) continue;
+      if (this.projectMergeLocks.has(project.slug)) {
+        this.recordEvent(SWARM_EVENT_TYPE.MERGE_BLOCKED, {
+          task,
+          payload: { slug: project.slug, reason: 'lock' },
+        });
+        throw new Error(`Merge em andamento para projeto ${project.slug}`);
+      }
+
+      this.projectMergeLocks.add(project.slug);
+      const mirrorDir = this.sandbox.resolveSubpath('.swarm', 'projects', project.slug, 'repo.git');
+      const integrationDir = this.taskFileStore.getTaskProjectWorkspaceDir(task.taskId, project.slug);
+      const mergeDir = this.sandbox.resolveSubpath('.swarm', 'projects', project.slug, 'merge-worktree');
+      try {
+        if (!existsSync(integrationDir)) continue;
+        this.gitRepo.removeWorktree(mirrorDir, mergeDir);
+        this.gitRepo.addWorktree(mirrorDir, mergeDir, project.defaultBranch, project.defaultBranch);
+        const fromSha = this.gitRepo.head(integrationDir);
+        const sha = this.gitRepo.merge(mergeDir, fromSha);
+        this.recordEvent(SWARM_EVENT_TYPE.BRANCH_MERGED, {
+          task,
+          payload: { slug: project.slug, from: this.gitBranchForTask(task), into: project.defaultBranch, sha },
+        });
+      } catch (error) {
+        if (error instanceof GitConflictError) {
+          this.recordEvent(SWARM_EVENT_TYPE.MERGE_BLOCKED, {
+            task,
+            payload: { slug: project.slug, from: this.gitBranchForTask(task), into: project.defaultBranch, reason: 'conflict' },
+          });
+        }
+        throw error;
+      } finally {
+        this.gitRepo.removeWorktree(mirrorDir, mergeDir);
+        this.projectMergeLocks.delete(project.slug);
+      }
+    }
+  }
+
+  private cleanupTaskGit(task: Task): void {
+    for (const projectId of task.projectIds) {
+      const project = this.projects.get(projectId);
+      if (!project?.gitUrl) continue;
+      const mirrorDir = this.sandbox.resolveSubpath('.swarm', 'projects', project.slug, 'repo.git');
+      const worktreeDir = this.taskFileStore.getTaskProjectWorkspaceDir(task.taskId, project.slug);
+      this.gitRepo.removeWorktree(mirrorDir, worktreeDir);
+      this.gitRepo.deleteBranch(mirrorDir, this.gitBranchForTask(task));
+    }
+  }
+
+  private gitBranchForTask(task: Task): string {
+    const rootTaskId = this.findRootTaskId(task);
+    return task.options.parentId ? `kca/${rootTaskId}/${task.taskId}` : `kca/${task.taskId}/integration`;
+  }
+
+  private latestCommitSha(taskId: string, slug: string): string | undefined {
+    for (let i = this.events.length - 1; i >= 0; i -= 1) {
+      const event = this.events[i];
+      if (
+        event?.type === SWARM_EVENT_TYPE.COMMIT_CREATED &&
+        event.taskId === taskId &&
+        event.payload?.slug === slug &&
+        typeof event.payload.sha === 'string'
+      ) {
+        return event.payload.sha;
+      }
+    }
+    return undefined;
+  }
+
+  private findRootTaskId(task: Task): string {
+    let current = task;
+    while (current.options.parentId) {
+      const parent = this.tasks.get(current.options.parentId);
+      if (!parent) break;
+      current = parent;
+    }
+    return current.taskId;
   }
 
   // -----------------------------------------------------------------------
@@ -1127,6 +1419,12 @@ export class Orquestrator extends EventEmitter {
       setTimeout(() => this.scheduleTask(taskId, [], 0), Math.max(delayMs, 10));
       return;
     }
+    if (this.workerPool.has(taskId)) {
+      if (task.status === TASK_STATUS.PENDING || task.status === TASK_STATUS.WAITING) {
+        setTimeout(() => this.scheduleTask(taskId, [], 0), Math.max(delayMs, 10));
+      }
+      return;
+    }
     if (!this.queuedTaskIds.has(taskId)) {
       this.queuedTaskIds.add(taskId);
       this.taskQueue.push(taskId);
@@ -1142,7 +1440,7 @@ export class Orquestrator extends EventEmitter {
     else setTimeout(() => this.pumpQueue(), 0);
   }
 
-  async runTask(taskId: string, triggerEvents: SwarmEvent[] = []): Promise<void> {
+  async runTask(taskId: string, triggerEvents: SwarmEvent[] = [], poolSignal?: AbortSignal): Promise<void> {
     const task = this.tasks.get(taskId);
     if (!task || isTerminalTaskStatus(task.status)) return;
     if (this.runningTaskIds.has(taskId)) return;
@@ -1164,18 +1462,22 @@ export class Orquestrator extends EventEmitter {
 
     const controller = new AbortController();
     this.runAbortControllers.set(taskId, controller);
+    const abortFromPool = (): void => controller.abort();
+    if (poolSignal?.aborted) controller.abort();
+    else poolSignal?.addEventListener('abort', abortFromPool, { once: true });
     // Subtasks created during this run mean the parent now depends on them and
     // must wait + re-consolidate from their real results (see applyDecision).
     const subtasksBefore = task.subtaskIds.length;
     try {
       this.taskFileStore.ensureTaskDir(task.taskId);
+      this.prepareProjectWorktrees(task, run.runId);
       this.ensureScopeSpec(task);
       const continuity = {
         scopeSpec: this.taskFileStore.loadScopeSpec(task.taskId),
         progressLog: this.taskFileStore.loadProgressLog(task.taskId),
         envResume: this.taskFileStore.loadEnvResume(task.taskId),
       };
-      const result = await this.piClient.run(agent, task, this, triggerEvents, controller.signal, continuity);
+      const result = await this.workerSupervisor.runAgent(agent, task, this, triggerEvents, controller.signal, continuity);
       // If the run was cancelled or the task was moved/superseded mid-flight,
       // discard the result so no phantom output is applied after a pause.
       if (controller.signal.aborted || task.activeRunId !== run.runId || task.status !== TASK_STATUS.RUNNING) {
@@ -1195,7 +1497,7 @@ export class Orquestrator extends EventEmitter {
         if (!(error instanceof AgentOutputInvalidError)) throw error;
         this.recordInvalidAgentOutput(task, run, error);
         const repairStartedAt = new Date().toISOString();
-        const repaired = await this.piClient.repairInvalidOutput(
+        const repaired = await this.workerSupervisor.repairInvalidOutput(
           agent,
           task,
           this,
@@ -1231,6 +1533,8 @@ export class Orquestrator extends EventEmitter {
         this.persist();
         return;
       }
+      const isManagerRoot = !task.options.parentId && task.options.assignedTo === MANAGER_AGENT;
+      if (decision.status === 'completed' && !isManagerRoot) this.commitProjectWorktrees(task, run.runId);
       task.technicalRetryCount = 0;
       this.applyDecision(task, run, decision, triggerEvents, task.subtaskIds.slice(subtasksBefore));
     } catch (error) {
@@ -1240,6 +1544,7 @@ export class Orquestrator extends EventEmitter {
       }
       this.handleRunFailure(task, run, error, triggerEvents, startedAt, task.subtaskIds.slice(subtasksBefore));
     } finally {
+      poolSignal?.removeEventListener('abort', abortFromPool);
       this.runAbortControllers.delete(taskId);
       this.runningTaskIds.delete(taskId);
       this.emit('state:changed');
@@ -1270,6 +1575,7 @@ export class Orquestrator extends EventEmitter {
       title: task.title,
       assignedTo: task.options.assignedTo,
       parentId: task.options.parentId,
+      projectIds: task.projectIds,
       status: task.status,
       waitingReason: task.waitingReason,
       failureReason: task.failureReason,
@@ -1292,7 +1598,7 @@ export class Orquestrator extends EventEmitter {
       maxRetries: MAX_TASK_RETRIES,
       maxTechnicalRetries: MAX_TECHNICAL_RETRIES,
       maxSubtasksPerTask: MAX_SUBTASKS_PER_TASK,
-      runTimeoutMs: RUN_TIMEOUT_MS,
+      runTimeoutMs: this.runTimeoutMs,
       activeRunId: task.activeRunId,
       runs: task.runs,
       taskChat: task.chat,
@@ -1358,7 +1664,7 @@ export class Orquestrator extends EventEmitter {
     this.flushDirtyTasks();
     // Events are appended incrementally to events.jsonl (eventStore), so the
     // snapshot only carries tasks + roots + counters — no O(events) rewrite.
-    this.snapshotStore.saveSnapshot(this.tasks, this.rootTaskIds, this.nextSeq);
+    this.snapshotStore.saveSnapshot(this.tasks, this.rootTaskIds, this.nextSeq, this.projects.values());
   }
 
   persistTask(task: Task): void {
@@ -1403,6 +1709,27 @@ export class Orquestrator extends EventEmitter {
     this.recordArtifactCreated(task, artifact);
     this.persist();
     return artifact;
+  }
+
+  updateArtifactContent(taskId: string, fileName: string, content: string): Task {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Task ${taskId} não encontrada`);
+
+    const safeName = basename(fileName);
+    const artifact = task.artifacts.find((a) => basename(a.path) === safeName);
+    if (!artifact) throw new Error(`Artefato ${safeName} não encontrado`);
+
+    artifact.path = this.taskFileStore.writeArtifactFile(taskId, safeName, content);
+    artifact.sizeBytes = Buffer.byteLength(content, 'utf8');
+    this.taskFileStore.saveArtifacts(taskId, task.artifacts);
+    this.markTaskDirty(task);
+    this.recordEvent(SWARM_EVENT_TYPE.TASK_UPDATED, {
+      task,
+      payload: { artifactPath: artifact.path, sizeBytes: artifact.sizeBytes },
+    });
+    this.persist();
+    this.emit('state:changed');
+    return task;
   }
 
   /**
@@ -1626,10 +1953,11 @@ export class Orquestrator extends EventEmitter {
       if (!controller.signal.aborted) controller.abort();
     }
     this.runAbortControllers.clear();
-    for (const taskId of this.runningTaskIds) {
-      const task = this.tasks.get(taskId);
-      if (!task || isTerminalTaskStatus(task.status)) continue;
+    for (const task of this.tasks.values()) {
+      if (isTerminalTaskStatus(task.status)) continue;
+      if (task.status !== TASK_STATUS.RUNNING && task.status !== TASK_STATUS.QUEUED) continue;
       task.setStatus(TASK_STATUS.PENDING, { force: true });
+      task.activeRunId = undefined;
       this.markTaskDirty(task);
     }
     if (this.deadlineTimer) {
@@ -1746,11 +2074,13 @@ export class Orquestrator extends EventEmitter {
       const task = this.tasks.get(taskId);
       if (!task || isTerminalTaskStatus(task.status) || this.runningTaskIds.has(taskId)) continue;
       const triggerEvents = this.takePendingTriggerEvents(taskId);
-      this.runTask(taskId, triggerEvents).catch((error) => {
+      this.workerPool.enqueue(taskId, (signal) => this.runTask(taskId, triggerEvents, signal), (error) => {
+        if (error instanceof RunCancelledError) return;
         const failedTask = this.tasks.get(taskId);
         if (failedTask && !isTerminalTaskStatus(failedTask.status)) {
-          const run = this.getOrCreateExecutionRun(failedTask, new Date().toISOString());
-          this.handleRunFailure(failedTask, run, error, triggerEvents, new Date().toISOString());
+          const now = new Date().toISOString();
+          const run = this.getActiveRun(failedTask) ?? this.getOrCreateExecutionRun(failedTask, now);
+          this.handleRunFailure(failedTask, run, error, triggerEvents, now);
         }
       });
     }
@@ -1809,6 +2139,7 @@ export class Orquestrator extends EventEmitter {
       this.startOrUpdateWaitRun(task, run, waitGroups, task.resultMessages);
       this.announceDelegation(task, waitGroups);
       task.setStatus(TASK_STATUS.WAITING, { force: true, waitingReason: 'subtasks' });
+      this.scheduler.rebuildWaitIndex(this.tasks);
       this.markTaskDirty(task);
       this.recordEvent(SWARM_EVENT_TYPE.TASK_WAITING, {
         task,
@@ -1893,6 +2224,7 @@ export class Orquestrator extends EventEmitter {
 
     this.markEventsProcessed(task, triggerEvents);
     task.resultMessages = task.appendAgentMessages(sanitizedMessages);
+    if (isManagerRoot && !this.reconcileSubtaskBranches(task, run, sanitizedMessages, triggerEvents)) return;
     this.completeActiveRun(task, run);
     this.markTaskDirty(task);
     this.recordEvent(SWARM_EVENT_TYPE.RUN_COMPLETED, {
@@ -1929,6 +2261,18 @@ export class Orquestrator extends EventEmitter {
         this.scheduleTask(task.taskId);
         return;
       }
+      if (!dod.passed) {
+        task.setStatus(TASK_STATUS.FAILED, { force: true, failureReason: 'blocked', waitingReason: undefined });
+        task.activeRunId = undefined;
+        this.recordEvent(SWARM_EVENT_TYPE.TASK_FAILED, {
+          task,
+          runId: run.runId,
+          messages: task.resultMessages,
+          payload: { failureReason: 'blocked', reason: `DoD: ${dod.failures.join('; ')}`, dod: true },
+        });
+        this.persist();
+        return;
+      }
       this.recordClosingProgressEntry(task, dod);
       task.setStatus(TASK_STATUS.REVIEW, { force: true, waitingReason: undefined });
       this.recordEvent(SWARM_EVENT_TYPE.TASK_REVIEW, {
@@ -1936,6 +2280,17 @@ export class Orquestrator extends EventEmitter {
         runId: run.runId,
         messages: task.resultMessages,
       });
+      if (this.shouldAutoMerge(task)) {
+        this.mergeIntegrationToDefault(task);
+        task.setStatus(TASK_STATUS.COMPLETED, { force: true, waitingReason: undefined });
+        task.metrics.finishedAt = new Date().toISOString();
+        this.recordEvent(SWARM_EVENT_TYPE.TASK_COMPLETED, {
+          task,
+          runId: run.runId,
+          messages: task.resultMessages,
+          payload: { autoMerge: true },
+        });
+      }
     } else {
       task.setStatus(TASK_STATUS.COMPLETED, { force: true, waitingReason: undefined });
       this.recordEvent(SWARM_EVENT_TYPE.TASK_COMPLETED, {
@@ -1945,6 +2300,13 @@ export class Orquestrator extends EventEmitter {
       });
     }
     this.persist();
+  }
+
+  private shouldAutoMerge(task: Task): boolean {
+    const projects = task.projectIds
+      .map((projectId) => this.projects.get(projectId))
+      .filter((project): project is ProjectData => Boolean(project?.gitUrl));
+    return projects.length > 0 && projects.every((project) => project.autoMerge);
   }
 
   /**
@@ -1968,6 +2330,14 @@ export class Orquestrator extends EventEmitter {
       const unsatisfied = scopeSpec.filter((item) => !item.satisfied);
       if (unsatisfied.length > 0) {
         failures.push(`Scope-spec incompleto: ${unsatisfied.length} itens nao atendidos`);
+      }
+      const unverifiable = scopeSpec.filter((item) => !item.verification?.trim());
+      if (unverifiable.length > 0) {
+        failures.push(`Scope-spec sem verificacao: ${unverifiable.length} itens`);
+      }
+      const unverified = scopeSpec.filter((item) => item.satisfied && item.verification?.trim() && !item.verifiedAt);
+      if (unverified.length > 0) {
+        failures.push(`Scope-spec sem evidencia: ${unverified.length} itens`);
       }
     }
 
@@ -2021,6 +2391,7 @@ export class Orquestrator extends EventEmitter {
     this.startOrUpdateWaitRun(task, run, waitGroups, task.resultMessages);
     this.announceDelegation(task, waitGroups);
     task.setStatus(TASK_STATUS.WAITING, { force: true, waitingReason: 'subtasks' });
+    this.scheduler.rebuildWaitIndex(this.tasks);
     this.markTaskDirty(task);
     this.recordEvent(SWARM_EVENT_TYPE.TASK_WAITING, {
       task,
@@ -2090,7 +2461,7 @@ export class Orquestrator extends EventEmitter {
       }
     }
 
-    if (!isBudget && task.technicalRetryCount < MAX_TECHNICAL_RETRIES) {
+    if (!isBudget && !isTimeout && task.technicalRetryCount < MAX_TECHNICAL_RETRIES) {
       task.technicalRetryCount += 1;
       // Auto-escalate model/effort on repeated technical failures (§3.2).
       if (task.technicalRetryCount >= 1) {
@@ -2685,6 +3056,8 @@ export class Orquestrator extends EventEmitter {
       this.replayEventsMinimal();
     }
 
+    this.loadProjectProjection(snapshot?.projects);
+    this.applyTaskProjectLinkEvents();
     // events.jsonl stores each event as appended (processedByTaskIds: []). That
     // per-task consumption flag is mutated in-place after append and only the
     // wait groups persist it, so rebuild it from the loaded runs' processedEventIds.
@@ -2751,6 +3124,51 @@ export class Orquestrator extends EventEmitter {
   private nextId(prefix: 'task' | 'run' | 'evt'): string {
     this.idCounters[prefix] += 1;
     return `${prefix}_${this.idCounters[prefix]}`;
+  }
+
+  private normalizeProjectIds(projectIds: string[]): string[] {
+    return [...new Set(projectIds.map((projectId) => projectId.trim()).filter(Boolean))];
+  }
+
+  private requireProjectIds(projectIds: string[]): string[] {
+    const normalized = this.normalizeProjectIds(projectIds);
+    for (const projectId of normalized) {
+      if (!this.projects.has(projectId)) throw new Error(`Projeto ${projectId} não encontrado`);
+    }
+    return normalized;
+  }
+
+  private loadProjectProjection(snapshotProjects?: ProjectData[]): void {
+    this.projects.clear();
+    const seed = snapshotProjects?.length ? snapshotProjects : this.projectFileStore.listProjects();
+    for (const project of seed) {
+      this.projects.set(project.slug, project);
+      this.projectFileStore.saveProject(project);
+    }
+    for (const event of this.events) {
+      if (event.type === SWARM_EVENT_TYPE.PROJECT_CREATED || event.type === SWARM_EVENT_TYPE.PROJECT_UPDATED) {
+        const project = event.payload?.project as ProjectData | undefined;
+        if (!project?.slug) continue;
+        this.projects.set(project.slug, project);
+        this.projectFileStore.saveProject(project);
+      }
+      if (event.type === SWARM_EVENT_TYPE.PROJECT_DELETED) {
+        const slug = event.payload?.slug;
+        if (typeof slug !== 'string') continue;
+        this.projects.delete(slug);
+        this.projectFileStore.deleteProject(slug);
+      }
+    }
+  }
+
+  private applyTaskProjectLinkEvents(): void {
+    for (const event of this.events) {
+      if (event.type !== SWARM_EVENT_TYPE.TASK_PROJECT_LINKED || !event.taskId) continue;
+      const task = this.tasks.get(event.taskId);
+      const projectIds = event.payload?.projectIds;
+      if (!task || !Array.isArray(projectIds)) continue;
+      task.options.projectIds = this.normalizeProjectIds(projectIds.filter((id): id is string => typeof id === 'string'));
+    }
   }
 
   private replayEventsMinimal(): void {
@@ -3079,6 +3497,8 @@ export class Orquestrator extends EventEmitter {
       this.runningTaskIds.size === 0 &&
       this.queuedTaskIds.size === 0 &&
       this.taskQueue.length === 0 &&
+      this.workerPool.activeCount === 0 &&
+      this.workerPool.pendingCount === 0 &&
       [...this.tasks.values()].every(
         (task) =>
           task.status !== TASK_STATUS.PENDING &&

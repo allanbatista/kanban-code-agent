@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, appendFileSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { Orquestrator } from '../../application/orquestrator.js';
@@ -52,7 +52,7 @@ describe('E2E: resilience / chaos (F8.T5)', () => {
     // interrupted mid-flight with the parent WAITING on it.
     const hanging: AgentRunner = {
       async run(config) {
-        const taskId = basename(String(config.cwd));
+        const taskId = basename(dirname(String(config.cwd)));
         if (taskId === 'task_2') return new Promise<never>(() => {}); // never resolves
         return { output: waitingDecision([{ waitId: 'g', mode: 'WAIT_ALL', taskIds: ['task_2'] }], 'aguardando'), stats: STATS };
       },
@@ -68,7 +68,7 @@ describe('E2E: resilience / chaos (F8.T5)', () => {
     // wakes from the durable wait group and consolidates → REVIEW.
     const completing: AgentRunner = {
       async run(config) {
-        const taskId = basename(String(config.cwd));
+        const taskId = basename(dirname(String(config.cwd)));
         if (taskId === 'task_2') return { output: completedDecision('impl done'), stats: STATS };
         return { output: completedDecision('consolidado'), stats: STATS };
       },
@@ -107,7 +107,7 @@ describe('E2E: resilience / chaos (F8.T5)', () => {
     let asked = false;
     const runner: AgentRunner = {
       async run(config) {
-        const taskId = basename(String(config.cwd));
+        const taskId = basename(dirname(String(config.cwd)));
         if (taskId === 'task_2') {
           const tool = config.customTools?.find((t) => t.name === 'ask_human');
           if (tool && !asked) { asked = true; await tool.execute({ question: 'detalhe?' }); }

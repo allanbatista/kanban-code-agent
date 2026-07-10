@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { FastifyInstance } from 'fastify';
 
@@ -71,7 +71,7 @@ describe('E2E: §12 workflow scenarios', () => {
     };
     const runner: AgentRunner = {
       async run(config): Promise<AgentRunResult> {
-        const taskId = basename(String(config.cwd));
+        const taskId = basename(dirname(String(config.cwd)));
         if (taskId === 'task_4') {
           const tool = config.customTools?.find((t) => t.name === 'create_artifact');
           if (tool && (idx[taskId] ?? 0) === 0) await tool.execute({ fileName: 'design.md', content: '# design', description: 'd', file_type: 'markdown' });
@@ -120,7 +120,7 @@ describe('E2E: §12 workflow scenarios', () => {
     };
     const runner: AgentRunner = {
       async run(config) {
-        const taskId = basename(String(config.cwd));
+        const taskId = basename(dirname(String(config.cwd)));
         const i = idx[taskId] ?? 0; idx[taskId] = i + 1;
         return { output: (scripts[taskId] ?? [])[i] ?? completedDecision(), stats: STATS };
       },
@@ -148,7 +148,7 @@ describe('E2E: §12 workflow scenarios', () => {
     };
     const runner: AgentRunner = {
       async run(config) {
-        const taskId = basename(String(config.cwd));
+        const taskId = basename(dirname(String(config.cwd)));
         const i = idx[taskId] ?? 0; idx[taskId] = i + 1;
         return { output: (scripts[taskId] ?? [])[i] ?? completedDecision(), stats: STATS };
       },

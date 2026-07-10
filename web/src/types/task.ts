@@ -66,6 +66,7 @@ export interface Task {
   title: string;
   assignedTo: string;
   parentId?: string;
+  projectIds: string[];
   status: TaskStatus;
   waitingReason?: TaskWaitingReason;
   failureReason?: FailureReason;

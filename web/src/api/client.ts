@@ -14,6 +14,14 @@ import type {
 // Set VITE_API_URL to target an absolute API host.
 export const API_BASE = import.meta.env.VITE_API_URL ?? '';
 
+function fileNameOf(path: string): string {
+  return path.split('/').pop() ?? path;
+}
+
+function artifactUrl(taskId: string, path: string): string {
+  return `${API_BASE}/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(fileNameOf(path))}`;
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   // Only declare a JSON content-type when we actually send a body. Fastify
   // rejects an empty body when content-type is 'application/json' (a body-less
@@ -47,6 +55,7 @@ export const api = {
     message: string;
     runtimeConfig?: { model?: string; effort?: string };
     attachmentPaths?: string[];
+    projectIds?: string[];
     execute?: boolean;
   }): Promise<ApiTask> {
     return request<ApiTask>('/api/tasks', {
@@ -78,10 +87,40 @@ export const api = {
     });
   },
 
+  approveTask(taskId: string): Promise<ApiTask> {
+    return request<ApiTask>(`/api/tasks/${encodeURIComponent(taskId)}/approve`, {
+      method: 'POST',
+    });
+  },
+
+  rejectTask(taskId: string, message: string): Promise<ApiTask> {
+    return request<ApiTask>(`/api/tasks/${encodeURIComponent(taskId)}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    });
+  },
+
   archiveColumn(status: string): Promise<{ archived: string[]; total: number }> {
     return request<{ archived: string[]; total: number }>('/api/tasks/archive', {
       method: 'POST',
       body: JSON.stringify({ status }),
+    });
+  },
+
+  artifactUrl(taskId: string, path: string): string {
+    return artifactUrl(taskId, path);
+  },
+
+  async getArtifactText(taskId: string, path: string): Promise<string> {
+    const response = await fetch(artifactUrl(taskId, path));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.text();
+  },
+
+  updateArtifactText(taskId: string, path: string, content: string): Promise<ApiTask> {
+    return request<ApiTask>(`/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(fileNameOf(path))}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
     });
   },
 
@@ -111,7 +150,14 @@ export const api = {
     return request<ApiProjectListResponse>('/api/projects');
   },
 
-  createProject(data: { name: string; description?: string }): Promise<ApiProject> {
+  createProject(data: {
+    name: string;
+    slug?: string;
+    description?: string;
+    gitUrl?: string;
+    defaultBranch?: string;
+    autoMerge?: boolean;
+  }): Promise<ApiProject> {
     return request<ApiProject>('/api/projects', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -124,7 +170,7 @@ export const api = {
 
   updateProject(
     id: string,
-    data: { name?: string; description?: string; taskIds?: string[] },
+    data: { name?: string; description?: string; gitUrl?: string; defaultBranch?: string; autoMerge?: boolean },
   ): Promise<ApiProject> {
     return request<ApiProject>(`/api/projects/${encodeURIComponent(id)}`, {
       method: 'PATCH',

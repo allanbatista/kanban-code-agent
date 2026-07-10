@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { Orquestrator } from '../../application/orquestrator.js';
@@ -19,7 +19,7 @@ function rewaitRunner(): AgentRunner {
   const calls: Record<string, number> = {};
   return {
     async run(config: AgentRunConfig): Promise<AgentRunResult> {
-      const taskId = basename(String(config.cwd));
+      const taskId = basename(dirname(String(config.cwd)));
       const n = (calls[taskId] = (calls[taskId] ?? 0) + 1);
       const stats = { tokens: { input: 10, output: 5, total: 15 }, cost: 0.001 };
 

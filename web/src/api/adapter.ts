@@ -5,6 +5,20 @@ import type { AppearanceSettings, AdvancedSettings } from '@/types/settings';
 
 // --- Task adapters ---
 
+type WsTaskMetadata = Record<string, unknown>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function stringValue(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function numberValue(value: unknown, fallback = 0): number {
+  return typeof value === 'number' ? value : fallback;
+}
+
 // Backend agent names ('Manager', 'Code Reviewer') → column/lookup slugs
 // ('manager', 'code-reviewer'). The Inbox sentinel maps to itself.
 export function agentSlug(name: string): string {
@@ -17,6 +31,7 @@ export function apiTaskToTask(api: ApiTask): Task {
     title: api.title,
     assignedTo: agentSlug(api.assignedTo),
     parentId: api.parentId,
+    projectIds: Array.isArray(api.projectIds) ? api.projectIds : [],
     status: api.status as TaskStatus,
     waitingReason: api.waitingReason ?? api.metadata?.waitingReason,
     failureReason: (api as { failureReason?: Task['failureReason'] }).failureReason ?? (api.metadata as { failureReason?: Task['failureReason'] } | undefined)?.failureReason,
@@ -50,40 +65,54 @@ export function apiTaskToTask(api: ApiTask): Task {
 
 // Flat TaskMetadata (as delivered on WS event/state messages) → UI Task.
 // Same shape as apiTaskToTask but reads the flattened fields directly.
-export function metadataToTask(meta: any): Task {
+export function metadataToTask(meta: WsTaskMetadata): Task {
+  const runtimeConfig = isRecord(meta.runtimeConfig) ? meta.runtimeConfig : {};
+  const metrics = isRecord(meta.metrics) ? meta.metrics : {};
+  const tokens = isRecord(metrics.tokens) ? metrics.tokens : {};
+  const taskChat = Array.isArray(meta.taskChat) ? (meta.taskChat as ApiChatMessage[]) : [];
+  const artifacts = Array.isArray(meta.artifacts) ? (meta.artifacts as ApiArtifact[]) : [];
+  const runs = Array.isArray(meta.runs) ? (meta.runs as ApiTaskRun[]) : [];
+  const projectIds = Array.isArray(meta.projectIds)
+    ? meta.projectIds.filter((projectId): projectId is string => typeof projectId === 'string')
+    : [];
+  const subtaskIds = Array.isArray(meta.subtaskIds)
+    ? meta.subtaskIds.filter((taskId): taskId is string => typeof taskId === 'string')
+    : [];
+
   return {
-    id: meta.taskId,
-    title: meta.title,
-    assignedTo: agentSlug(meta.assignedTo),
-    parentId: meta.parentId,
-    status: meta.status as TaskStatus,
-    waitingReason: meta.waitingReason,
-    failureReason: meta.failureReason,
-    evaluationVerdict: meta.evaluationVerdict,
-    depth: meta.depth,
-    subtaskIds: Array.isArray(meta.subtaskIds) ? meta.subtaskIds : [],
+    id: stringValue(meta.taskId),
+    title: stringValue(meta.title),
+    assignedTo: agentSlug(stringValue(meta.assignedTo)),
+    parentId: stringValue(meta.parentId) || undefined,
+    projectIds,
+    status: stringValue(meta.status, 'PENDING') as TaskStatus,
+    waitingReason: meta.waitingReason as Task['waitingReason'],
+    failureReason: meta.failureReason as Task['failureReason'],
+    evaluationVerdict: meta.evaluationVerdict as Task['evaluationVerdict'],
+    depth: numberValue(meta.depth),
+    subtaskIds,
     runtimeConfig: {
-      model: meta.runtimeConfig?.model ?? 'balanced',
-      effort: meta.runtimeConfig?.effort ?? 'medium',
+      model: stringValue(runtimeConfig.model, 'balanced'),
+      effort: stringValue(runtimeConfig.effort, 'medium'),
     },
-    chat: (meta.taskChat ?? []).map(apiChatToChat),
-    artifacts: (meta.artifacts ?? []).map(apiArtifactToArtifact),
+    chat: taskChat.map(apiChatToChat),
+    artifacts: artifacts.map(apiArtifactToArtifact),
     attachments: [],
     metrics: {
-      startedAt: meta.metrics?.startedAt ?? undefined,
-      finishedAt: meta.metrics?.finishedAt ?? undefined,
-      durationMs: meta.metrics?.durationMs ?? 0,
+      startedAt: stringValue(metrics.startedAt) || undefined,
+      finishedAt: stringValue(metrics.finishedAt) || undefined,
+      durationMs: numberValue(metrics.durationMs),
       waitingMs: 0,
       tokens: {
-        input: meta.metrics?.tokens?.input ?? 0,
-        output: meta.metrics?.tokens?.output ?? 0,
-        total: meta.metrics?.tokens?.total ?? 0,
+        input: numberValue(tokens.input),
+        output: numberValue(tokens.output),
+        total: numberValue(tokens.total),
         cache: 0,
       },
-      cost: meta.metrics?.cost ?? 0,
+      cost: numberValue(metrics.cost),
     },
-    retryCount: meta.retryCount ?? 0,
-    runs: (meta.runs ?? []).map(apiRunToRun),
+    retryCount: numberValue(meta.retryCount),
+    runs: runs.map(apiRunToRun),
   };
 }
 
@@ -184,11 +213,15 @@ function getAgentColor(name: string): string {
 
 export function apiProjectToProject(api: ApiProject, taskCount?: number, runningCount?: number): Project {
   return {
-    id: api.id,
+    id: api.slug,
+    slug: api.slug,
     name: api.name,
     description: api.description ?? '',
+    gitUrl: api.gitUrl,
+    defaultBranch: api.defaultBranch,
+    autoMerge: api.autoMerge,
     location: '',
-    taskCount: taskCount ?? api.taskIds.length,
+    taskCount: taskCount ?? 0,
     runningCount: runningCount ?? 0,
     createdAt: api.createdAt ? api.createdAt.split('T')[0] : new Date().toISOString().split('T')[0],
   };

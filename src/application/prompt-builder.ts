@@ -67,7 +67,11 @@ export function buildPrompt(
   // Continuity artifacts (selective rehydration)
   if (continuity?.scopeSpec?.length) {
     const specLines = continuity.scopeSpec.map(
-      (item) => `- [${item.satisfied ? 'x' : ' '}] ${item.id}: ${item.description}`,
+      (item) => {
+        const verification = item.verification ? ` | verificacao: ${item.verification}` : '';
+        const verifiedAt = item.verifiedAt ? ` | verificado: ${item.verifiedAt}` : '';
+        return `- [${item.satisfied ? 'x' : ' '}] ${item.id}: ${item.description}${verification}${verifiedAt}`;
+      },
     );
     sections.push(`Scope-Spec (checklist de escopo):\n${specLines.join('\n')}`);
   }

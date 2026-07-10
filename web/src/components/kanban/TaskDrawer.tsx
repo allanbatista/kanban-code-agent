@@ -30,7 +30,7 @@ const TABS = [
 
 export function TaskDrawer({ taskId, defaultTab, onClose }: TaskDrawerProps) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const { tasks, getTaskById, setTasks, familyColors, setFamilyColor, getTaskRootId } = useKanbanStore();
+  const { tasks, getTaskById, setTasks, familyColors, setFamilyColor, getTaskRootId, approveTask, rejectTask } = useKanbanStore();
   const task = getTaskById(taskId);
 
   const rootId = task ? getTaskRootId(task.id) : taskId;
@@ -40,6 +40,7 @@ export function TaskDrawer({ taskId, defaultTab, onClose }: TaskDrawerProps) {
   const [editTitle, setEditTitle] = useState('');
   const [colorPickerOpen, setColorPickerOpen] = useState(false);
   const [customColor, setCustomColor] = useState(currentColor);
+  const [reviewBusy, setReviewBusy] = useState(false);
   const colorBtnRef = useRef<HTMLButtonElement>(null);
   const pickerContentRef = useRef<HTMLDivElement>(null);
   const [pickerPos, setPickerPos] = useState({ top: 0, left: 0 });
@@ -101,6 +102,28 @@ export function TaskDrawer({ taskId, defaultTab, onClose }: TaskDrawerProps) {
   const cancelEditing = () => {
     setEditing(false);
     setEditTitle('');
+  };
+
+  const approveReview = async () => {
+    if (!task) return;
+    setReviewBusy(true);
+    try {
+      await approveTask(task.id);
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
+  const rejectReview = async () => {
+    if (!task) return;
+    const feedback = window.prompt('Feedback da rejeição');
+    if (!feedback?.trim()) return;
+    setReviewBusy(true);
+    try {
+      await rejectTask(task.id, feedback.trim());
+    } finally {
+      setReviewBusy(false);
+    }
   };
 
   if (!task) {
@@ -246,6 +269,18 @@ export function TaskDrawer({ taskId, defaultTab, onClose }: TaskDrawerProps) {
             <span className="text-xs text-muted-foreground">{task.assignedTo}</span>
             <StatusBadge status={task.status} waitingReason={task.waitingReason} />
           </div>
+          {task.status === 'REVIEW' && (
+            <div className="ml-auto flex items-center gap-2">
+              <Button size="sm" className="h-7 gap-1 px-2 text-xs" onClick={approveReview} disabled={reviewBusy}>
+                <Check className="h-3.5 w-3.5" />
+                Aprovar
+              </Button>
+              <Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-xs" onClick={rejectReview} disabled={reviewBusy}>
+                <X className="h-3.5 w-3.5" />
+                Rejeitar
+              </Button>
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground/70">
             <span>🤖 {task.runtimeConfig.model} · {task.runtimeConfig.effort}</span>
             <span>📎 {task.attachments.length}</span>

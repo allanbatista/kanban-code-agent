@@ -50,6 +50,7 @@ Casos de uso e orquestração. Depende apenas de domain e interfaces de infrastr
 - **Scheduler**: Agenda tasks baseado em dependências (índice waitingByDependency)
 - **WorkerPool**: Pool de workers com controle de concorrência, timeout e cancel
 - **PiClient**: Adaptador para Pi SDK com AgentRunner interface
+- **WorkerSupervisor**: Executa runs em `inproc` ou worker UDS via `systemd-run`
 - **PromptBuilder**: Função pura para construção de prompts (idempotente)
 - **DecisionParser**: Parser estrito de JSON do agent (AgentOutputInvalidError)
 - **BudgetTracker**: Rastreio de tokens e custo por task
@@ -121,14 +122,20 @@ A persistência do swarm vive fora do projeto, no diretório do usuário:
       │   ├── {taskId}/
       │   │   ├── chat.jsonl     ← log de chat da task
       │   │   ├── artifacts/     ← artefatos gerados pelo agente
-      │   │   └── attachments/   ← anexos do humano
+      │   │   ├── attachments/   ← anexos do humano
+      │   │   └── workspace/     ← cwd isolado da execução
       │   └── _archived/         ← tasks arquivadas
+      ├── projects/
+      │   └── {slug}/
+      │       ├── project.json   ← slug/gitUrl/defaultBranch/autoMerge
+      │       └── repo.git/      ← mirror Git compartilhado pelos worktrees
       └── state.snapshot.json    ← snapshot do estado
 ```
 
 - **`dataDir`** (default `~/.kca`): raiz de toda persistência. Override com `SWARM_DATA_DIR` envvar ou `data_dir` em `swarm.yml`.
 - **`.swarm/`**: subdiretório fixo para dados do swarm (eventos, tasks, snapshot).
-- Projetos ficam em `.kanban-data/projects/` dentro do `dataDir`.
+- Projetos ficam em `.swarm/projects/<slug>/project.json` e também são reconstruíveis por eventos `PROJECT_*`.
+- Tasks vinculadas a projeto usam worktree em `.swarm/tasks/<taskId>/workspace/<slug>/`; o branch padrão só é escrito pelo Master.
 
 ## Stack
 

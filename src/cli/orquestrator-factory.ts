@@ -73,5 +73,10 @@ export async function createOrquestrator(
     },
   };
 
-  return new Orquestrator(deps, options ?? {});
+  return new Orquestrator(deps, {
+    runTimeoutMs: resolvedConfig.runTimeoutMs,
+    maxConcurrentRuns: resolvedConfig.maxConcurrentRuns,
+    isolation: resolvedConfig.isolation,
+    ...(options ?? {}),
+  });
 }

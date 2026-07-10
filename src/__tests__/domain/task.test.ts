@@ -37,6 +37,16 @@ describe('Task constructor', () => {
     expect(task.subtaskIds).toEqual([]);
   });
 
+  it('defaults projectIds to empty array', () => {
+    const task = new Task(defaultOptions);
+    expect(task.projectIds).toEqual([]);
+  });
+
+  it('normalizes projectIds', () => {
+    const task = new Task({ ...defaultOptions, projectIds: [' app ', 'app', '', 'api'] });
+    expect(task.projectIds).toEqual(['app', 'api']);
+  });
+
   it('defaults runs to empty array', () => {
     const task = new Task(defaultOptions);
     expect(task.runs).toEqual([]);
@@ -115,6 +125,7 @@ describe('Task.serialize', () => {
     task.status = 'RUNNING';
     task.waitingReason = 'validation';
     task.subtaskIds.push('task_sub-1');
+    task.options.projectIds = ['app'];
     task.retryCount = 2;
     task.evaluationVerdict = 'approved';
 
@@ -122,6 +133,7 @@ describe('Task.serialize', () => {
     expect(serialized.status).toBe('RUNNING');
     expect(serialized.waitingReason).toBe('validation');
     expect(serialized.subtaskIds).toEqual(['task_sub-1']);
+    expect(serialized.options.projectIds).toEqual(['app']);
     expect(serialized.retryCount).toBe(2);
     expect(serialized.evaluationVerdict).toBe('approved');
   });
@@ -133,6 +145,7 @@ describe('Task.fromSerialized', () => {
     original.status = 'RUNNING';
     original.waitingReason = 'validation';
     original.subtaskIds.push('task_sub-1', 'task_sub-2');
+    original.options.projectIds = ['app', 'api'];
     original.retryCount = 3;
     original.evaluationVerdict = 'rejected';
 
@@ -144,6 +157,7 @@ describe('Task.fromSerialized', () => {
     expect(restored.status).toBe('RUNNING');
     expect(restored.waitingReason).toBe('validation');
     expect(restored.subtaskIds).toEqual(['task_sub-1', 'task_sub-2']);
+    expect(restored.projectIds).toEqual(['app', 'api']);
     expect(restored.retryCount).toBe(3);
     expect(restored.evaluationVerdict).toBe('rejected');
   });

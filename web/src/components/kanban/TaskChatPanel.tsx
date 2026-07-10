@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, ChevronDown, ChevronUp, ExternalLink, Download, Paperclip, MessageCircleQuestion } from 'lucide-react';
+import { Send, ChevronDown, ChevronUp, ExternalLink, Paperclip, MessageCircleQuestion } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Input } from '@/components/ui/input';
@@ -9,15 +9,12 @@ import { Button } from '@/components/ui/button';
 import { useKanbanStore } from '@/stores/kanbanStore';
 import { cn } from '@/lib/utils';
 import type { Task, ChatMessage } from '@/types/task';
+import { ArtifactViewer } from './ArtifactViewer';
 
 interface TaskChatPanelProps {
   task: Task;
   onOpenTask?: (taskId: string) => void;
 }
-
-const fileNameOf = (path: string): string => path.split('/').pop() ?? path;
-const artifactHref = (taskId: string, path: string): string =>
-  `${import.meta.env.VITE_API_URL ?? ''}/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(fileNameOf(path))}`;
 
 // Last natural-language reply a task produced — shown when expanding an event line.
 function lastAssistantText(task: Task): string | undefined {
@@ -140,20 +137,8 @@ export function TaskChatPanel({ task, onOpenTask }: TaskChatPanelProps) {
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
                 </div>
               )}
-              {/* Agent artifacts: downloadable / openable via the artifact endpoint. */}
               {msg.artifacts?.map((a, ai) => (
-                <a
-                  key={ai}
-                  href={artifactHref(task.id, a.path)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mt-1 flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-2 py-1 text-xs text-primary hover:bg-primary/10"
-                  title={a.description}
-                >
-                  <Download className="h-3 w-3" />
-                  <span className="truncate">{fileNameOf(a.path)}</span>
-                  <span className="text-[10px] text-muted-foreground/70">{a.file_type}</span>
-                </a>
+                <ArtifactViewer key={`${a.path}-${ai}`} taskId={task.id} artifact={a} />
               ))}
               {/* Human attachments. */}
               {msg.attachments?.map((att, ai) => (

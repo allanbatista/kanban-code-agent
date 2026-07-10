@@ -16,6 +16,8 @@ export interface SwarmConfig {
   dataDir: string;
   logLevel: string;
   runTimeoutMs: number;
+  maxConcurrentRuns: number;
+  isolation: 'inproc' | 'systemd';
   models: {
     fast: ModelConfig;
     balanced: ModelConfig;
@@ -35,6 +37,8 @@ const DEFAULTS: SwarmConfig = {
   dataDir: resolve(homedir(), '.kca'),
   logLevel: 'info',
   runTimeoutMs: 300_000,
+  maxConcurrentRuns: 4,
+  isolation: 'inproc',
   models: {
     // Pi SDK native providers (provider name + bare model id). The deepseek
     // provider auto-uses DEEPSEEK_API_KEY. Override via swarm.yml / env.
@@ -81,6 +85,9 @@ interface FileConfigRaw {
   'log_level'?: string;
   runTimeoutMs?: number;
   'run_timeout_ms'?: number;
+  maxConcurrentRuns?: number;
+  'max_concurrent_runs'?: number;
+  isolation?: 'inproc' | 'systemd';
   models?: {
     fast?: { provider?: string; modelId?: string; model_id?: string };
     balanced?: { provider?: string; modelId?: string; model_id?: string };
@@ -98,6 +105,9 @@ function normalizeFileConfig(raw: FileConfigRaw): Partial<SwarmConfig> {
   else if (typeof raw['log_level'] === 'string') result.logLevel = raw['log_level'];
   if (typeof raw.runTimeoutMs === 'number') result.runTimeoutMs = raw.runTimeoutMs;
   else if (typeof raw['run_timeout_ms'] === 'number') result.runTimeoutMs = raw['run_timeout_ms'];
+  if (typeof raw.maxConcurrentRuns === 'number') result.maxConcurrentRuns = raw.maxConcurrentRuns;
+  else if (typeof raw['max_concurrent_runs'] === 'number') result.maxConcurrentRuns = raw['max_concurrent_runs'];
+  if (raw.isolation === 'inproc' || raw.isolation === 'systemd') result.isolation = raw.isolation;
 
   if (raw.models) {
     result.models = {
@@ -169,7 +179,7 @@ function parseSimpleYamlConfig(content: string): Partial<SwarmConfig> {
       const value = match[2].trim().replace(/^['"]|['"]$/g, '');
 
       const numVal = Number(value);
-      if (key === 'port' || key === 'run_timeout_ms' || key === 'runTimeoutMs') {
+      if (key === 'port' || key === 'run_timeout_ms' || key === 'runTimeoutMs' || key === 'max_concurrent_runs' || key === 'maxConcurrentRuns') {
         raw[key] = Number.isFinite(numVal) ? numVal : value;
       } else {
         raw[key] = value;
@@ -209,6 +219,12 @@ function readEnvOverrides(): Partial<SwarmConfig> {
   const runTimeoutMs = readPositiveIntEnv('SWARM_RUN_TIMEOUT_MS');
   if (runTimeoutMs !== undefined) overrides.runTimeoutMs = runTimeoutMs;
 
+  const maxConcurrentRuns = readPositiveIntEnv('SWARM_MAX_CONCURRENT_RUNS');
+  if (maxConcurrentRuns !== undefined) overrides.maxConcurrentRuns = maxConcurrentRuns;
+
+  const isolation = process.env['SWARM_ISOLATION'];
+  if (isolation === 'inproc' || isolation === 'systemd') overrides.isolation = isolation;
+
   return overrides;
 }
 
@@ -229,6 +245,8 @@ function mergeConfig(fileConfig: Partial<SwarmConfig>, envOverrides: Partial<Swa
     dataDir: envOverrides.dataDir ?? fileConfig.dataDir ?? DEFAULTS.dataDir,
     logLevel: envOverrides.logLevel ?? fileConfig.logLevel ?? DEFAULTS.logLevel,
     runTimeoutMs: envOverrides.runTimeoutMs ?? fileConfig.runTimeoutMs ?? DEFAULTS.runTimeoutMs,
+    maxConcurrentRuns: envOverrides.maxConcurrentRuns ?? fileConfig.maxConcurrentRuns ?? DEFAULTS.maxConcurrentRuns,
+    isolation: envOverrides.isolation ?? fileConfig.isolation ?? DEFAULTS.isolation,
     models: {
       fast: {
         provider: fileConfig.models?.fast?.provider ?? DEFAULTS.models.fast.provider,
@@ -267,6 +285,12 @@ function validateConfig(config: SwarmConfig): void {
   }
   if (!Number.isInteger(config.runTimeoutMs) || config.runTimeoutMs < 1000) {
     throw new Error(`SWARM_RUN_TIMEOUT_MS deve ser >= 1000, recebeu: ${config.runTimeoutMs}`);
+  }
+  if (!Number.isInteger(config.maxConcurrentRuns) || config.maxConcurrentRuns < 1) {
+    throw new Error(`SWARM_MAX_CONCURRENT_RUNS deve ser >= 1, recebeu: ${config.maxConcurrentRuns}`);
+  }
+  if (config.isolation !== 'inproc' && config.isolation !== 'systemd') {
+    throw new Error(`SWARM_ISOLATION deve ser inproc ou systemd, recebeu: ${config.isolation}`);
   }
 
   for (const alias of ['fast', 'balanced', 'deep'] as const) {

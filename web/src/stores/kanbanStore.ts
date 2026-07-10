@@ -17,10 +17,13 @@ interface KanbanState {
   createTask: (data: {
     message: string;
     runtimeConfig?: { model?: string; effort?: string };
+    projectIds?: string[];
     execute?: boolean;
   }) => Promise<Task>;
   cancelTask: (taskId: string) => Promise<void>;
   completeTask: (taskId: string) => Promise<void>;
+  approveTask: (taskId: string) => Promise<void>;
+  rejectTask: (taskId: string, message: string) => Promise<void>;
   moveTask: (taskId: string, newAgent: string) => Promise<void>;
   sendMessage: (taskId: string, message: string) => Promise<void>;
   archiveColumn: (status: string) => Promise<void>;
@@ -60,7 +63,7 @@ function errorMessage(err: unknown): string {
 // generates the real title; here we use the message as a placeholder.
 function makeOptimisticTask(
   id: string,
-  data: { message: string; runtimeConfig?: { model?: string; effort?: string }; execute?: boolean },
+  data: { message: string; runtimeConfig?: { model?: string; effort?: string }; projectIds?: string[]; execute?: boolean },
 ): Task {
   const title = data.message.trim().split('\n')[0]?.slice(0, 80) || 'Nova tarefa';
   return {
@@ -69,6 +72,7 @@ function makeOptimisticTask(
     assignedTo: data.execute ? 'manager' : 'inbox',
     status: 'PENDING',
     depth: 0,
+    projectIds: data.projectIds ?? [],
     subtaskIds: [],
     runtimeConfig: { model: data.runtimeConfig?.model ?? 'balanced', effort: data.runtimeConfig?.effort ?? 'medium' },
     chat: [{ ts: new Date().toISOString(), role: 'user', type: 'text', text: data.message }],
@@ -180,6 +184,16 @@ export const useKanbanStore = create<KanbanState>((set, get) => ({
       }));
       throw err;
     }
+  },
+
+  approveTask: async (taskId) => {
+    const result = await api.approveTask(taskId);
+    get().upsertTask(apiTaskToTask(result));
+  },
+
+  rejectTask: async (taskId, message) => {
+    const result = await api.rejectTask(taskId, message);
+    get().upsertTask(apiTaskToTask(result));
   },
 
   sendMessage: async (taskId, message) => {

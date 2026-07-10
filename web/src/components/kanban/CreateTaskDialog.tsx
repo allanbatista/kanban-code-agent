@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useKanbanStore } from '@/stores/kanbanStore';
+import { useProjectsStore } from '@/stores/projectsStore';
 
 interface CreateTaskDialogProps {
   open: boolean;
@@ -14,25 +15,42 @@ export function CreateTaskDialog({ open, onOpenChange }: CreateTaskDialogProps) 
   const [message, setMessage] = useState('');
   const [model, setModel] = useState('balanced');
   const [effort, setEffort] = useState('medium');
+  const [projectIds, setProjectIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const { createTask } = useKanbanStore();
+  const { projects, fetchProjects } = useProjectsStore();
+
+  useEffect(() => {
+    if (open) void fetchProjects();
+  }, [open, fetchProjects]);
 
   const handleCreate = async (execute: boolean) => {
     const text = message.trim();
     if (!text || submitting) return;
+    const selectedProjectIds = projectIds;
     setSubmitting(true);
     // Optimistic: close immediately; the store already shows the card.
     onOpenChange(false);
     setMessage('');
+    setProjectIds([]);
     try {
-      await createTask({ message: text, runtimeConfig: { model, effort }, execute });
+      await createTask({ message: text, runtimeConfig: { model, effort }, projectIds: selectedProjectIds, execute });
     } catch {
       // Rollback + error are surfaced by the store; reopen so the user can retry.
       setMessage(text);
+      setProjectIds(selectedProjectIds);
       onOpenChange(true);
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const toggleProject = (projectId: string) => {
+    setProjectIds((current) =>
+      current.includes(projectId)
+        ? current.filter((id) => id !== projectId)
+        : [...current, projectId],
+    );
   };
 
   return (
@@ -83,6 +101,24 @@ export function CreateTaskDialog({ open, onOpenChange }: CreateTaskDialogProps) 
               </SelectContent>
             </Select>
           </div>
+          {projects.length > 0 ? (
+            <div className="md:col-span-2">
+              <Label>Projetos</Label>
+              <div className="mt-2 grid max-h-36 gap-2 overflow-y-auto rounded-md border border-input p-2">
+                {projects.map((project) => (
+                  <label key={project.id} className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={projectIds.includes(project.id)}
+                      onChange={() => toggleProject(project.id)}
+                      className="h-4 w-4"
+                    />
+                    <span>{project.name}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>

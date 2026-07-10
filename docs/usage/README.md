@@ -26,10 +26,16 @@ pnpm start -- server
 Acesse `http://localhost:3000` para a interface web.
 
 Variáveis de ambiente:
-- `SWARM_PORT` — porta do servidor (default: 3000)
-- `SWARM_DATA_DIR` — diretório de dados (default: `.swarm`)
+- `SWARM_PORT` — porta do servidor (default: 35000)
+- `SWARM_DATA_DIR` — diretório de dados (default: `~/.kca`)
 - `SWARM_LOG_LEVEL` — nível de log (default: `info`)
 - `SWARM_RUN_TIMEOUT_MS` — timeout por run (default: 300000)
+- `SWARM_MAX_CONCURRENT_RUNS` — limite de runs simultâneas (default: 4)
+- `SWARM_ISOLATION` — `inproc` ou `systemd` (default: `inproc`; `systemd` usa worker UDS via `systemd-run`)
+- `SWARM_WORKER_MEMORY_MAX` — opcional; valor de `MemoryMax` para workers `systemd` (ex.: `2G`)
+- `SWARM_WORKER_CPU_QUOTA` — opcional; valor de `CPUQuota` para workers `systemd` (ex.: `200%`)
+- `SWARM_WORKER_HOLD_MS` — opcional para debug; mantém a unit `kca-*.service` viva por N ms após o run para inspeção com `systemctl`
+- `CREDENTIALS_DIRECTORY` ou `SWARM_GIT_TOKEN` — token Git usado via `GIT_ASKPASS`, sem gravar o token em `.swarm`
 
 ### Modo Runner (CLI)
 
@@ -76,8 +82,14 @@ GET    /api/tasks              Listar tasks
 GET    /api/tasks/:taskId      Detalhe da task
 POST   /api/tasks              Criar task
 PATCH  /api/tasks/:taskId      Atualizar task
+POST   /api/tasks/:taskId/approve  Aprovar task em REVIEW
+POST   /api/tasks/:taskId/reject   Rejeitar REVIEW com feedback
+POST   /api/tasks/:taskId/retry    Reexecutar task finalizada/REVIEW
 DELETE /api/tasks/:taskId      Cancelar task
 ```
+
+Tasks aceitam `projectIds` para vincular 0, 1 ou N projetos. Tasks vinculadas a
+projeto com `gitUrl` rodam em `.swarm/tasks/<taskId>/workspace/<slug>/`.
 
 ### Agents
 ```
@@ -94,6 +106,9 @@ GET    /api/projects/:id       Detalhe do projeto
 PATCH  /api/projects/:id       Atualizar projeto
 DELETE /api/projects/:id       Remover projeto
 ```
+
+Projeto usa `slug`, `gitUrl`, `defaultBranch` e `autoMerge`. `autoMerge=false`
+para em `REVIEW`; `autoMerge=true` aprova o merge final automaticamente.
 
 ### Settings
 ```
@@ -127,6 +142,10 @@ Mensagens:
 ├── logs/
 │   ├── orchestrator.jsonl # Logs do orquestrador
 │   └── audit.jsonl        # Trilha de auditoria
+├── projects/
+│   └── {slug}/
+│       ├── project.json   # Configuração do projeto
+│       └── repo.git/      # Mirror Git compartilhado
 └── tasks/
     └── {taskId}/
         ├── task.yml       # Estado da task
@@ -134,7 +153,8 @@ Mensagens:
         ├── session.jsonl  # Sessão Pi
         ├── artifacts.yaml # Artefatos
         ├── attachments/   # Anexos
-        └── artifacts/     # Artefatos gerados
+        ├── artifacts/     # Artefatos gerados
+        └── workspace/     # CWD isolado da execução
 ```
 
 ## Configuração via Arquivo
@@ -143,19 +163,21 @@ Crie `swarm.yml` na raiz do projeto:
 
 ```yaml
 port: 3000
-dataDir: .swarm
+dataDir: ~/.kca
 logLevel: info
 runTimeoutMs: 300000
+maxConcurrentRuns: 4
+isolation: inproc
 models:
   fast:
-    provider: openrouter
-    modelId: openai/gpt-5.4-nano
+    provider: deepseek
+    modelId: deepseek-v4-flash
   balanced:
-    provider: openrouter
-    modelId: deepseek/deepseek-v4-flash
+    provider: deepseek
+    modelId: deepseek-v4-flash
   deep:
-    provider: openrouter
-    modelId: deepseek/deepseek-v4-pro
+    provider: deepseek
+    modelId: deepseek-v4-pro
 ```
 
 Variáveis de ambiente têm prioridade sobre o arquivo.

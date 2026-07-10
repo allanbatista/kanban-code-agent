@@ -12,6 +12,7 @@ function makeBaseMetadata(overrides: Partial<TaskMetadata> = {}): TaskMetadata {
     title: 'Test Task',
     assignedTo: 'agent-1',
     parentId: undefined,
+    projectIds: [],
     status: 'RUNNING',
     depth: 0,
     maxDepth: 5,
@@ -104,6 +105,22 @@ describe('buildPrompt', () => {
     it('contains instruction to return structured JSON', () => {
       const prompt = buildPrompt(task, metadata, [], 60);
       expect(prompt).toContain('JSON estruturado');
+    });
+
+    it('contains scope verification details', () => {
+      const prompt = buildPrompt(task, metadata, [], 60, {
+        scopeSpec: [
+          {
+            id: 'api',
+            description: 'Health endpoint',
+            verification: 'curl /health returns 200',
+            satisfied: true,
+            verifiedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      });
+      expect(prompt).toContain('verificacao: curl /health returns 200');
+      expect(prompt).toContain('verificado: 2026-01-01T00:00:00.000Z');
     });
   });
 

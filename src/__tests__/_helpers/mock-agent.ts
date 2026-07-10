@@ -1,7 +1,7 @@
 import type { Agent } from '../../domain/agent.js';
 import type { AgentRunResult, AgentRunner, AgentRunConfig } from '../../application/pi-client.js';
 import type { AgentDecision } from '../../domain/task.js';
-import { basename } from 'node:path';
+import { basename, dirname } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Test agent fixture
@@ -82,7 +82,7 @@ export function makeRoutedRunner(
   const idx: Record<string, number> = {};
   return {
     async run(config: AgentRunConfig): Promise<AgentRunResult> {
-      const taskId = basename(String(config.cwd));
+      const taskId = basename(dirname(String(config.cwd)));
       if (taskId in gates) await gates[taskId];
       const i = idx[taskId] ?? 0;
       idx[taskId] = i + 1;

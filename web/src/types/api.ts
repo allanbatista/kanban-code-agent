@@ -5,7 +5,8 @@ export interface ApiTask {
   title: string;
   assignedTo: string;
   parentId?: string;
-  status: 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'REVIEW' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+  projectIds: string[];
+  status: 'PENDING' | 'QUEUED' | 'RUNNING' | 'WAITING' | 'SUSPENDED' | 'REVIEW' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
   waitingReason?: 'subtasks' | 'human' | 'validation';
   depth: number;
   subtaskIds: string[];
@@ -15,6 +16,7 @@ export interface ApiTask {
     title: string;
     assignedTo: string;
     parentId?: string;
+    projectIds: string[];
     status: string;
     waitingReason?: 'subtasks' | 'human' | 'validation';
     depth: number;
@@ -97,10 +99,12 @@ export interface ApiAgent {
 }
 
 export interface ApiProject {
-  id: string;
+  slug: string;
   name: string;
   description: string;
-  taskIds: string[];
+  gitUrl?: string;
+  defaultBranch: string;
+  autoMerge: boolean;
   createdAt: string;
   updatedAt: string;
 }

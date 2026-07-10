@@ -9,8 +9,21 @@ interface ProjectsState {
   error: string | null;
 
   fetchProjects: () => Promise<void>;
-  createProject: (data: { name: string; description?: string }) => Promise<Project>;
-  updateProject: (id: string, data: { name?: string; description?: string }) => Promise<void>;
+  createProject: (data: {
+    name: string;
+    slug?: string;
+    description?: string;
+    gitUrl?: string;
+    defaultBranch?: string;
+    autoMerge?: boolean;
+  }) => Promise<Project>;
+  updateProject: (id: string, data: {
+    name?: string;
+    description?: string;
+    gitUrl?: string;
+    defaultBranch?: string;
+    autoMerge?: boolean;
+  }) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
 
   addProject: (project: Project) => void;

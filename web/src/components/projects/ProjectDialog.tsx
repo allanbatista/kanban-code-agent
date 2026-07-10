@@ -17,17 +17,29 @@ interface ProjectDialogProps {
 
 export function ProjectDialog({ open, onOpenChange, editProject, onClose }: ProjectDialogProps) {
   const [name, setName] = useState('');
+  const [slug, setSlug] = useState('');
   const [description, setDescription] = useState('');
+  const [gitUrl, setGitUrl] = useState('');
+  const [defaultBranch, setDefaultBranch] = useState('main');
+  const [autoMerge, setAutoMerge] = useState(false);
   const [saving, setSaving] = useState(false);
   const { createProject, updateProject } = useProjectsStore();
 
   useEffect(() => {
     if (editProject) {
       setName(editProject.name);
+      setSlug(editProject.slug);
       setDescription(editProject.description);
+      setGitUrl(editProject.gitUrl ?? '');
+      setDefaultBranch(editProject.defaultBranch);
+      setAutoMerge(editProject.autoMerge);
     } else {
       setName('');
+      setSlug('');
       setDescription('');
+      setGitUrl('');
+      setDefaultBranch('main');
+      setAutoMerge(false);
     }
   }, [editProject, open]);
 
@@ -36,9 +48,22 @@ export function ProjectDialog({ open, onOpenChange, editProject, onClose }: Proj
     setSaving(true);
     try {
       if (editProject) {
-        await updateProject(editProject.id, { name: name.trim(), description: description.trim() });
+        await updateProject(editProject.id, {
+          name: name.trim(),
+          description: description.trim(),
+          gitUrl: gitUrl.trim(),
+          defaultBranch: defaultBranch.trim() || 'main',
+          autoMerge,
+        });
       } else {
-        await createProject({ name: name.trim(), description: description.trim() });
+        await createProject({
+          name: name.trim(),
+          slug: slug.trim() || undefined,
+          description: description.trim(),
+          gitUrl: gitUrl.trim() || undefined,
+          defaultBranch: defaultBranch.trim() || 'main',
+          autoMerge,
+        });
       }
       onClose();
       onOpenChange(false);
@@ -61,10 +86,26 @@ export function ProjectDialog({ open, onOpenChange, editProject, onClose }: Proj
             <Label htmlFor="name">Nome</Label>
             <Input id="name" value={name} onChange={e => setName(e.target.value)} placeholder="Nome do projeto" className="mt-1" />
           </div>
+          <div>
+            <Label htmlFor="slug">Slug</Label>
+            <Input id="slug" value={slug} onChange={e => setSlug(e.target.value)} placeholder="gerado pelo nome" disabled={Boolean(editProject)} className="mt-1" />
+          </div>
+          <div>
+            <Label htmlFor="branch">Branch padrão</Label>
+            <Input id="branch" value={defaultBranch} onChange={e => setDefaultBranch(e.target.value)} placeholder="main" className="mt-1" />
+          </div>
+          <div className="md:col-span-2">
+            <Label htmlFor="git-url">Git URL</Label>
+            <Input id="git-url" value={gitUrl} onChange={e => setGitUrl(e.target.value)} placeholder="https://github.com/org/repo.git" className="mt-1" />
+          </div>
           <div className="md:col-span-2">
             <Label htmlFor="desc">Descrição</Label>
             <Textarea id="desc" value={description} onChange={e => setDescription(e.target.value)} placeholder="Descrição..." className="mt-1 min-h-24" />
           </div>
+          <label className="md:col-span-2 flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={autoMerge} onChange={e => setAutoMerge(e.target.checked)} />
+            Auto-merge depois dos gates
+          </label>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => { onClose(); onOpenChange(false); }} disabled={saving}>Cancelar</Button>

@@ -13,6 +13,7 @@ import { PathSandbox } from '../../../infrastructure/filesystem/sandbox.js';
 import type { Agent } from '../../../domain/agent.js';
 import { makeRunner } from '../../_helpers/mock-agent.js';
 import { buildServer } from '../../_helpers/e2e-server.js';
+import { SWARM_EVENT_TYPE, TASK_STATUS } from '../../../domain/types.js';
 
 const MODELS = {
   fast: { provider: 'deepseek', modelId: 'deepseek-v4-flash', description: 'x' },
@@ -20,6 +21,7 @@ const MODELS = {
   deep: { provider: 'deepseek', modelId: 'deepseek-v4-pro', description: 'z' },
 };
 const agent: Agent = { name: 'agent-tester', role: 'Test.', runtimeConfig: { model: 'fast', effort: 'off' }, tools: ['read'] };
+const manager: Agent = { name: 'Manager', role: 'Manager.', runtimeConfig: { model: 'fast', effort: 'off' }, tools: ['read'] };
 
 function build(dir: string): { orc: Orquestrator; server: FastifyInstance } {
   const sandbox = new PathSandbox(dir);
@@ -28,7 +30,7 @@ function build(dir: string): { orc: Orquestrator; server: FastifyInstance } {
     snapshotStore: new SnapshotStore(sandbox),
     taskFileStore: new TaskFileStore(sandbox),
     sandbox,
-    agents: [agent],
+    agents: [agent, manager],
     piClient: new PiAgentClient(makeRunner([]), '', ['read'], MODELS, 60),
     models: MODELS,
   }, { stopWhenWaiting: true });
@@ -71,12 +73,57 @@ describe('API route integration (F8.T1/T2)', () => {
     expect(del.json().status).toBe('CANCELLED');
   });
 
+  it('creates project-backed tasks and rejects unknown project links', async () => {
+    const project = await server.inject({
+      method: 'POST',
+      url: '/api/projects',
+      payload: { name: 'App', slug: 'app', gitUrl: 'https://example.com/app.git' },
+    });
+    expect(project.statusCode).toBe(201);
+
+    const linked = await server.inject({
+      method: 'POST',
+      url: '/api/tasks',
+      payload: { message: 'fazer algo', projectIds: ['app'] },
+    });
+    expect(linked.statusCode).toBe(201);
+    expect(linked.json().projectIds).toEqual(['app']);
+
+    const invalid = await server.inject({
+      method: 'POST',
+      url: '/api/tasks',
+      payload: { message: 'fazer algo', projectIds: ['missing'] },
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(orc.events.some((event) => event.type === SWARM_EVENT_TYPE.PROJECT_CREATED)).toBe(true);
+    expect(orc.events.some((event) => event.type === SWARM_EVENT_TYPE.TASK_PROJECT_LINKED)).toBe(true);
+  });
+
   it('manual retry re-opens a cancelled task (F8.T2)', async () => {
     const id = orc.createRootTask('Retry me', 'agent-tester').taskId;
     orc.cancelTask(id);
     const res = await server.inject({ method: 'POST', url: `/api/tasks/${id}/retry` });
     expect(res.statusCode).toBe(200);
     expect(['PENDING', 'QUEUED', 'RUNNING', 'COMPLETED', 'REVIEW']).toContain(res.json().status);
+  });
+
+  it('approves and rejects tasks in REVIEW', async () => {
+    const approved = orc.addTask({ message: 'Approve me' });
+    approved.setStatus(TASK_STATUS.REVIEW, { force: true });
+    const approve = await server.inject({ method: 'POST', url: `/api/tasks/${approved.taskId}/approve` });
+    expect(approve.statusCode).toBe(200);
+    expect(approve.json().status).toBe(TASK_STATUS.COMPLETED);
+
+    const rejected = orc.addTask({ message: 'Reject me' });
+    rejected.setStatus(TASK_STATUS.REVIEW, { force: true });
+    const reject = await server.inject({
+      method: 'POST',
+      url: `/api/tasks/${rejected.taskId}/reject`,
+      payload: { message: 'corrigir escopo' },
+    });
+    expect(reject.statusCode).toBe(200);
+    expect([TASK_STATUS.PENDING, TASK_STATUS.QUEUED, TASK_STATUS.RUNNING]).toContain(reject.json().status);
+    expect(rejected.chat.some((message) => message.text === 'corrigir escopo')).toBe(true);
   });
 
   it('rejects malformed / oversized payloads at the boundary (fuzz)', async () => {
@@ -107,6 +154,39 @@ describe('API route integration (F8.T1/T2)', () => {
     expect(res.headers['content-type']).toContain('application/octet-stream');
     expect(res.headers['content-disposition']).toContain('attachment');
     expect(res.headers['x-content-type-options']).toBe('nosniff');
+  });
+
+  it('edits text-like artifacts and serves renderable image/pdf types inline', async () => {
+    const id = orc.createRootTask('art', 'agent-tester').taskId;
+    orc.createArtifact(orc.tasks.get(id)!, 'note.md', '# old', 'note', 'markdown');
+    orc.createArtifact(orc.tasks.get(id)!, 'report.pdf', '%PDF-1.4', 'report', 'pdf');
+
+    const update = await server.inject({
+      method: 'PUT',
+      url: `/api/tasks/${id}/artifacts/note.md`,
+      payload: { content: '# new' },
+    });
+    expect(update.statusCode).toBe(200);
+
+    const markdown = await server.inject({ method: 'GET', url: `/api/tasks/${id}/artifacts/note.md` });
+    expect(markdown.body).toBe('# new');
+
+    const pdf = await server.inject({ method: 'GET', url: `/api/tasks/${id}/artifacts/report.pdf` });
+    expect(pdf.headers['content-type']).toContain('application/pdf');
+    expect(pdf.headers['content-disposition']).toContain('inline');
+  });
+
+  it('rejects editing non-text artifacts', async () => {
+    const id = orc.createRootTask('art', 'agent-tester').taskId;
+    orc.createArtifact(orc.tasks.get(id)!, 'chart.png', 'png', 'chart', 'png');
+
+    const res = await server.inject({
+      method: 'PUT',
+      url: `/api/tasks/${id}/artifacts/chart.png`,
+      payload: { content: 'not text' },
+    });
+
+    expect(res.statusCode).toBe(415);
   });
 });
 
