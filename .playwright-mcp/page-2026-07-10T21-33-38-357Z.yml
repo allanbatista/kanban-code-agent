@@ -1,0 +1,49 @@
+- generic [ref=e3]:
+  - navigation [ref=e5]:
+    - generic [ref=e6]:
+      - link "Workflow" [ref=e7] [cursor=pointer]:
+        - /url: /
+      - generic [ref=e13]:
+        - link "Kanban" [ref=e14] [cursor=pointer]:
+          - /url: /
+        - link "Projects" [ref=e15] [cursor=pointer]:
+          - /url: /projects
+        - link "Settings" [active] [ref=e16] [cursor=pointer]:
+          - /url: /settings
+      - generic "Tempo real conectado (WebSocket)" [ref=e17]: Tempo real
+      - button "Cmd+K K" [ref=e20]:
+        - generic [ref=e21]: Cmd+K
+        - generic [ref=e22]: K
+      - generic [ref=e23]: U
+  - main [ref=e296]:
+    - generic [ref=e297]:
+      - complementary [ref=e298]:
+        - navigation [ref=e299]:
+          - button "Aparência" [ref=e300]
+          - button "Providers" [ref=e301]
+          - button "Advanced" [ref=e302]
+      - generic [ref=e304]:
+        - generic [ref=e305]:
+          - paragraph [ref=e306]: Visual
+          - heading "Aparência" [level=2] [ref=e307]
+          - paragraph [ref=e308]: Personalize a aparência da interface.
+        - generic [ref=e309]:
+          - generic [ref=e310]:
+            - generic [ref=e311]: Theme controls
+            - generic [ref=e312]: Ajustes de tipografia e densidade para melhorar leitura.
+          - generic [ref=e313]:
+            - generic [ref=e314]:
+              - generic [ref=e315]: Font Size (14px)
+              - slider [ref=e320]
+            - generic [ref=e321]:
+              - text: Font Family
+              - combobox [ref=e322]:
+                - generic: Inter
+            - generic [ref=e325]:
+              - text: Theme
+              - combobox [ref=e326]:
+                - generic: System
+            - generic [ref=e329]:
+              - text: Density
+              - combobox [ref=e330]:
+                - generic: Comfortable

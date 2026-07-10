@@ -1,0 +1,230 @@
+- generic:
+  - generic:
+    - generic:
+      - navigation:
+        - generic:
+          - link:
+            - /url: /
+            - generic: Workflow
+          - generic:
+            - link:
+              - /url: /
+              - text: Kanban
+            - link:
+              - /url: /projects
+              - text: Projects
+            - link:
+              - /url: /settings
+              - text: Settings
+          - generic: Tempo real
+          - button:
+            - generic: Cmd+K
+            - generic: K
+          - generic: U
+      - generic:
+        - generic:
+          - generic:
+            - generic:
+              - generic:
+                - generic:
+                  - generic: Inbox
+                  - button
+                - generic: 0/0
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - heading [level=3]: Sem tasks
+            - generic:
+              - generic:
+                - generic:
+                  - generic: Manager
+                  - button
+                - generic: 0/1
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - button:
+                          - generic:
+                            - generic:
+                              - generic:
+                                - generic: "#task_1"
+                                - generic: 06:38 PM
+                                - generic:
+                                  - generic: ·
+                                  - text: 12ms
+                              - button
+                            - paragraph: "F43 validation: run a trivial task with the codex agent to v"
+                            - generic: Falhou
+            - generic:
+              - generic:
+                - generic:
+                  - generic:
+                    - generic: Produto
+                    - button
+                  - generic: 0/0
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - heading [level=3]: Sem tasks
+              - generic:
+                - generic:
+                  - generic:
+                    - generic: Generic
+                    - button
+                  - generic: 0/0
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - heading [level=3]: Sem tasks
+            - generic:
+              - generic:
+                - generic:
+                  - generic:
+                    - generic: Architecture
+                    - button
+                  - generic: 0/0
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - heading [level=3]: Sem tasks
+              - generic:
+                - generic:
+                  - generic:
+                    - generic: Engineer
+                    - button
+                  - generic: 0/0
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - heading [level=3]: Sem tasks
+            - generic:
+              - generic:
+                - generic:
+                  - generic:
+                    - generic: Code Reviewer
+                    - button
+                  - generic: 0/0
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - heading [level=3]: Sem tasks
+              - generic:
+                - generic:
+                  - generic:
+                    - generic: QA
+                    - button
+                  - generic: 0/0
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - heading [level=3]: Sem tasks
+            - generic:
+              - generic:
+                - generic:
+                  - generic: Revisão
+                  - button
+                - generic: 0/0
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - heading [level=3]: Sem tasks
+            - generic:
+              - generic:
+                - generic:
+                  - generic: Done
+                  - button
+                  - button
+                - generic: 0/0
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - heading [level=3]: Sem tasks
+            - generic:
+              - generic:
+                - generic:
+                  - generic: Cancel
+                  - button
+                  - button
+                - generic: 0/0
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - heading [level=3]: Sem tasks
+      - status
+      - button
+  - dialog [ref=f1e603]:
+    - generic [ref=f1e604]:
+      - generic [ref=f1e605]:
+        - generic [ref=f1e607]:
+          - 'heading "F43 validation: run a trivial task with the codex agent to v" [level=2] [ref=f1e608]'
+          - button "Editar título" [ref=f1e609]
+          - button "Cor da família" [ref=f1e614] [cursor=pointer]
+        - tablist [ref=f1e615]:
+          - tab "Chat" [ref=f1e616]
+          - tab "Workflow" [active] [selected] [ref=f1e619]
+          - tab "History" [ref=f1e624]
+          - tab "Summary" [ref=f1e629]
+      - tabpanel "Workflow" [ref=f1e687]:
+        - application [ref=f1e689]:
+          - group [ref=f1e692]:
+            - generic [ref=f1e693] [cursor=pointer]:
+              - generic [ref=f1e695]:
+                - generic [ref=f1e696]: Falhou
+                - generic [ref=f1e701]: task_1
+              - paragraph [ref=f1e702]: "F43 validation: run a trivial task with the codex agent to v"
+              - generic [ref=f1e703]:
+                - generic [ref=f1e708]: manager
+                - generic [ref=f1e709]: ·
+                - generic [ref=f1e710]: 0 tok
+                - generic [ref=f1e711]: ·
+                - generic [ref=f1e712]: 12ms
+          - generic "Control Panel" [ref=f1e714]:
+            - button "Zoom In" [disabled]
+            - button "Zoom Out" [ref=f1e715] [cursor=pointer]
+            - button "Fit View" [ref=f1e718] [cursor=pointer]
+            - button "Toggle Interactivity" [ref=f1e721] [cursor=pointer]
+          - link "React Flow attribution" [ref=f1e725] [cursor=pointer]:
+            - /url: https://reactflow.dev
+            - text: React Flow
+    - generic [ref=f1e669]:
+      - generic [ref=f1e670]:
+        - generic [ref=f1e671]: manager
+        - generic [ref=f1e672]: Falhou
+      - generic [ref=f1e677]:
+        - generic [ref=f1e678]: 🤖 balanced · xhigh
+        - generic [ref=f1e679]: 📎 0
+        - generic [ref=f1e680]: 📦 0
+        - generic [ref=f1e681]: 0 tok · $0.0000 · 12ms
+    - button "Close" [ref=f1e682]

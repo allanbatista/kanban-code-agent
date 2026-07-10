@@ -1,0 +1,38 @@
+- generic [ref=f1e3]:
+  - navigation [ref=f1e5]:
+    - generic [ref=f1e6]:
+      - link "Workflow" [ref=f1e7] [cursor=pointer]:
+        - /url: /
+      - generic [ref=f1e13]:
+        - link "Kanban" [ref=f1e14] [cursor=pointer]:
+          - /url: /
+        - link "Projects" [ref=f1e15] [cursor=pointer]:
+          - /url: /projects
+        - link "Settings" [ref=f1e16] [cursor=pointer]:
+          - /url: /settings
+      - generic "Tempo real conectado (WebSocket)" [ref=f1e17]: Tempo real
+      - button "Cmd+K K" [ref=f1e20]:
+        - generic [ref=f1e21]: Cmd+K
+        - generic [ref=f1e22]: K
+      - generic [ref=f1e23]: U
+  - main [ref=f1e185]:
+    - generic [ref=f1e186]:
+      - generic [ref=f1e187]:
+        - button [ref=f1e188]
+        - generic [ref=f1e191]:
+          - heading "F43 Devcontainer Proj" [level=1] [ref=f1e192]
+          - paragraph [ref=f1e193]: f43-devcontainer-proj
+        - button "Abrir Kanban" [ref=f1e194]
+      - generic [ref=f1e195]:
+        - generic [ref=f1e196]:
+          - generic [ref=f1e197]: ID
+          - paragraph [ref=f1e200]: f43-devcontainer-proj
+        - generic [ref=f1e201]:
+          - generic [ref=f1e202]: Total de Tasks
+          - paragraph [ref=f1e205]: "0"
+        - generic [ref=f1e206]:
+          - generic [ref=f1e207]: Em Execução
+          - paragraph [ref=f1e210]: "0"
+      - generic [ref=f1e211]:
+        - heading "Tasks Recentes" [level=2] [ref=f1e212]
+        - paragraph [ref=f1e213]: Nenhuma task associada ainda.

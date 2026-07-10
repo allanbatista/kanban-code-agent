@@ -1,0 +1,9 @@
+[     629ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:8843/node_modules/.vite/deps/react-dom_client.js?v=0c0fa4ec:14336
+[    1062ms] [INFO] [ws] connecting to ws://127.0.0.1:35043/ws @ http://localhost:8843/src/api/ws-client.ts:29
+[    1064ms] [WARNING] WebSocket connection to 'ws://127.0.0.1:35043/ws' failed: WebSocket is closed before the connection is established. @ http://localhost:8843/src/api/ws-client.ts:101
+[    1068ms] [INFO] [ws] connecting to ws://127.0.0.1:35043/ws @ http://localhost:8843/src/api/ws-client.ts:29
+[    1150ms] [INFO] [ws] connected ws://127.0.0.1:35043/ws @ http://localhost:8843/src/api/ws-client.ts:33
+[    1227ms] [VERBOSE] [DOM] Password field is not contained in a form: (More info: https://goo.gl/9p2vKq) %o @ http://localhost:8843/settings?section=providers:0
+[    1227ms] [VERBOSE] [DOM] Password field is not contained in a form: (More info: https://goo.gl/9p2vKq) %o @ http://localhost:8843/settings?section=providers:0
+[    1227ms] [VERBOSE] [DOM] Password field is not contained in a form: (More info: https://goo.gl/9p2vKq) %o @ http://localhost:8843/settings?section=providers:0
+[    1227ms] [VERBOSE] [DOM] Password field is not contained in a form: (More info: https://goo.gl/9p2vKq) %o @ http://localhost:8843/settings?section=providers:0

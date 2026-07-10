@@ -238,7 +238,10 @@ class CodexSession {
       model: params.model,
       cwd: params.cwd,
       approvalPolicy: 'never',
-      sandbox: params.sandboxPolicy === 'externalSandbox' ? 'dangerFullAccess' : 'workspaceWrite',
+      // codex app-server (0.144.1) espera o enum kebab-case; camelCase e rejeitado
+      // ("unknown variant"). externalSandbox -> danger-full-access (o container e o
+      // sandbox); senao workspace-write (dev/inproc).
+      sandbox: params.sandboxPolicy === 'externalSandbox' ? 'danger-full-access' : 'workspace-write',
     })) as { thread?: { id?: string } };
     this.threadId = started.thread?.id;
 
