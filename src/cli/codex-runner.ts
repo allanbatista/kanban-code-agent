@@ -185,7 +185,11 @@ export class CodexRunner {
 }
 
 // ---------------------------------------------------------------------------
-// Sessao: um processo app-server + transporte JSON-RPC.
+// Transporte JSON-RPC 2.0 newline-delimited sobre o stdio de um ChildProcess:
+// correlaciona request/response por id, entrega notificacoes e requests
+// server->client via hooks sobrescreviveis, e rejeita os pendentes em erro/kill.
+// O ciclo de vida (spawn, error/exit, quando encerrar) fica nas subclasses:
+// CodexSession (turno, aqui) e DeviceSession (device-code login, em codex-auth.ts).
 // ---------------------------------------------------------------------------
 
 interface Pending {
@@ -193,11 +197,122 @@ interface Pending {
   reject: (reason: unknown) => void;
 }
 
-class CodexSession {
-  private readonly child: ChildProcess;
+export class JsonRpcStdioSession {
+  protected child?: ChildProcess;
   private nextId = 1;
-  private readonly pending = new Map<number, Pending>();
+  protected readonly pending = new Map<number, Pending>();
   private buffer = '';
+  // Enquanto true, send() vira no-op (processo descartado/encerrado).
+  protected closed = false;
+
+  // Liga o stdio do processo ao parser newline-delimited. Subclasses chamam
+  // quando ja tem o ChildProcess (spawn no construtor ou lazy no start()).
+  protected bindChild(child: ChildProcess): void {
+    this.child = child;
+    child.stdout?.setEncoding('utf-8');
+    child.stdout?.on('data', (chunk: string) => this.onData(chunk));
+  }
+
+  protected request(method: string, params: unknown): Promise<unknown> {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.send({ jsonrpc: '2.0', id, method, params });
+    });
+  }
+
+  protected notify(method: string, params: unknown): void {
+    this.send({ jsonrpc: '2.0', method, params });
+  }
+
+  /** id para requests fire-and-forget que nao registram pendente (ex.: turn/interrupt). */
+  protected nextRequestId(): number {
+    return this.nextId++;
+  }
+
+  protected send(message: Record<string, unknown>): void {
+    if (this.closed) return;
+    try {
+      this.child?.stdin?.write(JSON.stringify(message) + '\n');
+    } catch (error) {
+      this.onSendError(error);
+    }
+  }
+
+  /** SIGKILL se o processo ainda estiver vivo. */
+  protected kill(): void {
+    if (this.child && this.child.exitCode === null && this.child.signalCode === null) {
+      try {
+        this.child.kill('SIGKILL');
+      } catch {
+        // processo pode ja ter saido.
+      }
+    }
+  }
+
+  /** Rejeita todos os pendentes (erro de transporte / processo encerrado). */
+  protected failAll(error: unknown): void {
+    for (const pending of this.pending.values()) pending.reject(error);
+    this.pending.clear();
+  }
+
+  private onData(chunk: string): void {
+    this.buffer += chunk;
+    let index: number;
+    while ((index = this.buffer.indexOf('\n')) >= 0) {
+      const line = this.buffer.slice(0, index).trim();
+      this.buffer = this.buffer.slice(index + 1);
+      if (!line) continue;
+      let message: Record<string, unknown>;
+      try {
+        message = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      this.dispatch(message);
+    }
+  }
+
+  private dispatch(message: Record<string, unknown>): void {
+    const hasId = message.id !== undefined && message.id !== null;
+    const hasMethod = typeof message.method === 'string';
+
+    // Resposta a uma request nossa (id + result/error, sem method).
+    if (hasId && !hasMethod) {
+      const pending = this.pending.get(message.id as number);
+      if (!pending) return;
+      this.pending.delete(message.id as number);
+      if (message.error) {
+        const err = message.error as { message?: string };
+        pending.reject(new Error(err.message ?? JSON.stringify(message.error)));
+      } else {
+        pending.resolve(message.result);
+      }
+      return;
+    }
+
+    const params = (message.params ?? {}) as Record<string, unknown>;
+    // Request server->client (id + method): delega ao hook.
+    if (hasId && hasMethod) {
+      this.handleServerRequest(message.id as number, message.method as string, params);
+      return;
+    }
+    // Notificacao (method sem id): delega ao hook.
+    if (hasMethod) this.handleNotification(message.method as string, params);
+  }
+
+  // Hooks — no-op por default; subclasses sobrescrevem conforme o protocolo delas.
+  protected handleServerRequest(_id: number, _method: string, _params: Record<string, unknown>): void {}
+  protected handleNotification(_method: string, _params: Record<string, unknown>): void {}
+  protected onSendError(_error: unknown): void {}
+}
+
+// ---------------------------------------------------------------------------
+// Sessao de turno: um processo app-server sobre o transporte acima. Lifecycle
+// proprio: notificacoes de turno, decline defensivo de approvals, abort->kill.
+// ---------------------------------------------------------------------------
+
+class CodexSession extends JsonRpcStdioSession {
   private deltas = '';
   private lastAgentMessage?: string;
   private readonly usage: CodexUsage = {};
@@ -206,7 +321,6 @@ class CodexSession {
   private threadId?: string;
   private turnId?: string;
   private aborted = false;
-  private disposed = false;
   private abortKillTimer?: ReturnType<typeof setTimeout>;
 
   constructor(
@@ -215,14 +329,14 @@ class CodexSession {
     codexHome: string,
     toolsSocket?: string,
   ) {
+    super();
     const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome };
     if (toolsSocket) env.KCA_TOOLS_SOCKET = toolsSocket;
-    this.child = spawnImpl(bin, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'], env });
-    this.child.stdout?.setEncoding('utf-8');
-    this.child.stdout?.on('data', (chunk: string) => this.onData(chunk));
-    this.child.on('error', (error) => this.failAll(error));
-    this.child.on('exit', (code, signal) => {
-      if (this.disposed) return;
+    const child = spawnImpl(bin, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'], env });
+    this.bindChild(child);
+    child.on('error', (error) => this.failAll(error));
+    child.on('exit', (code, signal) => {
+      if (this.closed) return;
       this.failAll(new Error(`codex app-server encerrou (code=${code} signal=${signal})`));
     });
   }
@@ -289,81 +403,26 @@ class CodexSession {
   }
 
   dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
+    if (this.closed) return;
+    this.closed = true;
     if (this.abortKillTimer) clearTimeout(this.abortKillTimer);
-    this.child.stdout?.removeAllListeners();
+    this.child?.stdout?.removeAllListeners();
     try {
-      this.child.stdin?.end();
+      this.child?.stdin?.end();
     } catch {
       // stdin pode ja estar fechado.
     }
     this.kill();
   }
 
-  private kill(): void {
-    if (this.child.exitCode === null && this.child.signalCode === null) {
-      try {
-        this.child.kill('SIGKILL');
-      } catch {
-        // processo pode ja ter saido.
-      }
-    }
-  }
-
   private interrupt(): void {
     if (!this.threadId) return;
     // turn/interrupt e uma request; fire-and-forget (o interessa e a notificacao
     // turn/completed status interrupted que segue).
-    this.send({ jsonrpc: '2.0', id: this.nextId++, method: 'turn/interrupt', params: { threadId: this.threadId, turnId: this.turnId } });
+    this.send({ jsonrpc: '2.0', id: this.nextRequestId(), method: 'turn/interrupt', params: { threadId: this.threadId, turnId: this.turnId } });
   }
 
-  private onData(chunk: string): void {
-    this.buffer += chunk;
-    let index: number;
-    while ((index = this.buffer.indexOf('\n')) >= 0) {
-      const line = this.buffer.slice(0, index).trim();
-      this.buffer = this.buffer.slice(index + 1);
-      if (!line) continue;
-      let message: Record<string, unknown>;
-      try {
-        message = JSON.parse(line) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      this.dispatch(message);
-    }
-  }
-
-  private dispatch(message: Record<string, unknown>): void {
-    const hasId = message.id !== undefined && message.id !== null;
-    const hasMethod = typeof message.method === 'string';
-
-    // Resposta a uma request nossa (id + result/error, sem method).
-    if (hasId && !hasMethod) {
-      const pending = this.pending.get(message.id as number);
-      if (!pending) return;
-      this.pending.delete(message.id as number);
-      if (message.error) {
-        const err = message.error as { message?: string };
-        pending.reject(new Error(err.message ?? JSON.stringify(message.error)));
-      } else {
-        pending.resolve(message.result);
-      }
-      return;
-    }
-
-    // Request server->client (id + method): responde.
-    if (hasId && hasMethod) {
-      this.handleServerRequest(message.id as number, message.method as string);
-      return;
-    }
-
-    // Notificacao (method sem id).
-    if (hasMethod) this.handleNotification(message.method as string, (message.params ?? {}) as Record<string, unknown>);
-  }
-
-  private handleServerRequest(id: number, method: string): void {
+  protected override handleServerRequest(id: number, method: string): void {
     // approvalPolicy 'never' nao deveria disparar approvals; declina defensivamente.
     if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
       this.send({ jsonrpc: '2.0', id, result: 'decline' });
@@ -372,7 +431,7 @@ class CodexSession {
     this.send({ jsonrpc: '2.0', id, error: { code: -32601, message: `metodo nao suportado: ${method}` } });
   }
 
-  private handleNotification(method: string, params: Record<string, unknown>): void {
+  protected override handleNotification(method: string, params: Record<string, unknown>): void {
     switch (method) {
       case 'item/agentMessage/delta': {
         const delta = params.textDelta;
@@ -384,9 +443,12 @@ class CodexSession {
         if (item?.type === 'agentMessage' && typeof item.text === 'string') this.lastAgentMessage = item.text;
         break;
       }
-      case 'thread/tokenUsage/updated':
-        this.mergeUsage((params.usage ?? params) as Record<string, unknown>);
+      case 'thread/tokenUsage/updated': {
+        // Shape real (schema v2): params.tokenUsage.total e um TokenUsageBreakdown cumulativo.
+        const tokenUsage = params.tokenUsage as { total?: Record<string, unknown> } | undefined;
+        this.mergeUsage(tokenUsage?.total);
         break;
+      }
       case 'turn/completed':
         this.completeTurn((params.turn ?? {}) as Record<string, unknown>);
         break;
@@ -413,46 +475,30 @@ class CodexSession {
 
   private mergeUsage(usage: Record<string, unknown> | undefined): void {
     if (!usage || typeof usage !== 'object') return;
-    // ponytail: shape de tokens do app-server e experimental; mapeamos os campos
-    // conhecidos, senao ficam zerados (sem cost — nao ha preco por token aqui).
-    const input = num(usage.inputTokens ?? usage.input ?? usage.promptTokens);
-    const output = num(usage.outputTokens ?? usage.output ?? usage.completionTokens);
-    const total = num(usage.totalTokens ?? usage.total);
-    const cache = num(usage.cachedTokens ?? usage.cache);
+    // Campos reais do TokenUsageBreakdown (codex app-server 0.144.1, schema v2:
+    // ThreadTokenUsageUpdatedNotification -> ThreadTokenUsage -> TokenUsageBreakdown).
+    const input = num(usage.inputTokens);
+    const output = num(usage.outputTokens);
+    const total = num(usage.totalTokens);
+    const cache = num(usage.cachedInputTokens);
     if (input !== undefined) this.usage.input = input;
     if (output !== undefined) this.usage.output = output;
     if (total !== undefined) this.usage.total = total;
     if (cache !== undefined) this.usage.cache = cache;
   }
 
-  private request(method: string, params: unknown): Promise<unknown> {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.send({ jsonrpc: '2.0', id, method, params });
-    });
-  }
-
-  private notify(method: string, params: unknown): void {
-    this.send({ jsonrpc: '2.0', method, params });
-  }
-
-  private send(message: Record<string, unknown>): void {
-    if (this.disposed) return;
-    try {
-      this.child.stdin?.write(JSON.stringify(message) + '\n');
-    } catch (error) {
-      this.failAll(error);
-    }
-  }
-
-  private failAll(error: unknown): void {
+  // Aborto do turno vira RunCancelledError (espelha o PiAgentClient) tanto nos
+  // pendentes quanto na promise do turno; erro de write tambem cai aqui.
+  protected override failAll(error: unknown): void {
     const finalError = this.aborted ? new RunCancelledError() : error;
-    for (const pending of this.pending.values()) pending.reject(finalError);
-    this.pending.clear();
+    super.failAll(finalError);
     this.turnReject?.(finalError);
     this.turnResolve = undefined;
     this.turnReject = undefined;
+  }
+
+  protected override onSendError(error: unknown): void {
+    this.failAll(error);
   }
 }
 

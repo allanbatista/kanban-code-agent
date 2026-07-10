@@ -87,6 +87,24 @@ describe('resolveDevcontainerImage', () => {
     });
   });
 
+  it('não corrompe strings que contêm ",]" ao remover vírgulas finais (JSONC)', () => {
+    withProject((dir) => {
+      const configPath = join(dir, 'devcontainer.json');
+      // Dockerfile cujo NOME contém ",]" literal. O parser tem de preservar a
+      // string intacta (a regex antiga removeria o ",]" e apontaria para outro
+      // arquivo inexistente). Se o path é preservado, o conteúdo do Dockerfile
+      // entra no hash — então mudar o conteúdo muda a tag; se fosse corrompido,
+      // o arquivo não seria encontrado e a tag ficaria idêntica.
+      writeFileSync(configPath, '{\n  "build": { "dockerfile": "Df,]x" },\n}');
+      const dockerfilePath = join(dir, 'Df,]x');
+      writeFileSync(dockerfilePath, 'FROM debian:bookworm-slim\n');
+      const first = resolveDevcontainerImage({ workspaceFolder: dir, configPath, slug: 'proj', execFile: fakeExecFile([], true) });
+      writeFileSync(dockerfilePath, 'FROM debian:bookworm-slim\nRUN apt-get update\n');
+      const second = resolveDevcontainerImage({ workspaceFolder: dir, configPath, slug: 'proj', execFile: fakeExecFile([], true) });
+      expect(first).not.toBe(second);
+    });
+  });
+
   it('mudança no Dockerfile referenciado muda o hash da tag', () => {
     withProject((dir) => {
       const configPath = join(dir, 'devcontainer.json');

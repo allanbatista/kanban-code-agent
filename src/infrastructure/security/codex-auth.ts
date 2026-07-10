@@ -1,7 +1,8 @@
-import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
+import { spawn as nodeSpawn } from 'node:child_process';
 import { chmodSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { codexHomePath, ensureCodexHome } from './codex-home.js';
+import { JsonRpcStdioSession } from '../../cli/codex-runner.js';
 
 // ---------------------------------------------------------------------------
 // Auth compartilhada do Codex (plan-agents-and-container-isolation.md §8). Vive
@@ -178,23 +179,14 @@ export class CodexAuthManager {
 }
 
 // ---------------------------------------------------------------------------
-// DeviceSession: cliente JSON-RPC minimo para o fluxo device-code. Lifecycle
-// distinto do CodexRunner (o processo fica vivo aguardando a notificacao
-// account/login/completed), por isso nao reusa a CodexSession de codex-runner.
+// DeviceSession: fluxo device-code sobre o transporte JSON-RPC compartilhado
+// (JsonRpcStdioSession, em codex-runner). Lifecycle distinto do CodexSession: o
+// processo fica vivo aguardando a notificacao account/login/completed.
 // ponytail: partes account/* do app-server sao experimentais; fixamos o binario
 // no bundle (F2) e cobrimos o handshake por teste de contrato.
 // ---------------------------------------------------------------------------
 
-interface Pending {
-  resolve: (value: unknown) => void;
-  reject: (reason: unknown) => void;
-}
-
-class DeviceSession {
-  private child?: ChildProcess;
-  private nextId = 1;
-  private readonly pending = new Map<number, Pending>();
-  private buffer = '';
+class DeviceSession extends JsonRpcStdioSession {
   private doneCb?: (success: boolean) => void;
   private settled = false;
   private timer?: ReturnType<typeof setTimeout>;
@@ -203,16 +195,16 @@ class DeviceSession {
     private readonly spawnImpl: typeof nodeSpawn,
     private readonly bin: string,
     private readonly home: string,
-  ) {}
+  ) {
+    super();
+  }
 
   async start(): Promise<DeviceCodeLogin> {
     const child = this.spawnImpl(this.bin, ['app-server'], {
       stdio: ['pipe', 'pipe', 'ignore'],
       env: { ...process.env, CODEX_HOME: this.home },
     });
-    this.child = child;
-    child.stdout?.setEncoding('utf-8');
-    child.stdout?.on('data', (chunk: string) => this.onData(chunk));
+    this.bindChild(child);
     child.stdin?.on('error', () => undefined);
 
     const failed = new Promise<never>((_, reject) => {
@@ -248,86 +240,25 @@ class DeviceSession {
     this.finish(false);
   }
 
+  // Unica notificacao de interesse do device-code; as demais sao ignoradas.
+  protected override handleNotification(method: string, params: Record<string, unknown>): void {
+    if (method === 'account/login/completed') {
+      this.finish(Boolean((params as { success?: boolean }).success));
+    }
+  }
+
   private finish(success: boolean): void {
     if (this.settled) return;
     this.settled = true;
     if (this.timer) clearTimeout(this.timer);
     const cb = this.doneCb;
-    this.kill();
-    cb?.(success);
-  }
-
-  private kill(): void {
     try {
       this.child?.stdin?.end();
     } catch {
       // stdin pode ja estar fechado.
     }
-    try {
-      if (this.child && this.child.exitCode === null && this.child.signalCode === null) {
-        this.child.kill('SIGKILL');
-      }
-    } catch {
-      // processo pode ja ter saido.
-    }
-  }
-
-  private onData(chunk: string): void {
-    this.buffer += chunk;
-    let index: number;
-    while ((index = this.buffer.indexOf('\n')) >= 0) {
-      const line = this.buffer.slice(0, index).trim();
-      this.buffer = this.buffer.slice(index + 1);
-      if (!line) continue;
-      let message: Record<string, unknown>;
-      try {
-        message = JSON.parse(line) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      this.dispatch(message);
-    }
-  }
-
-  private dispatch(message: Record<string, unknown>): void {
-    const hasId = message.id !== undefined && message.id !== null;
-    const hasMethod = typeof message.method === 'string';
-    if (hasId && !hasMethod) {
-      const pending = this.pending.get(message.id as number);
-      if (!pending) return;
-      this.pending.delete(message.id as number);
-      if (message.error) {
-        const err = message.error as { message?: string };
-        pending.reject(new Error(err.message ?? JSON.stringify(message.error)));
-      } else {
-        pending.resolve(message.result);
-      }
-      return;
-    }
-    if (hasMethod && !hasId && message.method === 'account/login/completed') {
-      const params = (message.params ?? {}) as { success?: boolean };
-      this.finish(Boolean(params.success));
-    }
-  }
-
-  private request(method: string, params: unknown): Promise<unknown> {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.send({ jsonrpc: '2.0', id, method, params });
-    });
-  }
-
-  private notify(method: string, params: unknown): void {
-    this.send({ jsonrpc: '2.0', method, params });
-  }
-
-  private send(message: Record<string, unknown>): void {
-    try {
-      this.child?.stdin?.write(JSON.stringify(message) + '\n');
-    } catch {
-      // se o processo morreu, o handler de exit ja resolve o lifecycle.
-    }
+    this.kill();
+    cb?.(success);
   }
 }
 

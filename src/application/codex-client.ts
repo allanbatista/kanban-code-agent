@@ -47,8 +47,8 @@ export interface CodexClientOptions {
   sandboxPolicy?: CodexSandboxPolicy;
   bin?: string;
   spawn?: typeof spawn;
-  /** Injecao de runner para testes. */
-  runnerFactory?: (runner: CodexRunner) => CodexRunner;
+  /** Injecao de runner para testes (sobrescreve o CodexRunner interno). */
+  runner?: CodexRunner;
 }
 
 export class CodexAgentClient implements AgentClient {
@@ -67,8 +67,7 @@ export class CodexAgentClient implements AgentClient {
   ) {
     // ponytail: reusa o PiAgentClient so para montar prompts identicos ao Pi.
     this.prompts = new PiAgentClient(NEVER_RUNNER, systemPromptBase, tools, allowedModels, maxPromptChatMessages);
-    const runner = new CodexRunner({ codexHome: options.codexHome, bin: options.bin, spawn: options.spawn });
-    this.runner = options.runnerFactory ? options.runnerFactory(runner) : runner;
+    this.runner = options.runner ?? new CodexRunner({ codexHome: options.codexHome, bin: options.bin, spawn: options.spawn });
     this.model = options.model ?? process.env.SWARM_CODEX_MODEL ?? DEFAULT_CODEX_MODEL;
     this.sandboxPolicy = options.sandboxPolicy ?? 'workspaceWrite';
   }

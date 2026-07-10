@@ -141,8 +141,12 @@ function parseJsonc(text: string): unknown {
       inBlock = true;
       i++;
     } else {
+      // Vírgula final (fora de string): antes de um `}`/`]` estrutural, remove a
+      // vírgula já emitida. Feito no walk para nunca tocar conteúdo de strings
+      // (ex.: um valor contendo ",]" ou ",}").
+      if (c === '}' || c === ']') out = out.replace(/,\s*$/, '');
       out += c;
     }
   }
-  return JSON.parse(out.replace(/,(\s*[}\]])/g, '$1'));
+  return JSON.parse(out);
 }
