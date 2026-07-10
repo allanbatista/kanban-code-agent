@@ -58,4 +58,72 @@ describe('ensureCodexHome', () => {
     expect(toml).toContain('command = "C:\\\\node.exe"');
     expect(toml).toContain('"/a\\"b/bridge.ts"');
   });
+
+  // (a) Sem bridgeEntry/useTsx explicitos, o default vem de import.meta.url. Sob
+  // vitest (roda via tsx) o modulo e .ts, entao resolve p/ src/worker/mcp-bridge.ts
+  // + tsx — espelhando o comportamento dev/inproc.
+  it('defaults derivam src/worker/mcp-bridge.ts + tsx sob tsx (import.meta.url .ts)', () => {
+    const dataDir = tempDir();
+    const home = ensureCodexHome(dataDir);
+    const toml = readFileSync(join(home, 'config.toml'), 'utf-8');
+    expect(toml).toContain('src/worker/mcp-bridge.ts');
+    expect(toml).toContain('args = ["--import", "tsx", ');
+  });
+
+  // (b) O modo compilado (deploy dist) e simulado passando o entry .js + useTsx=false
+  // explicito (o mesmo caminho que executor.ts usa p/ o bundle): node puro roda o
+  // dist direto, sem --import tsx.
+  it('modo compilado (entry explicito + useTsx=false) roda o entry direto, sem tsx', () => {
+    const dataDir = tempDir();
+    const home = ensureCodexHome(dataDir, {
+      nodeBin: '/usr/bin/node',
+      bridgeEntry: '/app/dist/worker/mcp-bridge.js',
+      useTsx: false,
+    });
+    const toml = readFileSync(join(home, 'config.toml'), 'utf-8');
+    expect(toml).toContain('args = ["/app/dist/worker/mcp-bridge.js"]');
+    expect(toml).not.toContain('tsx');
+  });
+
+  // (c) Regerar preserva secoes estranhas (ex. [projects] que o codex CLI append em
+  // runtime) e substitui um bloco kca_tools estale.
+  it('preserva secao estrangeira e substitui bloco kca_tools estale ao regerar', () => {
+    const dataDir = tempDir();
+    // Cria o dir 0700 antes de escrever o config falso (regravar exige o home).
+    const home = ensureCodexHome(dataDir, { nodeBin: '/old/node', bridgeEntry: '/old/bridge.ts' });
+    const configPath = join(home, 'config.toml');
+    // Simula o estado no servidor: bloco kca antigo + secao [projects] do codex.
+    writeFileSync(
+      configPath,
+      [
+        '[mcp_servers.kca_tools]',
+        'command = "/old/node"',
+        'args = ["--import", "tsx", "/old/bridge.ts"]',
+        'env_vars = ["KCA_TOOLS_SOCKET"]',
+        '',
+        '[projects."/srv/repo"]',
+        'trust_level = "trusted"',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    ensureCodexHome(dataDir, { nodeBin: '/new/node', bridgeEntry: '/new/bridge.ts' });
+    const toml = readFileSync(configPath, 'utf-8');
+
+    // Secao estrangeira sobrevive.
+    expect(toml).toContain('[projects."/srv/repo"]');
+    expect(toml).toContain('trust_level = "trusted"');
+    // Bloco kca estale foi substituido pelo fresco (novos paths, um so bloco).
+    expect(toml).toContain('command = "/new/node"');
+    expect(toml).toContain('/new/bridge.ts');
+    expect(toml).not.toContain('/old/node');
+    expect(toml).not.toContain('/old/bridge.ts');
+    expect(toml.match(/\[mcp_servers\.kca_tools\]/g)).toHaveLength(1);
+
+    // Idempotente mesmo com secao estrangeira: re-rodar nao altera os bytes.
+    const before = readFileSync(configPath, 'utf-8');
+    ensureCodexHome(dataDir, { nodeBin: '/new/node', bridgeEntry: '/new/bridge.ts' });
+    expect(readFileSync(configPath, 'utf-8')).toBe(before);
+  });
 });
