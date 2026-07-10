@@ -114,7 +114,7 @@ agents operacionais** (Pi e Codex), **isolamento completo via Docker**
 | 4 | E2E mock: fluxo completo (projeto → task por agent → container fake → decisão → merge → REVIEW) com runner/docker fakes determinísticos | `src/__tests__/e2e/*` | Suíte cobre os dois agents e os três isolation modes restantes (`inproc`, `docker`) | done — 9 testes de composição na matriz agent×isolamento; zero bugs de produção |
 | 4 | Smoke live guardado por `SWARM_VALIDATION=1`: Pi (deepseek) e Codex (auth real) em Docker real | `src/__tests__/validation/` | Task real completa com cada agent; evidência registrada aqui | done — pi×deepseek×docker PASS 5× (~5s, ~4.4k tokens); achou e corrigiu bug real (sandboxPolicy kebab-case no app-server 0.144.1); codex live skipa neste host (proxy Headroom local — gap deferido de carry do config.toml), com prova manual da cadeia docker+codex real (turn OK, 1553 tokens) |
 | 4 | Validação front↔back no browser: configurar projeto (devcontainer), logar Codex, selecionar agent, aprovar merge | roteiro + screenshots | Fluxo manual/Playwright documentado com evidência | done — validation-agents-containers-report.md + 11 screenshots; 4 issues achados (corrigidos na F5) |
-| 5 | Docs + Graphify | `docs/usage/README.md`, `docs/software/README.md`, `graphify-out/` | Docs cobrem agents/docker/devcontainer/auth; graphify sync verde | pending |
+| 5 | Docs + Graphify | `docs/usage/README.md`, `docs/software/README.md`, `graphify-out/` | Docs cobrem agents/docker/devcontainer/auth; graphify sync verde | done — inclui fixes da validação: sockets UDS curtos em /tmp/kca-<hash> (limite sun_path), drawer exibe agent, dialog herda default dos settings, escalação de effort documentada como intencional |
 
 ## Definition of Done
 

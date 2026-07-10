@@ -60,30 +60,16 @@ evidência ficam em `plan-projects-and-isolation.md`.
     Master mergeia direto no branch padrão; caso contrário, o usuário aprova ou
     rejeita pelo gate.
 
-## Isolamento systemd
+## Isolamento systemd (histórico)
 
-O comando é montado por `WorkerSupervisor.buildSystemdRunArgs()` com:
-
-- `RuntimeMaxSec`
-- `WorkingDirectory=<repo atual>`
-- `MemoryMax=<SWARM_WORKER_MEMORY_MAX>` quando configurado
-- `CPUQuota=<SWARM_WORKER_CPU_QUOTA>` quando configurado
-- `NoNewPrivileges=yes`
-- `PrivateTmp=yes`
-- `ProtectSystem=strict`
-- `ReadWritePaths=<dataDir>`
-- `LoadCredentialEncrypted=git-token:<arquivo>` quando configurado
-
-O worker externo usa socket Unix para controle. O Master mantém o estado e as
-tools; o Worker só executa o Pi SDK e devolve o resultado final.
-
-As units `kca-*.service` são transitórias: o Master para a unit no fim do run e
-`--collect` remove a unit concluída. Para inspecionar manualmente, rode com
-`SWARM_WORKER_HOLD_MS=10000` e consulte `systemctl --user list-units
-'kca-*.service'` enquanto a task ainda está executando ou dentro desse hold.
-
-`ponytail:` o RPC é mínimo e task-local. Teto: um Master local. Upgrade: protocolo
-versionado apenas se houver multi-host ou workers long-lived.
+> **Substituído por Docker.** Nesta iteração o modo systemd foi **removido** do
+> código; `SWARM_ISOLATION` aceita apenas `inproc` (default) e `docker`. O
+> worker externo passou a rodar em container efêmero (`docker run --rm --init`),
+> com mounts, limites de mem/CPU e segredos via `--env-file`. Ver o plano
+> executável em `plan-agents-and-container-isolation.md` e a documentação de uso
+> em `docs/usage/README.md` (seção "Isolamento Docker"). O restante deste
+> documento descreve o corte anterior (projetos + isolamento, jun/2026) e é
+> mantido como referência histórica.
 
 ## Credenciais Git
 

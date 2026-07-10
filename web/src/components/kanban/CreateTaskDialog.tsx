@@ -5,6 +5,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useKanbanStore } from '@/stores/kanbanStore';
 import { useProjectsStore } from '@/stores/projectsStore';
+import { useSettingsStore } from '@/stores/settingsStore';
 
 interface CreateTaskDialogProps {
   open: boolean;
@@ -15,14 +16,19 @@ export function CreateTaskDialog({ open, onOpenChange }: CreateTaskDialogProps) 
   const [message, setMessage] = useState('');
   const [model, setModel] = useState('balanced');
   const [effort, setEffort] = useState('medium');
-  const [agent, setAgent] = useState('pi');
+  // Seed do agent = default global dos Settings; fallback 'pi' quando não carregado.
+  const [agent, setAgent] = useState(() => useSettingsStore.getState().agentDefault);
   const [projectIds, setProjectIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const { createTask } = useKanbanStore();
   const { projects, fetchProjects } = useProjectsStore();
 
   useEffect(() => {
-    if (open) void fetchProjects();
+    if (open) {
+      void fetchProjects();
+      // Re-seed no agent default a cada abertura (o usuário ainda pode trocar).
+      setAgent(useSettingsStore.getState().agentDefault);
+    }
   }, [open, fetchProjects]);
 
   const handleCreate = async (execute: boolean) => {

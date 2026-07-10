@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import type { Agent } from '../../domain/agent.js';
 import type { Task } from '../../domain/task.js';
 import type { AgentName } from '../../domain/types.js';
@@ -22,6 +24,9 @@ export type IsolationMode = 'inproc' | 'docker';
 // (ro — de onde o worker é executado). Só esses dois prefixos existem no payload.
 export const CONTAINER_DATA_DIR = '/kca/data';
 export const CONTAINER_APP_DIR = '/kca/app';
+// Dir dos sockets UDS do run (host /tmp/kca-<hash>) montado aqui. Separado do
+// dataDir para o path do socket caber no limite sun_path (~108 chars no Linux).
+export const CONTAINER_SOCK_DIR = '/kca/sock';
 const CONTAINER_WORKER_ENTRY = `${CONTAINER_APP_DIR}/src/worker/main.ts`;
 // Bundle F2.2 montado ro em /kca/bin: node + codex + worker.mjs single-file.
 export const CONTAINER_BUNDLE_DIR = '/kca/bin';
@@ -161,7 +166,10 @@ export class WorkerSupervisor {
    * chegam pelos mounts. Segredos NUNCA entram no argv — vão no --env-file 0600.
    */
   buildDockerRunArgs(socketPath: string, containerName = 'kca-worker', envFilePath?: string, imageOverride?: string): string[] {
-    const containerSocketPath = this.toContainer(socketPath);
+    // O socket vive num dir curto sob /tmp (fora do dataDir); monta esse dir em
+    // /kca/sock e traduz o path do socket por ele.
+    const socketDir = dirname(socketPath);
+    const containerSocketPath = this.toContainer(socketPath, socketDir);
     const args = [
       'run',
       '-d',
@@ -180,6 +188,8 @@ export class WorkerSupervisor {
 
     args.push('-v', `${this.dataDir}:${CONTAINER_DATA_DIR}`);
     args.push('-v', `${this.workingDirectory}:${CONTAINER_APP_DIR}:ro`);
+    // Dir dos sockets UDS (worker + tool-callback) montado rw em /kca/sock.
+    args.push('-v', `${socketDir}:${CONTAINER_SOCK_DIR}`);
     // Bundle F2.2 (node+codex+worker.mjs) montado ro em /kca/bin quando configurado.
     if (this.workerBundleDir) args.push('-v', `${this.workerBundleDir}:${CONTAINER_BUNDLE_DIR}:ro`);
     args.push('-w', CONTAINER_APP_DIR);
@@ -231,9 +241,9 @@ export class WorkerSupervisor {
     }
   }
 
-  /** Traduz um path do host para a visão do container (/kca/data ou /kca/app). */
-  private toContainer(hostPath: string): string {
-    return translateToContainer(hostPath, this.dataDir, this.workingDirectory);
+  /** Traduz um path do host para a visão do container (/kca/data, /kca/app ou /kca/sock). */
+  private toContainer(hostPath: string, socketDir?: string): string {
+    return translateToContainer(hostPath, this.dataDir, this.workingDirectory, socketDir);
   }
 
   private get dataDir(): string {
@@ -260,18 +270,20 @@ export class WorkerSupervisor {
     imageOverride?: string,
   ): Promise<AgentRunResult> {
     if (signal?.aborted) throw new RunCancelledError();
-    const dataDir = this.dataDir;
     const containerName = dockerContainerName(taskId, runId);
-    const socketPath = workerSocketPath(dataDir, taskId, runId);
-    const callbackSocketPath = workerSocketPath(dataDir, taskId, `${runId}-tools`);
+    // Sockets num dir curto sob /tmp (0700), fora do dataDir, p/ caber no limite
+    // sun_path (~108 chars). Worker=w.sock, tool-callback=t.sock no mesmo dir.
+    const socketDir = runSocketDir(taskId, runId);
+    const socketPath = workerSocketPath(taskId, runId);
+    const callbackSocketPath = toolsSocketPath(taskId, runId);
     const envFilePath = envFileFor(socketPath);
-    mkdirSync(dirname(socketPath), { recursive: true });
+    mkdirSync(socketDir, { recursive: true, mode: 0o700 });
     writeEnvFile(envFilePath, this.workerEnv);
 
     const toolServer = await listenToolServer(callbackSocketPath, config.customTools ?? []);
     // Só os paths DENTRO do payload precisam da visão do container: cwd (workspace
     // da task) e o callback socket, que a UDS do supervisor expõe no host.
-    const toContainer = this.ownsLaunch ? (p: string) => this.toContainer(p) : (p: string) => p;
+    const toContainer = this.ownsLaunch ? (p: string) => this.toContainer(p, socketDir) : (p: string) => p;
     const serializableConfig = translateConfigPaths(serializeRunConfig(config), toContainer);
     const containerCallbackPath = toContainer(callbackSocketPath);
     const cancel = () => {
@@ -296,9 +308,8 @@ export class WorkerSupervisor {
       if (this.workerHoldMs > 0) await delay(this.workerHoldMs);
       await Promise.resolve(this.stopWorkerImpl?.(containerName)).catch(() => undefined);
       await closeServer(toolServer).catch(() => undefined);
-      rmSync(socketPath, { force: true });
-      rmSync(callbackSocketPath, { force: true });
-      rmSync(envFilePath, { force: true });
+      // Remove o dir do run inteiro (w.sock + t.sock + w.env).
+      rmSync(socketDir, { recursive: true, force: true });
     }
   }
 }
@@ -340,11 +351,14 @@ function envFileFor(socketPath: string): string {
  * dataDir -> /kca/data e o repo -> /kca/app. Prefixo mais específico primeiro
  * (caso um esteja aninhado no outro). Fora deles, devolve o path inalterado.
  */
-export function translateToContainer(hostPath: string, dataDir: string, repoDir: string): string {
+export function translateToContainer(hostPath: string, dataDir: string, repoDir: string, socketDir?: string): string {
   const mappings: Array<[string, string]> = [
     [dataDir, CONTAINER_DATA_DIR],
     [repoDir, CONTAINER_APP_DIR],
-  ].sort((a, b) => b[0].length - a[0].length) as Array<[string, string]>;
+  ];
+  // Dir dos sockets UDS (fora do dataDir, sob /tmp) -> /kca/sock.
+  if (socketDir) mappings.push([socketDir, CONTAINER_SOCK_DIR]);
+  mappings.sort((a, b) => b[0].length - a[0].length);
   for (const [host, container] of mappings) {
     if (hostPath === host) return container;
     if (hostPath.startsWith(`${host}/`)) return container + hostPath.slice(host.length);
@@ -359,8 +373,24 @@ function translateConfigPaths(
   return { ...config, cwd: toContainer(config.cwd) };
 }
 
-export function workerSocketPath(dataDir: string, taskId: string, runId: string): string {
-  return join(dataDir, '.swarm', 'workers', `${taskId}-${runId}.sock`);
+// Dir curto por run sob os.tmpdir() para os sockets UDS. O path do socket UDS
+// precisa caber no limite sun_path (~108 chars no Linux) no bind(2); um dataDir
+// longo estourava esse limite (EINVAL). O nome deriva de um hash de taskId+runId
+// (curto e estavel dentro do run), fora do dataDir. Criado 0700 pelo caller,
+// removido no finally do run.
+export function runSocketDir(taskId: string, runId: string): string {
+  const hash = createHash('sha1').update(`${taskId} ${runId}`).digest('hex').slice(0, 12);
+  return join(tmpdir(), `kca-${hash}`);
+}
+
+// Socket do worker (POST /run, /health) dentro do dir do run.
+export function workerSocketPath(taskId: string, runId: string): string {
+  return join(runSocketDir(taskId, runId), 'w.sock');
+}
+
+// Socket do tool-callback (POST /tool, GET /tools) dentro do dir do run.
+export function toolsSocketPath(taskId: string, runId: string): string {
+  return join(runSocketDir(taskId, runId), 't.sock');
 }
 
 function readPositiveInt(value: string | undefined): number {

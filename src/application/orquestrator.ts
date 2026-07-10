@@ -2516,6 +2516,10 @@ export class Orquestrator extends EventEmitter {
     if (!isBudget && !isTimeout && task.technicalRetryCount < MAX_TECHNICAL_RETRIES) {
       task.technicalRetryCount += 1;
       // Auto-escalate model/effort on repeated technical failures (§3.2).
+      // Efeito observável esperado (não é bug): isto MUTA e persiste o
+      // runtimeConfig da task, então GET /api/tasks/snapshot pode mostrar um
+      // effort mais alto que o do TASK_CREATED original. Ex.: 2 retries técnicos
+      // sobem o effort pela EFFORT_LADDER: medium -> high -> xhigh.
       if (task.technicalRetryCount >= 1) {
         const escalated = escalateConfig(this.resolveRuntimeConfig(task, this.agents.get(task.options.assignedTo)));
         task.options.runtimeConfig = { ...(task.options.runtimeConfig ?? {}), ...escalated };

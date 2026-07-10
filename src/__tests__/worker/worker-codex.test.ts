@@ -7,10 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createWorkerServer, listenWorkerServer, type WorkerServer } from '../../worker/server.js';
 import { createWorkerExecutor } from '../../worker/executor.js';
-import {
-  WorkerSupervisor,
-  workerSocketPath,
-} from '../../infrastructure/process/worker-supervisor.js';
+import { WorkerSupervisor } from '../../infrastructure/process/worker-supervisor.js';
 import { codexHomePath } from '../../infrastructure/security/codex-home.js';
 import { parseDecision } from '../../application/decision-parser.js';
 import { buildOrquestrator } from '../_helpers/orquestrator-fixture.js';

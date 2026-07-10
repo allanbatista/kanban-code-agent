@@ -10,7 +10,9 @@ import { TASK_STATUS } from '../../domain/types.js';
 import {
   WorkerSupervisor,
   translateToContainer,
+  runSocketDir,
   workerSocketPath,
+  toolsSocketPath,
 } from '../../infrastructure/process/worker-supervisor.js';
 import { resolveDevcontainerImage } from '../../infrastructure/containers/devcontainer.js';
 import { createDeps, createPiClient, createPiClientWithRunner } from '../_helpers/orquestrator-fixture.js';
@@ -120,18 +122,19 @@ describe('WorkerSupervisor', () => {
     });
 
     const args = supervisor.buildDockerRunArgs(
-      '/host/data/.swarm/workers/task_1-run.sock',
+      '/tmp/kca-abcdef012345/w.sock',
       'kca-test',
-      '/host/data/.swarm/workers/task_1-run.env',
+      '/tmp/kca-abcdef012345/w.env',
     );
 
     expect(args.slice(0, 4)).toEqual(['run', '-d', '--rm', '--init']);
     expect(args).toContain('--name');
     expect(args).toContain('kca-test');
     expect(args).toContain('--stop-timeout');
-    // Mounts: dataDir rw em /kca/data, repo ro em /kca/app.
+    // Mounts: dataDir rw em /kca/data, repo ro em /kca/app, dir do socket em /kca/sock.
     expect(args).toContain('/host/data:/kca/data');
     expect(args).toContain('/repo:/kca/app:ro');
+    expect(args).toContain('/tmp/kca-abcdef012345:/kca/sock');
     // Limites mapeados para docker: -m e --cpus (50% -> 0.5).
     expect(args).toContain('-m');
     expect(args).toContain('512m');
@@ -139,16 +142,16 @@ describe('WorkerSupervisor', () => {
     expect(args).toContain('0.5');
     // Segredos vão no --env-file, nunca no argv.
     expect(args).toContain('--env-file');
-    expect(args).toContain('/host/data/.swarm/workers/task_1-run.env');
+    expect(args).toContain('/tmp/kca-abcdef012345/w.env');
     expect(args.join(' ')).not.toContain('sk-secret-xyz');
-    // Env não-secreto com paths já traduzidos p/ o container.
-    expect(args).toContain('SWARM_WORKER_SOCKET=/kca/data/.swarm/workers/task_1-run.sock');
+    // Env não-secreto com paths já traduzidos p/ o container (socket em /kca/sock).
+    expect(args).toContain('SWARM_WORKER_SOCKET=/kca/sock/w.sock');
     expect(args).toContain('CODEX_HOME=/kca/data/.swarm/auth/codex');
     // Imagem + comando do worker a partir do repo montado, --socket com path do container.
     expect(args).toContain('node:24-slim');
     expect(args).toContain('/kca/app/src/worker/main.ts');
     expect(args).toContain('--socket');
-    expect(args).toContain('/kca/data/.swarm/workers/task_1-run.sock');
+    expect(args).toContain('/kca/sock/w.sock');
   });
 
   it('em modo bundle monta /kca/bin, roda o worker do bundle e seta SWARM_CODEX_BIN', () => {
@@ -185,6 +188,32 @@ describe('WorkerSupervisor', () => {
     expect(translateToContainer('/elsewhere/x', '/host/data', '/repo')).toBe('/elsewhere/x');
     // dataDir aninhado no repo: o prefixo mais longo (dataDir) precisa vencer.
     expect(translateToContainer('/repo/data/.swarm/x', '/repo/data', '/repo')).toBe('/kca/data/.swarm/x');
+    // socketDir (fora do dataDir, sob /tmp) -> /kca/sock.
+    expect(translateToContainer('/tmp/kca-abc/w.sock', '/host/data', '/repo', '/tmp/kca-abc')).toBe('/kca/sock/w.sock');
+  });
+
+  it('mantém o path do socket UDS curto (< limite sun_path) mesmo com dataDir longo', () => {
+    // Bug #2: dataDir longo estourava o limite sun_path (~108 chars) no bind(2).
+    // Os sockets vivem sob os.tmpdir(), independentes do dataDir.
+    const longDataDir = `/tmp/${'x'.repeat(200)}`;
+    const supervisor = new WorkerSupervisor(createPiClient([]), {
+      mode: 'docker',
+      runTimeoutMs: 1000,
+      dataDir: longDataDir,
+    });
+    // O socket do run é independente do dataDir e curto.
+    const worker = workerSocketPath('task_1', 'run_1');
+    const tools = toolsSocketPath('task_1', 'run_1');
+    expect(worker.length).toBeLessThan(100);
+    expect(tools.length).toBeLessThan(100);
+    expect(worker.startsWith(tmpdir())).toBe(true);
+    // Worker e tool-callback compartilham o mesmo dir do run.
+    expect(dirname(worker)).toBe(runSocketDir('task_1', 'run_1'));
+    expect(dirname(tools)).toBe(runSocketDir('task_1', 'run_1'));
+    // O docker run monta o dir do socket (curto) em /kca/sock, não sob /kca/data.
+    const args = supervisor.buildDockerRunArgs(worker, 'kca-long');
+    expect(args).toContain(`${dirname(worker)}:/kca/sock`);
+    expect(args).toContain('SWARM_WORKER_SOCKET=/kca/sock/w.sock');
   });
 
   it('cancela via docker stop + rm defensivo e detecta daemon via docker info', () => {
@@ -336,9 +365,10 @@ describe('WorkerSupervisor', () => {
   (dockerAvailable() ? it : it.skip)(
     'sobe o worker num container docker real e responde /health pela UDS montada',
     async () => {
-      // dataDir curto em /tmp: caminho de socket UDS tem limite de ~108 chars.
+      // O socket UDS vive num dir curto sob /tmp (limite sun_path ~108 chars);
+      // o dataDir pode ser longo sem quebrar o bind.
       const dataDir = mkdtempSync(join(tmpdir(), 'kca-docker-'));
-      const socketPath = workerSocketPath(dataDir, 'task_s', 'run');
+      const socketPath = workerSocketPath('task_s', 'run');
       const containerName = `kca-smoke-${process.pid}`;
       mkdirSync(dirname(socketPath), { recursive: true });
       const supervisor = new WorkerSupervisor(createPiClient([]), {

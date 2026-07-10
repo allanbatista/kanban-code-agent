@@ -49,8 +49,11 @@ Casos de uso e orquestração. Depende apenas de domain e interfaces de infrastr
 - **Orquestrator**: Core da orquestração com inversão de dependência. Recebe stores via constructor
 - **Scheduler**: Agenda tasks baseado em dependências (índice waitingByDependency)
 - **WorkerPool**: Pool de workers com controle de concorrência, timeout e cancel
-- **PiClient**: Adaptador para Pi SDK com AgentRunner interface
-- **WorkerSupervisor**: Executa runs em `inproc` ou worker UDS em container via `docker run`
+- **AgentClient** (`agent-client.ts`): Interface consumida por Orquestrator/Supervisor (`run`, `buildRunConfig`, `repairInvalidOutput`, `generateTitle`), extraída do `PiAgentClient` para plugar um segundo agent sem tocar os chamadores
+- **PiClient**: Adaptador para Pi SDK, implementa `AgentClient` via `AgentRunner`
+- **CodexClient** (`codex-client.ts`): Implementa `AgentClient` falando com `codex app-server`; reusa a montagem de prompts do Pi e usa `outputSchema` para decisão estruturada nativa
+- **RoutingAgentClient** (`orquestrator-factory.ts`): Seleciona Pi ou Codex por `runtimeConfig.agent` (resolvido), instanciando cada client de forma lazy
+- **WorkerSupervisor**: Executa runs em `inproc` ou worker UDS em container via `docker run`; monta `buildDockerRunArgs`, traduz paths host↔container e injeta segredos por `--env-file`
 - **PromptBuilder**: Função pura para construção de prompts (idempotente)
 - **DecisionParser**: Parser estrito de JSON do agent (AgentOutputInvalidError)
 - **BudgetTracker**: Rastreio de tokens e custo por task
@@ -76,6 +79,46 @@ Entry points da aplicação.
 - **main.ts**: Parse de argumentos e roteamento
 - **server.ts**: Modo servidor (API + UI estática)
 - **runner.ts**: Modo runner (task única)
+- **pi-runner.ts**: `PiSdkAgentRunner` — executa o Pi SDK
+- **codex-runner.ts**: Cliente JSON-RPC 2.0/stdio do `codex app-server` (handshake `initialize/initialized` → `thread/start` → `turn/start`; um processo por chamada); expõe `runCodexTurn` e `DECISION_OUTPUT_SCHEMA`
+- **orquestrator-factory.ts**: Wiring; monta o `RoutingAgentClient` e o `WorkerSupervisor` com CODEX_HOME e keys resolvidas (settings → env)
+
+## Agents e Isolamento (deltas de arquitetura)
+
+Camada de agents intercambiáveis e execução containerizada:
+
+- **AgentClient** (`src/application/agent-client.ts`): interface única para os
+  dois agents; `RoutingAgentClient` roteia por `runtimeConfig.agent`.
+- **codex-runner** (`src/cli/codex-runner.ts`): JSON-RPC/stdio contra `codex
+  app-server`; `sandboxPolicy` = `externalSandbox` em Docker (container é o
+  sandbox), `workspaceWrite` em inproc.
+- **MCP bridge** (`src/worker/mcp-bridge.ts`): servidor MCP stdio hand-rolled
+  (~180 linhas, sem SDK) que expõe as tools do Master ao Codex; `tools/list` →
+  `GET /tools` e `tools/call` → `POST /tool` no UDS de tool-callback
+  (`KCA_TOOLS_SOCKET`). Registrado no `config.toml` do CODEX_HOME.
+- **codex-home** (`src/infrastructure/security/codex-home.ts`): garante o
+  CODEX_HOME compartilhado (0700) e regenera o `config.toml` do bridge
+  idempotentemente; nunca toca o `auth.json`.
+- **Worker executor** (`src/worker/executor.ts`): out-of-process, escolhe o
+  runner (Pi ou Codex) pelo campo `agent` do payload `POST /run`, sem
+  Orquestrator — só o config serializado. Tools chegam como proxies via UDS.
+- **Docker no supervisor** (`src/infrastructure/process/worker-supervisor.ts`):
+  `buildDockerRunArgs` (`--rm --init`, mounts `/kca/data|app|bin`, limites
+  mem/cpu, `--env-file` p/ segredos), `toContainer` traduz paths, cancel via
+  `docker stop`. Constantes `CONTAINER_DATA_DIR=/kca/data`,
+  `CONTAINER_APP_DIR=/kca/app`, `CONTAINER_BUNDLE_DIR=/kca/bin`.
+- **Devcontainer** (`src/infrastructure/containers/devcontainer.ts`):
+  `devcontainer build` via `@devcontainers/cli`, cache por hash, tag
+  `kca-devc-<slug>-<hash>`; `dockerComposeFile` = erro, `runArgs` = ignorado.
+- **Worker bundle** (`scripts/build-worker-bundle.mjs`, `pnpm build:worker`):
+  esbuild single-file de `worker.mjs` + `mcp-bridge.mjs` em `dist-worker/`,
+  montável read-only em qualquer imagem glibc.
+- **Settings persistente** (`src/infrastructure/persistence/settings-store.ts`):
+  `.swarm/settings.json` (0600) — agent default + provider keys (mascaradas na
+  leitura), fonte de runtime com fallback para envvar.
+
+> systemd foi **removido** nesta iteração; `SWARM_ISOLATION` aceita apenas
+> `inproc` (default) e `docker`.
 
 ## Fluxo de Eventos
 

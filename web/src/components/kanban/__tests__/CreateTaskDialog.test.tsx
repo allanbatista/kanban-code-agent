@@ -4,6 +4,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { CreateTaskDialog } from '../CreateTaskDialog';
 import { useKanbanStore } from '@/stores/kanbanStore';
 import { useProjectsStore } from '@/stores/projectsStore';
+import { useSettingsStore } from '@/stores/settingsStore';
 
 const mockCreateTask = vi.fn();
 const mockFetchProjects = vi.fn();
@@ -38,6 +39,7 @@ describe('CreateTaskDialog (T06)', () => {
       ],
       fetchProjects: mockFetchProjects,
     });
+    useSettingsStore.setState({ agentDefault: 'pi' });
   });
 
   it('renders dialog title when open', () => {
@@ -66,6 +68,19 @@ describe('CreateTaskDialog (T06)', () => {
     await waitFor(() =>
       expect(mockCreateTask).toHaveBeenCalledWith(
         expect.objectContaining({ runtimeConfig: expect.objectContaining({ agent: 'pi' }) }),
+      ),
+    );
+  });
+
+  it('seeds agent from the settings default (codex) when opened', async () => {
+    useSettingsStore.setState({ agentDefault: 'codex' });
+    mockCreateTask.mockResolvedValueOnce({ id: 't1' });
+    render(<CreateTaskDialog open={true} onOpenChange={vi.fn()} />);
+    fireEvent.change(screen.getByPlaceholderText('Descreva a tarefa...'), { target: { value: 'fazer X' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Criar' }));
+    await waitFor(() =>
+      expect(mockCreateTask).toHaveBeenCalledWith(
+        expect.objectContaining({ runtimeConfig: expect.objectContaining({ agent: 'codex' }) }),
       ),
     );
   });

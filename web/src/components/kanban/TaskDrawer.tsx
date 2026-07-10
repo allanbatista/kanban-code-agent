@@ -282,7 +282,7 @@ export function TaskDrawer({ taskId, defaultTab, onClose }: TaskDrawerProps) {
             </div>
           )}
           <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground/70">
-            <span>🤖 {task.runtimeConfig.model} · {task.runtimeConfig.effort}</span>
+            <span>🤖 {task.runtimeConfig.agent} · {task.runtimeConfig.model} · {task.runtimeConfig.effort}</span>
             <span>📎 {task.attachments.length}</span>
             <span>📦 {task.artifacts.length}</span>
             <span>{task.metrics.tokens.total} tok · ${task.metrics.cost.toFixed(4)} · {formatDuration(task.metrics.durationMs)}</span>

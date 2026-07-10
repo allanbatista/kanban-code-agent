@@ -1,4 +1,4 @@
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import type { spawn } from 'node:child_process';
 import type { Agent } from '../domain/agent.js';
 import type { Task } from '../domain/task.js';
@@ -13,7 +13,7 @@ import {
   runCodexTurn,
   type CodexSandboxPolicy,
 } from '../cli/codex-runner.js';
-import { closeServer, listenToolServer, workerSocketPath } from '../infrastructure/process/worker-supervisor.js';
+import { closeServer, listenToolServer, runSocketDir, toolsSocketPath } from '../infrastructure/process/worker-supervisor.js';
 import { ensureCodexHome } from '../infrastructure/security/codex-home.js';
 
 // Reexport: o schema de decisao mora no nivel-runner (codex-runner) mas fazia
@@ -39,7 +39,7 @@ const NEVER_RUNNER: AgentRunner = {
 export interface CodexClientOptions {
   /** CODEX_HOME compartilhado (default <dataDir>/.swarm/auth/codex — F1.2 cria o dir). */
   codexHome: string;
-  /** Base dir para os sockets UDS do tool-callback por run. */
+  /** Usado para localizar/criar o CODEX_HOME compartilhado (<dataDir>/.swarm/auth/codex). */
   dataDir: string;
   /** Modelo unico; SWARM_CODEX_MODEL vence, senao DEFAULT_CODEX_MODEL. */
   model?: string;
@@ -152,7 +152,11 @@ export class CodexAgentClient implements AgentClient {
     this.ensureHome();
     const runId = task.activeRunId ?? 'run';
     // Reusa o mesmo tool-callback UDS do supervisor (POST /tool {name, params}).
-    const socketPath = workerSocketPath(this.options.dataDir, task.taskId, `${runId}-codex-tools`);
+    // Dir curto sob /tmp (0700), fora do dataDir, p/ o path caber no limite
+    // sun_path (~108 chars no Linux) mesmo com dataDir longo.
+    const socketDir = runSocketDir(task.taskId, `${runId}-codex`);
+    mkdirSync(socketDir, { recursive: true, mode: 0o700 });
+    const socketPath = toolsSocketPath(task.taskId, `${runId}-codex`);
     const toolServer = await listenToolServer(socketPath, config.customTools ?? []);
     try {
       return await runCodexTurn(this.runner, config, {
@@ -163,7 +167,8 @@ export class CodexAgentClient implements AgentClient {
       });
     } finally {
       await closeServer(toolServer).catch(() => undefined);
-      rmSync(socketPath, { force: true });
+      // Remove o dir do run inteiro (t.sock).
+      rmSync(socketDir, { recursive: true, force: true });
     }
   }
 }
