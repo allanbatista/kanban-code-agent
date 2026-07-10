@@ -19,6 +19,9 @@ export interface EnsureCodexHomeOptions {
   nodeBin?: string;
   /** Entry do bridge (default src/worker/mcp-bridge.ts; F2 troca pelo bundle). */
   bridgeEntry?: string;
+  /** true (default): roda o bridge via `--import tsx <entry>` (dev/inproc/source
+   *  no container). false: o entry e um bundle .mjs executado direto (sem tsx). */
+  useTsx?: boolean;
 }
 
 export function codexHomePath(dataDir: string): string {
@@ -30,19 +33,27 @@ export function codexHomePath(dataDir: string): string {
  * Idempotente; nunca escreve/remove auth.json.
  */
 export function ensureCodexHome(dataDir: string, options: EnsureCodexHomeOptions = {}): string {
-  const home = codexHomePath(dataDir);
+  return ensureCodexHomeAt(codexHomePath(dataDir), options);
+}
+
+/**
+ * Como `ensureCodexHome`, mas recebe o path do CODEX_HOME direto. O worker docker
+ * o usa com process.env.CODEX_HOME (path do container, do mount compartilhado)
+ * para regravar o config.toml apontando o bridge para paths do container.
+ */
+export function ensureCodexHomeAt(home: string, options: EnsureCodexHomeOptions = {}): string {
   mkdirSync(home, { recursive: true, mode: 0o700 });
   chmodSync(home, 0o700); // reforca 0700 mesmo se o dir ja existia (umask/pre-existente).
   const nodeBin = options.nodeBin ?? process.execPath;
   // ponytail: em dev/inproc roda o bridge via tsx, espelhando worker-supervisor
-  // (nodeBin --import tsx <entry>); F2 (docker) troca pelo bundle esbuild.
+  // (nodeBin --import tsx <entry>); o bundle esbuild (docker) passa useTsx=false.
   const bridgeEntry = options.bridgeEntry ?? resolve('src/worker/mcp-bridge.ts');
-  AtomicWriter.write(join(home, 'config.toml'), renderConfigToml(nodeBin, bridgeEntry));
+  AtomicWriter.write(join(home, 'config.toml'), renderConfigToml(nodeBin, bridgeEntry, options.useTsx ?? true));
   return home;
 }
 
-function renderConfigToml(nodeBin: string, bridgeEntry: string): string {
-  const args = ['--import', 'tsx', bridgeEntry];
+function renderConfigToml(nodeBin: string, bridgeEntry: string, useTsx: boolean): string {
+  const args = useTsx ? ['--import', 'tsx', bridgeEntry] : [bridgeEntry];
   return [
     `[mcp_servers.${MCP_SERVER_NAME}]`,
     `command = ${tomlString(nodeBin)}`,

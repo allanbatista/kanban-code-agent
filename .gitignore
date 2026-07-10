@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-worker/
 playwright-report/
 test-results/
 .kca-data/

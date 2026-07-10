@@ -1,9 +1,15 @@
+#!/usr/bin/env node
 // Fake `codex app-server`: fala JSON-RPC 2.0 newline-delimited real no stdio.
-// Variante em argv[2]: success | deltasonly | fail | interrupt.
+// Variante: success | deltasonly | fail | interrupt.
 // Usado para exercitar o CodexRunner/CodexAgentClient ponta a ponta sem o binario
-// real. NAO valida env/tools aqui (tools E2E fica em F1.2).
+// real. Standalone-runnavel (shebang + exec bit): pode ser o proprio
+// SWARM_CODEX_BIN, invocado como `<fake> app-server` (worker docker/inproc). Ai
+// a variante vem do env FAKE_CODEX_VARIANT; quando invocado direto com a variante
+// em argv[2] (testes do runner), argv[2] vence.
 
-const variant = process.argv[2] ?? 'success';
+const VARIANTS = new Set(['success', 'deltasonly', 'fail', 'interrupt']);
+const argVariant = process.argv[2];
+const variant = VARIANTS.has(argVariant) ? argVariant : process.env.FAKE_CODEX_VARIANT ?? 'success';
 
 const DECISION = JSON.stringify({
   status: 'completed',

@@ -8,12 +8,17 @@ import type { AgentClient, RunContinuity } from './agent-client.js';
 import { PiAgentClient, type AgentRunConfig, type AgentRunResult, type AgentRunner } from './pi-client.js';
 import {
   CodexRunner,
+  DECISION_OUTPUT_SCHEMA,
   DEFAULT_CODEX_MODEL,
-  type CodexEffort,
+  runCodexTurn,
   type CodexSandboxPolicy,
 } from '../cli/codex-runner.js';
 import { closeServer, listenToolServer, workerSocketPath } from '../infrastructure/process/worker-supervisor.js';
 import { ensureCodexHome } from '../infrastructure/security/codex-home.js';
+
+// Reexport: o schema de decisao mora no nivel-runner (codex-runner) mas fazia
+// parte da superficie publica deste modulo.
+export { DECISION_OUTPUT_SCHEMA };
 
 // ---------------------------------------------------------------------------
 // CodexAgentClient: fala com `codex app-server` (JSON-RPC/stdio) via CodexRunner.
@@ -22,63 +27,6 @@ import { ensureCodexHome } from '../infrastructure/security/codex-home.js';
 // Tools do Master chegam por MCP bridge (F1.2): aqui so subimos o tool-callback
 // UDS por run e passamos o socket via KCA_TOOLS_SOCKET.
 // ---------------------------------------------------------------------------
-
-// Contrato de decisao espelhado de parseDecision/AgentDecision (decision-parser.ts,
-// domain/task.ts). Enviado como outputSchema no turn/start para que o Codex
-// devolva o objeto ja estruturado.
-export const DECISION_OUTPUT_SCHEMA: Record<string, unknown> = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['status', 'messages'],
-  properties: {
-    status: { type: 'string', enum: ['completed', 'waiting', 'retry'] },
-    messages: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['type', 'text'],
-        properties: {
-          type: { type: 'string', enum: ['text', 'artifact'] },
-          text: { type: 'string' },
-        },
-      },
-    },
-    waitGroups: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['waitId', 'mode', 'taskIds'],
-        properties: {
-          waitId: { type: 'string' },
-          mode: { type: 'string', enum: ['WAIT_ALL', 'ON_DEMAND'] },
-          taskIds: { type: 'array', items: { type: 'string' } },
-        },
-      },
-    },
-    waitMode: { type: 'string', enum: ['WAIT_ALL', 'ON_DEMAND'] },
-    waitingForTaskIds: { type: 'array', items: { type: 'string' } },
-    instructions: { type: 'string' },
-    model: { type: 'string', enum: ['fast', 'balanced', 'deep'] },
-    effort: { type: 'string', enum: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
-    verdict: { type: 'string', enum: ['approved', 'rejected'] },
-    criteria: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['name', 'passed'],
-        properties: {
-          name: { type: 'string' },
-          passed: { type: 'boolean' },
-          note: { type: 'string' },
-        },
-      },
-    },
-    feedback: { type: 'string' },
-  },
-};
 
 // O AgentRunner do Pi nunca roda no caminho Codex; reusamos o PiAgentClient
 // apenas para montar prompts (buildRunConfig/buildRepairRunConfig).
@@ -207,30 +155,15 @@ export class CodexAgentClient implements AgentClient {
     const socketPath = workerSocketPath(this.options.dataDir, task.taskId, `${runId}-codex-tools`);
     const toolServer = await listenToolServer(socketPath, config.customTools ?? []);
     try {
-      const result = await this.runner.runTurn({
-        cwd: config.cwd,
+      return await runCodexTurn(this.runner, config, {
         model: this.model,
-        effort: mapEffort(config.thinkingLevel),
         sandboxPolicy: this.sandboxPolicy,
-        outputSchema: DECISION_OUTPUT_SCHEMA,
-        systemPrompt: config.systemPrompt,
-        prompt: config.prompt,
         toolsSocket: socketPath,
         signal,
       });
-      // ponytail: cost=0 — o app-server nao reporta preco por token (so contagem).
-      return { output: result.output, stats: { tokens: result.usage, cost: 0 } };
     } finally {
       await closeServer(toolServer).catch(() => undefined);
       rmSync(socketPath, { force: true });
     }
   }
-}
-
-function mapEffort(level: string): CodexEffort {
-  // Codex aceita low|medium|high; mapeia a escala do Pi (off..xhigh).
-  // ponytail: mapeamento grosso; efforts por-alias do codex quando necessario.
-  if (level === 'high' || level === 'xhigh') return 'high';
-  if (level === 'medium') return 'medium';
-  return 'low';
 }

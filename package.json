@@ -22,12 +22,14 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "ws:check": "node scripts/ws-check.mjs"
+    "ws:check": "node scripts/ws-check.mjs",
+    "build:worker": "node scripts/build-worker-bundle.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.1",
     "eslint": "^9.0.0",
     "prettier": "^3.0.0",
     "tsx": "^4.0.0",

@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { RunCancelledError } from '../application/pi-client.js';
+import { RunCancelledError, type AgentRunConfig, type AgentRunResult } from '../application/pi-client.js';
 
 // ---------------------------------------------------------------------------
 // Cliente JSON-RPC 2.0 sobre stdio para o processo `codex app-server`.
@@ -55,6 +55,113 @@ export interface CodexUsage {
 export interface CodexTurnResult {
   output: string;
   usage: CodexUsage;
+}
+
+// ---------------------------------------------------------------------------
+// Peca reusavel de "rodar um turno" a partir de um AgentRunConfig serializado.
+// Compartilhada pelo CodexAgentClient (inproc) e pelo worker out-of-process
+// (docker) — ambos so tem o config + um socket de tools, sem Orquestrator.
+// DECISION_OUTPUT_SCHEMA/mapEffort moram aqui (nivel-runner) e o CodexAgentClient
+// os reexporta para manter a superficie publica.
+// ---------------------------------------------------------------------------
+
+// Contrato de decisao espelhado de parseDecision/AgentDecision (decision-parser.ts,
+// domain/task.ts). Enviado como outputSchema no turn/start para que o Codex
+// devolva o objeto ja estruturado.
+export const DECISION_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['status', 'messages'],
+  properties: {
+    status: { type: 'string', enum: ['completed', 'waiting', 'retry'] },
+    messages: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['type', 'text'],
+        properties: {
+          type: { type: 'string', enum: ['text', 'artifact'] },
+          text: { type: 'string' },
+        },
+      },
+    },
+    waitGroups: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['waitId', 'mode', 'taskIds'],
+        properties: {
+          waitId: { type: 'string' },
+          mode: { type: 'string', enum: ['WAIT_ALL', 'ON_DEMAND'] },
+          taskIds: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    },
+    waitMode: { type: 'string', enum: ['WAIT_ALL', 'ON_DEMAND'] },
+    waitingForTaskIds: { type: 'array', items: { type: 'string' } },
+    instructions: { type: 'string' },
+    model: { type: 'string', enum: ['fast', 'balanced', 'deep'] },
+    effort: { type: 'string', enum: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
+    verdict: { type: 'string', enum: ['approved', 'rejected'] },
+    criteria: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['name', 'passed'],
+        properties: {
+          name: { type: 'string' },
+          passed: { type: 'boolean' },
+          note: { type: 'string' },
+        },
+      },
+    },
+    feedback: { type: 'string' },
+  },
+};
+
+export interface RunCodexTurnOptions {
+  model: string;
+  sandboxPolicy: CodexSandboxPolicy;
+  outputSchema?: Record<string, unknown>;
+  /** Socket UDS do tool-callback deste run (vira KCA_TOOLS_SOCKET no app-server). */
+  toolsSocket?: string;
+  signal?: AbortSignal;
+}
+
+/**
+ * Roda um turno do Codex a partir do config serializado e devolve o AgentRunResult.
+ * Nao sobe o tool-server nem cria o CODEX_HOME — o chamador (client inproc ou
+ * worker docker) cuida disso e passa o socket em `toolsSocket`.
+ */
+export async function runCodexTurn(
+  runner: CodexRunner,
+  config: Pick<AgentRunConfig, 'cwd' | 'thinkingLevel' | 'systemPrompt' | 'prompt'>,
+  opts: RunCodexTurnOptions,
+): Promise<AgentRunResult> {
+  const result = await runner.runTurn({
+    cwd: config.cwd,
+    model: opts.model,
+    effort: mapEffort(config.thinkingLevel),
+    sandboxPolicy: opts.sandboxPolicy,
+    outputSchema: opts.outputSchema ?? DECISION_OUTPUT_SCHEMA,
+    systemPrompt: config.systemPrompt,
+    prompt: config.prompt,
+    toolsSocket: opts.toolsSocket,
+    signal: opts.signal,
+  });
+  // ponytail: cost=0 — o app-server nao reporta preco por token (so contagem).
+  return { output: result.output, stats: { tokens: result.usage, cost: 0 } };
+}
+
+export function mapEffort(level: string): CodexEffort {
+  // Codex aceita low|medium|high; mapeia a escala do Pi (off..xhigh).
+  // ponytail: mapeamento grosso; efforts por-alias do codex quando necessario.
+  if (level === 'high' || level === 'xhigh') return 'high';
+  if (level === 'medium') return 'medium';
+  return 'low';
 }
 
 export class CodexRunner {

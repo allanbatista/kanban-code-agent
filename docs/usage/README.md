@@ -31,10 +31,11 @@ Variáveis de ambiente:
 - `SWARM_LOG_LEVEL` — nível de log (default: `info`)
 - `SWARM_RUN_TIMEOUT_MS` — timeout por run (default: 300000)
 - `SWARM_MAX_CONCURRENT_RUNS` — limite de runs simultâneas (default: 4)
-- `SWARM_ISOLATION` — `inproc` ou `systemd` (default: `inproc`; `systemd` usa worker UDS via `systemd-run`)
-- `SWARM_WORKER_MEMORY_MAX` — opcional; valor de `MemoryMax` para workers `systemd` (ex.: `2G`)
-- `SWARM_WORKER_CPU_QUOTA` — opcional; valor de `CPUQuota` para workers `systemd` (ex.: `200%`)
-- `SWARM_WORKER_HOLD_MS` — opcional para debug; mantém a unit `kca-*.service` viva por N ms após o run para inspeção com `systemctl`
+- `SWARM_ISOLATION` — `inproc` ou `docker` (default: `inproc`; `docker` roda o worker em container via worker UDS montado)
+- `SWARM_WORKER_IMAGE` — opcional; imagem do worker docker (default: `node:24-slim`)
+- `SWARM_WORKER_MEMORY_MAX` — opcional; valor de `-m` (memória) do container (ex.: `2g`)
+- `SWARM_WORKER_CPU_QUOTA` — opcional; mapeado para `--cpus` do container (ex.: `200%` → `2`)
+- `SWARM_WORKER_HOLD_MS` — opcional para debug; mantém o container `kca-*` vivo por N ms após o run
 - `CREDENTIALS_DIRECTORY` ou `SWARM_GIT_TOKEN` — token Git usado via `GIT_ASKPASS`, sem gravar o token em `.swarm`
 
 ### Modo Runner (CLI)

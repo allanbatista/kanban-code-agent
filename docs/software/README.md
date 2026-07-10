@@ -50,7 +50,7 @@ Casos de uso e orquestração. Depende apenas de domain e interfaces de infrastr
 - **Scheduler**: Agenda tasks baseado em dependências (índice waitingByDependency)
 - **WorkerPool**: Pool de workers com controle de concorrência, timeout e cancel
 - **PiClient**: Adaptador para Pi SDK com AgentRunner interface
-- **WorkerSupervisor**: Executa runs em `inproc` ou worker UDS via `systemd-run`
+- **WorkerSupervisor**: Executa runs em `inproc` ou worker UDS em container via `docker run`
 - **PromptBuilder**: Função pura para construção de prompts (idempotente)
 - **DecisionParser**: Parser estrito de JSON do agent (AgentOutputInvalidError)
 - **BudgetTracker**: Rastreio de tokens e custo por task

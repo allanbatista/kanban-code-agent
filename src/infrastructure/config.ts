@@ -17,7 +17,7 @@ export interface SwarmConfig {
   logLevel: string;
   runTimeoutMs: number;
   maxConcurrentRuns: number;
-  isolation: 'inproc' | 'systemd';
+  isolation: 'inproc' | 'docker';
   models: {
     fast: ModelConfig;
     balanced: ModelConfig;
@@ -87,7 +87,7 @@ interface FileConfigRaw {
   'run_timeout_ms'?: number;
   maxConcurrentRuns?: number;
   'max_concurrent_runs'?: number;
-  isolation?: 'inproc' | 'systemd';
+  isolation?: 'inproc' | 'docker';
   models?: {
     fast?: { provider?: string; modelId?: string; model_id?: string };
     balanced?: { provider?: string; modelId?: string; model_id?: string };
@@ -107,7 +107,7 @@ function normalizeFileConfig(raw: FileConfigRaw): Partial<SwarmConfig> {
   else if (typeof raw['run_timeout_ms'] === 'number') result.runTimeoutMs = raw['run_timeout_ms'];
   if (typeof raw.maxConcurrentRuns === 'number') result.maxConcurrentRuns = raw.maxConcurrentRuns;
   else if (typeof raw['max_concurrent_runs'] === 'number') result.maxConcurrentRuns = raw['max_concurrent_runs'];
-  if (raw.isolation === 'inproc' || raw.isolation === 'systemd') result.isolation = raw.isolation;
+  if (raw.isolation === 'inproc' || raw.isolation === 'docker') result.isolation = raw.isolation;
 
   if (raw.models) {
     result.models = {
@@ -223,7 +223,7 @@ function readEnvOverrides(): Partial<SwarmConfig> {
   if (maxConcurrentRuns !== undefined) overrides.maxConcurrentRuns = maxConcurrentRuns;
 
   const isolation = process.env['SWARM_ISOLATION'];
-  if (isolation === 'inproc' || isolation === 'systemd') overrides.isolation = isolation;
+  if (isolation === 'inproc' || isolation === 'docker') overrides.isolation = isolation;
 
   return overrides;
 }
@@ -289,8 +289,8 @@ function validateConfig(config: SwarmConfig): void {
   if (!Number.isInteger(config.maxConcurrentRuns) || config.maxConcurrentRuns < 1) {
     throw new Error(`SWARM_MAX_CONCURRENT_RUNS deve ser >= 1, recebeu: ${config.maxConcurrentRuns}`);
   }
-  if (config.isolation !== 'inproc' && config.isolation !== 'systemd') {
-    throw new Error(`SWARM_ISOLATION deve ser inproc ou systemd, recebeu: ${config.isolation}`);
+  if (config.isolation !== 'inproc' && config.isolation !== 'docker') {
+    throw new Error(`SWARM_ISOLATION deve ser inproc ou docker, recebeu: ${config.isolation}`);
   }
 
   for (const alias of ['fast', 'balanced', 'deep'] as const) {

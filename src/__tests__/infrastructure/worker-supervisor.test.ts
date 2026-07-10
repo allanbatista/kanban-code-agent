@@ -1,10 +1,17 @@
 import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { request } from 'node:http';
-import { basename, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import { Orquestrator } from '../../application/orquestrator.js';
 import type { Task } from '../../domain/task.js';
 import { TASK_STATUS } from '../../domain/types.js';
-import { WorkerSupervisor } from '../../infrastructure/process/worker-supervisor.js';
+import {
+  WorkerSupervisor,
+  translateToContainer,
+  workerSocketPath,
+} from '../../infrastructure/process/worker-supervisor.js';
 import { createDeps, createPiClient, createPiClientWithRunner } from '../_helpers/orquestrator-fixture.js';
 import { buildOrquestrator } from '../_helpers/orquestrator-fixture.js';
 import { completedDecision, testAgent, throwingRunner, waitingDecision } from '../_helpers/mock-agent.js';
@@ -38,6 +45,18 @@ function unixJson<T>(socketPath: string, path: string, body: unknown): Promise<T
   });
 }
 
+function unixGet(socketPath: string, path: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request({ socketPath, method: 'GET', path }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf-8') }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 function closeWorkers(workers: WorkerServer[]): void {
   for (const worker of workers) {
     worker.server.closeAllConnections?.();
@@ -60,6 +79,15 @@ function waitForTaskStatus(orquestrator: Orquestrator, task: Task, status: strin
   });
 }
 
+function dockerAvailable(): boolean {
+  try {
+    execFileSync('docker', ['info'], { stdio: ['ignore', 'ignore', 'ignore'] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe('WorkerSupervisor', () => {
   it('executa em modo inproc usando o PiAgentClient existente', async () => {
     const piClient = createPiClient([completedDecision('ok')]);
@@ -77,34 +105,117 @@ describe('WorkerSupervisor', () => {
     }
   });
 
-  it('monta comando systemd-run com limites e credencial encrypted', () => {
+  it('monta args do docker run com mounts, limites, --rm, nome e env-file (sem segredos no argv)', () => {
     const supervisor = new WorkerSupervisor(createPiClient([]), {
-      mode: 'systemd',
+      mode: 'docker',
       runTimeoutMs: 1500,
-      readWritePaths: ['/tmp/kca'],
-      encryptedCredential: '/tmp/git-token.cred',
-      workerEntry: '/repo/src/worker/main.ts',
+      dataDir: '/host/data',
       workingDirectory: '/repo',
-      nodeBin: '/usr/bin/node',
-      memoryMax: '512M',
+      workerImage: 'node:24-slim',
+      codexHome: '/host/data/.swarm/auth/codex',
+      memoryMax: '512m',
       cpuQuota: '50%',
+      workerEnv: { DEEPSEEK_API_KEY: 'sk-secret-xyz' },
     });
 
-    const args = supervisor.buildSystemdRunArgs('/tmp/worker.sock', 'kca-test');
+    const args = supervisor.buildDockerRunArgs(
+      '/host/data/.swarm/workers/task_1-run.sock',
+      'kca-test',
+      '/host/data/.swarm/workers/task_1-run.env',
+    );
 
-    expect(args).toContain('--unit=kca-test');
-    expect(args).toContain('--property=RuntimeMaxSec=2');
-    expect(args).toContain('--property=WorkingDirectory=/repo');
-    expect(args).toContain('--property=ReadWritePaths=/tmp/kca');
-    expect(args).toContain('--property=MemoryMax=512M');
-    expect(args).toContain('--property=CPUQuota=50%');
-    expect(args).toContain('--property=LoadCredentialEncrypted=git-token:/tmp/git-token.cred');
-    expect(args).toContain('/usr/bin/node');
-    expect(args).toContain('/repo/src/worker/main.ts');
-    expect(args).toContain('/tmp/worker.sock');
+    expect(args.slice(0, 4)).toEqual(['run', '-d', '--rm', '--init']);
+    expect(args).toContain('--name');
+    expect(args).toContain('kca-test');
+    expect(args).toContain('--stop-timeout');
+    // Mounts: dataDir rw em /kca/data, repo ro em /kca/app.
+    expect(args).toContain('/host/data:/kca/data');
+    expect(args).toContain('/repo:/kca/app:ro');
+    // Limites mapeados para docker: -m e --cpus (50% -> 0.5).
+    expect(args).toContain('-m');
+    expect(args).toContain('512m');
+    expect(args).toContain('--cpus');
+    expect(args).toContain('0.5');
+    // Segredos vão no --env-file, nunca no argv.
+    expect(args).toContain('--env-file');
+    expect(args).toContain('/host/data/.swarm/workers/task_1-run.env');
+    expect(args.join(' ')).not.toContain('sk-secret-xyz');
+    // Env não-secreto com paths já traduzidos p/ o container.
+    expect(args).toContain('SWARM_WORKER_SOCKET=/kca/data/.swarm/workers/task_1-run.sock');
+    expect(args).toContain('CODEX_HOME=/kca/data/.swarm/auth/codex');
+    // Imagem + comando do worker a partir do repo montado, --socket com path do container.
+    expect(args).toContain('node:24-slim');
+    expect(args).toContain('/kca/app/src/worker/main.ts');
+    expect(args).toContain('--socket');
+    expect(args).toContain('/kca/data/.swarm/workers/task_1-run.sock');
   });
 
-  it('executa modo systemd via worker UDS e RPC minimo de tools', async () => {
+  it('em modo bundle monta /kca/bin, roda o worker do bundle e seta SWARM_CODEX_BIN', () => {
+    const supervisor = new WorkerSupervisor(createPiClient([]), {
+      mode: 'docker',
+      runTimeoutMs: 1500,
+      dataDir: '/host/data',
+      workingDirectory: '/repo',
+      workerImage: 'debian:bookworm-slim',
+      codexHome: '/host/data/.swarm/auth/codex',
+      workerBundleDir: '/host/bundle',
+    });
+
+    const args = supervisor.buildDockerRunArgs('/host/data/.swarm/workers/task_1-run.sock', 'kca-bundle');
+
+    // Bundle montado ro em /kca/bin; worker roda do node+worker.mjs do bundle.
+    expect(args).toContain('/host/bundle:/kca/bin:ro');
+    expect(args).toContain('/kca/bin/bin/node');
+    expect(args).toContain('/kca/bin/worker.mjs');
+    // codex do bundle exposto via -e (path do container, sem binário no argv).
+    expect(args).toContain('SWARM_CODEX_BIN=/kca/bin/bin/codex');
+    // Não roda mais via tsx a partir do repo.
+    expect(args).not.toContain('/kca/app/src/worker/main.ts');
+  });
+
+  it('traduz paths do host para a visão do container (prefixo mais específico vence)', () => {
+    expect(translateToContainer('/host/data/.swarm/workers/x.sock', '/host/data', '/repo')).toBe(
+      '/kca/data/.swarm/workers/x.sock',
+    );
+    expect(translateToContainer('/repo/src/worker/main.ts', '/host/data', '/repo')).toBe(
+      '/kca/app/src/worker/main.ts',
+    );
+    expect(translateToContainer('/host/data', '/host/data', '/repo')).toBe('/kca/data');
+    expect(translateToContainer('/elsewhere/x', '/host/data', '/repo')).toBe('/elsewhere/x');
+    // dataDir aninhado no repo: o prefixo mais longo (dataDir) precisa vencer.
+    expect(translateToContainer('/repo/data/.swarm/x', '/repo/data', '/repo')).toBe('/kca/data/.swarm/x');
+  });
+
+  it('cancela via docker stop + rm defensivo e detecta daemon via docker info', () => {
+    const calls: string[][] = [];
+    const supervisor = new WorkerSupervisor(createPiClient([]), {
+      mode: 'docker',
+      runTimeoutMs: 1000,
+      dockerBin: 'docker',
+      execFile: ((bin: string, args: readonly string[]) => {
+        calls.push([bin, ...args]);
+        return Buffer.from('');
+      }) as unknown as typeof execFileSync,
+    });
+
+    supervisor.stopDockerWorker('kca-abc');
+    expect(calls).toContainEqual(['docker', 'stop', 'kca-abc']);
+    expect(calls).toContainEqual(['docker', 'rm', '-f', 'kca-abc']);
+    expect(supervisor.canStartDocker()).toBe(true);
+  });
+
+  it('canStartDocker retorna false quando docker info falha', () => {
+    const supervisor = new WorkerSupervisor(createPiClient([]), {
+      mode: 'docker',
+      runTimeoutMs: 1000,
+      execFile: (() => {
+        throw new Error('docker daemon indisponível');
+      }) as unknown as typeof execFileSync,
+    });
+    expect(supervisor.canStartDocker()).toBe(false);
+  });
+
+  it('executa modo docker via worker UDS e RPC minimo de tools', async () => {
     const workers: WorkerServer[] = [];
     const stopped: string[] = [];
     const piClient = createPiClient([]);
@@ -112,7 +223,7 @@ describe('WorkerSupervisor', () => {
     try {
       const task = orquestrator.createRootTask('rodar', 'agent-tester');
       const supervisor = new WorkerSupervisor(piClient, {
-        mode: 'systemd',
+        mode: 'docker',
         runTimeoutMs: 1000,
         dataDir: dir,
         startWorker: async (socketPath) => {
@@ -129,8 +240,8 @@ describe('WorkerSupervisor', () => {
           workers.push(worker);
           await listenWorkerServer(worker, socketPath);
         },
-        stopWorker: (unitName) => {
-          stopped.push(unitName);
+        stopWorker: (containerName) => {
+          stopped.push(containerName);
         },
       });
 
@@ -146,7 +257,7 @@ describe('WorkerSupervisor', () => {
     }
   });
 
-  it('roteia task pai e subtasks pelo supervisor em modo systemd', async () => {
+  it('roteia task pai e subtasks pelo supervisor em modo docker', async () => {
     const workers: WorkerServer[] = [];
     const startedUnits: string[] = [];
     const stoppedUnits: string[] = [];
@@ -156,11 +267,11 @@ describe('WorkerSupervisor', () => {
     const { orquestrator: unusedOrquestrator, dir, cleanup } = buildOrquestrator({ piClient }, { stopWhenWaiting: true });
     unusedOrquestrator.shutdown();
     const supervisor = new WorkerSupervisor(piClient, {
-      mode: 'systemd',
+      mode: 'docker',
       runTimeoutMs: 1000,
       dataDir: dir,
-      startWorker: async (socketPath, unitName) => {
-        startedUnits.push(unitName);
+      startWorker: async (socketPath, containerName) => {
+        startedUnits.push(containerName);
         const worker = createWorkerServer({
           async run(input) {
             const body = input as {
@@ -191,13 +302,13 @@ describe('WorkerSupervisor', () => {
         workers.push(worker);
         await listenWorkerServer(worker, socketPath);
       },
-      stopWorker: (unitName) => {
-        stoppedUnits.push(unitName);
+      stopWorker: (containerName) => {
+        stoppedUnits.push(containerName);
       },
     });
     const orquestrator = new Orquestrator(
       { ...createDeps(dir, piClient), workerSupervisor: supervisor },
-      { isolation: 'systemd' },
+      { isolation: 'docker' },
     );
 
     try {
@@ -217,4 +328,46 @@ describe('WorkerSupervisor', () => {
       cleanup();
     }
   });
+
+  // Smoke real: sobe o worker main.ts num container node:24-slim com a workers dir
+  // + repo montados, responde /health pela UDS montada no host, e para o container.
+  // SKIP limpo quando docker não está disponível (mesmo padrão do skip de infra externa).
+  (dockerAvailable() ? it : it.skip)(
+    'sobe o worker num container docker real e responde /health pela UDS montada',
+    async () => {
+      // dataDir curto em /tmp: caminho de socket UDS tem limite de ~108 chars.
+      const dataDir = mkdtempSync(join(tmpdir(), 'kca-docker-'));
+      const socketPath = workerSocketPath(dataDir, 'task_s', 'run');
+      const containerName = `kca-smoke-${process.pid}`;
+      mkdirSync(dirname(socketPath), { recursive: true });
+      const supervisor = new WorkerSupervisor(createPiClient([]), {
+        mode: 'docker',
+        runTimeoutMs: 5000,
+        dataDir,
+        workerImage: 'node:24-slim',
+      });
+      try {
+        supervisor.startDockerWorker(socketPath, containerName);
+        let health: { status: number; body: string } | undefined;
+        for (let i = 0; i < 40; i++) {
+          try {
+            const res = await unixGet(socketPath, '/health');
+            if (res.body) {
+              health = res;
+              break;
+            }
+          } catch {
+            // socket ainda não pronto — tenta de novo.
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        expect(health?.status).toBe(200);
+        expect(JSON.parse(health?.body ?? '{}')).toEqual({ ok: true });
+      } finally {
+        supervisor.stopDockerWorker(containerName);
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
 });

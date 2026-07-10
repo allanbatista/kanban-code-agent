@@ -156,7 +156,7 @@ const MAX_TASK_RETRIES = readPositiveIntegerEnv('SWARM_MAX_TASK_RETRIES', 3);
 const MAX_TECHNICAL_RETRIES = readPositiveIntegerEnv('SWARM_MAX_TECHNICAL_RETRIES', 2);
 const DEFAULT_RUN_TIMEOUT_MS = readPositiveIntegerEnv('SWARM_RUN_TIMEOUT_MS', 300000);
 const DEFAULT_MAX_CONCURRENT_RUNS = readPositiveIntegerEnv('SWARM_MAX_CONCURRENT_RUNS', 4);
-const DEFAULT_ISOLATION: IsolationMode = process.env.SWARM_ISOLATION === 'systemd' ? 'systemd' : 'inproc';
+const DEFAULT_ISOLATION: IsolationMode = process.env.SWARM_ISOLATION === 'docker' ? 'docker' : 'inproc';
 const RETRY_BASE_DELAY_MS = readPositiveIntegerEnv('SWARM_RETRY_BASE_DELAY_MS', 2000);
 const MAX_TOTAL_TOKENS = readPositiveIntegerEnv('SWARM_MAX_TOTAL_TOKENS', Number.MAX_SAFE_INTEGER);
 const MAX_TOTAL_COST = readPositiveNumberEnv('SWARM_MAX_TOTAL_COST', Number.POSITIVE_INFINITY);
@@ -499,8 +499,6 @@ export class Orquestrator extends EventEmitter {
       mode: options.isolation ?? DEFAULT_ISOLATION,
       runTimeoutMs: this.runTimeoutMs,
       dataDir: deps.sandbox.getBaseDir(),
-      readWritePaths: [deps.sandbox.getBaseDir()],
-      encryptedCredential: process.env.SWARM_GIT_CREDENTIAL_ENCRYPTED,
     });
     this.allowedModels = deps.models ?? ALLOWED_MODELS;
 

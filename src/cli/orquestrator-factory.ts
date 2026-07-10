@@ -17,6 +17,7 @@ import { PiSdkAgentRunner } from './pi-runner.js';
 import { AGENTS } from '../infrastructure/agents/index.js';
 import { SettingsStore } from '../infrastructure/persistence/settings-store.js';
 import { codexHomePath } from '../infrastructure/security/codex-home.js';
+import { WorkerSupervisor } from '../infrastructure/process/worker-supervisor.js';
 
 // ---------------------------------------------------------------------------
 // Agents from unified source
@@ -148,6 +149,22 @@ export class RoutingAgentClient implements AgentClient {
 }
 
 // ---------------------------------------------------------------------------
+// Keys de provider para o worker docker: mesma precedência do pi-runner
+// (settings vence quando não vazia; fallback envvar). Só entram keys presentes.
+// ---------------------------------------------------------------------------
+
+function resolveProviderEnv(config: SwarmConfig, settingsStore: SettingsStore): Record<string, string> {
+  const env: Record<string, string> = {};
+  const providers = new Set([config.models.fast.provider, config.models.balanced.provider, config.models.deep.provider]);
+  for (const provider of providers) {
+    const key = `${provider.toUpperCase()}_API_KEY`;
+    const value = settingsStore.getApiKey(provider) ?? process.env[key];
+    if (value) env[key] = value;
+  }
+  return env;
+}
+
+// ---------------------------------------------------------------------------
 // Orquestrator factory
 // ---------------------------------------------------------------------------
 
@@ -169,6 +186,16 @@ export async function createOrquestrator(
   );
   const agents = createAgents();
 
+  // Supervisor com CODEX_HOME e keys de provider resolvidas (settings->env),
+  // montadas/injetadas no worker docker. Em inproc esses campos ficam ociosos.
+  const workerSupervisor = new WorkerSupervisor(piClient, {
+    mode: resolvedConfig.isolation,
+    runTimeoutMs: resolvedConfig.runTimeoutMs,
+    dataDir,
+    codexHome: codexHomePath(dataDir),
+    workerEnv: resolveProviderEnv(resolvedConfig, settingsStore),
+  });
+
   const deps: OrquestratorDeps = {
     eventStore: new EventStore(sandbox),
     snapshotStore: new SnapshotStore(sandbox),
@@ -176,6 +203,7 @@ export async function createOrquestrator(
     sandbox,
     agents,
     piClient,
+    workerSupervisor,
     models: {
       fast: { ...resolvedConfig.models.fast, description: 'tarefas simples e baixo custo' },
       balanced: { ...resolvedConfig.models.balanced, description: 'uso geral equilibrado' },

@@ -42,11 +42,11 @@ describe('Config data-root convention', () => {
   });
 
   it('defaults isolation to inproc and reads execution env overrides', () => {
-    process.env.SWARM_ISOLATION = 'systemd';
+    process.env.SWARM_ISOLATION = 'docker';
     process.env.SWARM_MAX_CONCURRENT_RUNS = '2';
     const config = loadConfig();
 
-    expect(config.isolation).toBe('systemd');
+    expect(config.isolation).toBe('docker');
     expect(config.maxConcurrentRuns).toBe(2);
   });
 });
