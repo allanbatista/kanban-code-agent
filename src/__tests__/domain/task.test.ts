@@ -99,6 +99,12 @@ describe('Task constructor', () => {
     expect(task.chat[0].runtimeConfig).toEqual({ model: 'fast', effort: 'low' });
   });
 
+  it('preserves runtimeConfig.agent across serialize/fromSerialized', () => {
+    const opts: TaskOptions = { ...defaultOptions, runtimeConfig: { model: 'fast', effort: 'low', agent: 'codex' } };
+    const restored = Task.fromSerialized(new Task(opts, false).serialize());
+    expect(restored.options.runtimeConfig?.agent).toBe('codex');
+  });
+
   it('sets parentId from options', () => {
     const opts: TaskOptions = { ...defaultOptions, parentId: 'task_parent-1' };
     const task = new Task(opts);

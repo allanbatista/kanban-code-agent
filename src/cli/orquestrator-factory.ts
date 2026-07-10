@@ -9,6 +9,7 @@ import type { SwarmConfig } from '../infrastructure/config.js';
 import { loadConfig } from '../infrastructure/config.js';
 import { PiSdkAgentRunner } from './pi-runner.js';
 import { AGENTS } from '../infrastructure/agents/index.js';
+import { SettingsStore } from '../infrastructure/persistence/settings-store.js';
 
 // ---------------------------------------------------------------------------
 // Agents from unified source
@@ -28,8 +29,9 @@ function createAgents(): Agent[] {
 // Pi Client factory
 // ---------------------------------------------------------------------------
 
-function createPiClient(config: SwarmConfig): PiAgentClient {
-  const runner = new PiSdkAgentRunner();
+function createPiClient(config: SwarmConfig, settingsStore: SettingsStore): PiAgentClient {
+  // Resolver de key: settings primeiro, fallback envvar fica no runner.
+  const runner = new PiSdkAgentRunner((provider) => settingsStore.getApiKey(provider));
 
   const allowedModels: Record<string, { provider: string; modelId: string }> = {
     fast: config.models.fast,
@@ -56,7 +58,9 @@ export async function createOrquestrator(
 ): Promise<Orquestrator> {
   const resolvedConfig = config ?? loadConfig();
   const sandbox = new PathSandbox(resolvedConfig.dataDir);
-  const piClient = createPiClient(resolvedConfig);
+  // Store no mesmo base dir que a rota HTTP usa (settings.json é a fonte).
+  const settingsStore = new SettingsStore(sandbox.getBaseDir());
+  const piClient = createPiClient(resolvedConfig, settingsStore);
   const agents = createAgents();
 
   const deps: OrquestratorDeps = {
@@ -77,6 +81,7 @@ export async function createOrquestrator(
     runTimeoutMs: resolvedConfig.runTimeoutMs,
     maxConcurrentRuns: resolvedConfig.maxConcurrentRuns,
     isolation: resolvedConfig.isolation,
+    defaultAgent: settingsStore.getAgent(),
     ...(options ?? {}),
   });
 }

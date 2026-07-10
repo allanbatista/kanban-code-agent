@@ -16,7 +16,7 @@ interface KanbanState {
   fetchAgents: () => Promise<void>;
   createTask: (data: {
     message: string;
-    runtimeConfig?: { model?: string; effort?: string };
+    runtimeConfig?: { model?: string; effort?: string; agent?: string };
     projectIds?: string[];
     execute?: boolean;
   }) => Promise<Task>;
@@ -63,7 +63,7 @@ function errorMessage(err: unknown): string {
 // generates the real title; here we use the message as a placeholder.
 function makeOptimisticTask(
   id: string,
-  data: { message: string; runtimeConfig?: { model?: string; effort?: string }; projectIds?: string[]; execute?: boolean },
+  data: { message: string; runtimeConfig?: { model?: string; effort?: string; agent?: string }; projectIds?: string[]; execute?: boolean },
 ): Task {
   const title = data.message.trim().split('\n')[0]?.slice(0, 80) || 'Nova tarefa';
   return {

@@ -15,6 +15,7 @@ import { registerTaskRoutes } from './routes/tasks.js';
 import { registerAgentRoutes } from './routes/agents.js';
 import { registerProjectRoutes } from './routes/projects.js';
 import { registerSettingsRoutes } from './routes/settings.js';
+import { SettingsStore } from '../persistence/settings-store.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerReportRoutes } from './routes/reports.js';
 import { registerWebSocket } from './ws-server.js';
@@ -127,7 +128,9 @@ export function createServer(
   registerTaskRoutes(fastify, orquestrator);
   registerAgentRoutes(fastify, orquestrator);
   registerProjectRoutes(fastify, orquestrator);
-  registerSettingsRoutes(fastify);
+  // Store file-backed no mesmo settings.json que a factory usa no resolver.
+  const settingsStore = new SettingsStore(orquestrator.sandbox.getBaseDir());
+  registerSettingsRoutes(fastify, { settingsStore, orquestrator });
   registerEventRoutes(fastify, orquestrator);
   registerReportRoutes(fastify, orquestrator);
 

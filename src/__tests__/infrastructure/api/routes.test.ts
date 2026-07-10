@@ -73,6 +73,22 @@ describe('API route integration (F8.T1/T2)', () => {
     expect(del.json().status).toBe('CANCELLED');
   });
 
+  it('accepts a valid runtimeConfig.agent and rejects an unknown one', async () => {
+    const ok = await server.inject({
+      method: 'POST',
+      url: '/api/tasks',
+      payload: { message: 'com agent', runtimeConfig: { agent: 'codex' } },
+    });
+    expect(ok.statusCode).toBe(201);
+
+    const bad = await server.inject({
+      method: 'POST',
+      url: '/api/tasks',
+      payload: { message: 'agent invalido', runtimeConfig: { agent: 'nope' } },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
   it('creates project-backed tasks and rejects unknown project links', async () => {
     const project = await server.inject({
       method: 'POST',
@@ -187,6 +203,58 @@ describe('API route integration (F8.T1/T2)', () => {
     });
 
     expect(res.statusCode).toBe(415);
+  });
+
+  it('GET /api/settings returns defaults with masked keys', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/settings' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.agent).toBe('pi');
+    expect(Array.isArray(body.providers)).toBe(true);
+  });
+
+  it('PATCH /api/settings persists agent + keys (masked), preserves blank key, applies hot', async () => {
+    const patch = await server.inject({
+      method: 'PATCH',
+      url: '/api/settings',
+      payload: {
+        agent: 'codex',
+        providers: [{ name: 'fast', provider: 'deepseek', modelId: 'm', apiKey: 'sk-1234567890abcd', enabled: true }],
+      },
+    });
+    expect(patch.statusCode).toBe(200);
+    const body = patch.json();
+    expect(body.agent).toBe('codex');
+    // Key mascarada na resposta, nunca em claro.
+    expect(body.providers[0].apiKey).not.toContain('567890');
+    expect(body.providers[0].apiKey).toContain('*');
+    // Hot-apply do agent default no orquestrator.
+    expect(orc.resolveRuntimeConfig(orc.createRootTask('t', 'agent-tester')).agent).toBe('codex');
+
+    // Envio em branco preserva a key existente (persistida sem mascarar).
+    const preserve = await server.inject({
+      method: 'PATCH',
+      url: '/api/settings',
+      payload: { providers: [{ name: 'fast', provider: 'deepseek', modelId: 'm', apiKey: '', enabled: true }] },
+    });
+    expect(preserve.statusCode).toBe(200);
+
+    // Restart: novo server no mesmo dataDir enxerga o estado persistido.
+    const sandbox2 = new PathSandbox(dir);
+    const orc2 = new Orquestrator({
+      eventStore: new EventStore(sandbox2),
+      snapshotStore: new SnapshotStore(sandbox2),
+      taskFileStore: new TaskFileStore(sandbox2),
+      sandbox: sandbox2,
+      agents: [agent, manager],
+      piClient: new PiAgentClient(makeRunner([]), '', ['read'], MODELS, 60),
+      models: MODELS,
+    }, { stopWhenWaiting: true });
+    const server2 = buildServer(orc2);
+    const reread = await (await server2.inject({ method: 'GET', url: '/api/settings' })).json();
+    expect(reread.agent).toBe('codex');
+    expect(reread.providers[0].apiKey).toContain('*');
+    await server2.close();
   });
 });
 

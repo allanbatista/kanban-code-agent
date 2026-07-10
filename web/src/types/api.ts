@@ -10,7 +10,7 @@ export interface ApiTask {
   waitingReason?: 'subtasks' | 'human' | 'validation';
   depth: number;
   subtaskIds: string[];
-  runtimeConfig: { model?: string; effort?: string };
+  runtimeConfig: { model?: string; effort?: string; agent?: string };
   metadata: {
     taskId: string;
     title: string;
@@ -110,6 +110,7 @@ export interface ApiProject {
 }
 
 export interface ApiSettings {
+  agent: 'pi' | 'codex';
   appearance: {
     theme: 'light' | 'dark' | 'system';
     language: string;

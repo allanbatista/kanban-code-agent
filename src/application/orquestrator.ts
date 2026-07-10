@@ -17,7 +17,8 @@ import type {
 import type { TaskRun } from '../domain/run.js';
 import type { SwarmEvent } from '../domain/events.js';
 import type { AgentWaitGroup, WaitGroup } from '../domain/wait-group.js';
-import type { SwarmEventType, ModelAlias, EffortLevel, WaitGroupMode } from '../domain/types.js';
+import type { SwarmEventType, ModelAlias, EffortLevel, WaitGroupMode, AgentName } from '../domain/types.js';
+import { AGENT_NAME } from '../domain/types.js';
 import {
   SWARM_EVENT_TYPE,
   TASK_STATUS,
@@ -30,7 +31,8 @@ import { checkStagnation, type RunSignal } from './convergence.js';
 import { createDefaultGovernance, type Governance } from '../domain/governance.js';
 import { Scheduler } from './scheduler.js';
 import { WorkerPool, RunTimeoutError } from './worker-pool.js';
-import { RunCancelledError, type PiAgentClient, type CustomToolSpec } from './pi-client.js';
+import { RunCancelledError, type CustomToolSpec } from './pi-client.js';
+import type { AgentClient } from './agent-client.js';
 import type { EventStore } from '../infrastructure/persistence/event-store.js';
 import type { SnapshotStore } from '../infrastructure/persistence/snapshot-store.js';
 import type { TaskFileStore } from '../infrastructure/persistence/task-file-store.js';
@@ -53,6 +55,7 @@ import { gitCredentialEnvFromRuntime } from '../infrastructure/security/credenti
 
 const DEFAULT_MODEL_ALIAS: ModelAlias = 'fast';
 const DEFAULT_EFFORT: EffortLevel = 'off';
+const DEFAULT_AGENT: AgentName = 'pi';
 
 // Fallback registry when no resolved models are injected (deps.models). Aligned
 // with config.ts defaults (DeepSeek) — no openrouter default anywhere (L13/F0.T2).
@@ -67,7 +70,7 @@ const ALLOWED_EFFORTS: EffortLevel[] = ['off', 'minimal', 'low', 'medium', 'high
 // Model escalation ladder: fast → balanced → deep
 const MODEL_LADDER: ModelAlias[] = ['fast', 'balanced', 'deep'];
 const EFFORT_LADDER: EffortLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
-const DEFAULT_RUNTIME_CONFIG: Required<RuntimeConfig> = { model: DEFAULT_MODEL_ALIAS, effort: DEFAULT_EFFORT };
+const DEFAULT_RUNTIME_CONFIG: Required<RuntimeConfig> = { model: DEFAULT_MODEL_ALIAS, effort: DEFAULT_EFFORT, agent: DEFAULT_AGENT };
 
 // Sentinel agent for tasks that sit in the Inbox awaiting user action (never scheduled).
 export const INBOX_AGENT = 'inbox';
@@ -179,7 +182,7 @@ export interface OrquestratorDeps {
   taskFileStore: TaskFileStore;
   sandbox: PathSandbox;
   agents: Agent[];
-  piClient: PiAgentClient;
+  piClient: AgentClient;
   gitRepo?: GitRepo;
   workerSupervisor?: WorkerSupervisor;
   models?: Record<ModelAlias, { provider: string; modelId: string; description: string }>;
@@ -191,6 +194,8 @@ export interface OrquestratorOptions {
   runTimeoutMs?: number;
   maxConcurrentRuns?: number;
   isolation?: IsolationMode;
+  /** Agent default global (alimentado pelos settings; F0 só carrega o campo). */
+  defaultAgent?: AgentName;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +250,10 @@ function isEffortLevel(value: unknown): value is EffortLevel {
   return typeof value === 'string' && ALLOWED_EFFORTS.includes(value as EffortLevel);
 }
 
+function isAgentName(value: unknown): value is AgentName {
+  return typeof value === 'string' && Object.values(AGENT_NAME).includes(value as AgentName);
+}
+
 function normalizeRuntimeConfig(
   config?: RuntimeConfig,
   models?: Record<ModelAlias, { provider: string; modelId: string }>,
@@ -258,6 +267,10 @@ function normalizeRuntimeConfig(
   if (config.effort !== undefined) {
     if (!isEffortLevel(config.effort)) throw new Error(`Effort invalido: ${config.effort}`);
     normalized.effort = config.effort;
+  }
+  if (config.agent !== undefined) {
+    if (!isAgentName(config.agent)) throw new Error(`Agent invalido: ${config.agent}`);
+    normalized.agent = config.agent;
   }
   return Object.keys(normalized).length ? normalized : undefined;
 }
@@ -464,7 +477,7 @@ export class Orquestrator extends EventEmitter {
   readonly taskFileStore: TaskFileStore;
   readonly projectFileStore: ProjectFileStore;
   readonly sandbox: PathSandbox;
-  readonly piClient: PiAgentClient;
+  readonly piClient: AgentClient;
   readonly gitRepo: GitRepo;
   private readonly allowedModels: Record<ModelAlias, { provider: string; modelId: string; description: string }>;
 
@@ -1653,7 +1666,18 @@ export class Orquestrator extends EventEmitter {
   }
 
   resolveRuntimeConfig(task: Task, agent?: Agent): Required<RuntimeConfig> {
-    return mergeRuntimeConfig(agent?.runtimeConfig, task.options.runtimeConfig);
+    // Agent default vem dos settings (options.defaultAgent), sobrescrito por
+    // config do agente e por override da task.
+    return mergeRuntimeConfig(
+      { agent: this.options.defaultAgent },
+      agent?.runtimeConfig,
+      task.options.runtimeConfig,
+    );
+  }
+
+  /** Aplica o agent default global em runtime (settings PATCH). */
+  setDefaultAgent(agent: AgentName): void {
+    this.options.defaultAgent = agent;
   }
 
   // -----------------------------------------------------------------------
@@ -1780,6 +1804,7 @@ export class Orquestrator extends EventEmitter {
             message: { type: 'string', description: 'Instrucao objetiva e auto-contida da subtask.' },
             model: { type: 'string', enum: Object.keys(this.allowedModels) },
             effort: { type: 'string', enum: ALLOWED_EFFORTS },
+            agent: { type: 'string', enum: Object.values(AGENT_NAME) },
           },
           required: ['assignedTo', 'title', 'message'],
           additionalProperties: false,
@@ -1791,6 +1816,8 @@ export class Orquestrator extends EventEmitter {
           const runtimeConfig = normalizeRuntimeConfig({
             model: params.model === undefined ? undefined : (params.model as ModelAlias),
             effort: params.effort === undefined ? undefined : (params.effort as EffortLevel),
+            // Subtask herda o agent do pai, salvo override explicito.
+            agent: (params.agent as AgentName | undefined) ?? task.options.runtimeConfig?.agent,
           }, this.allowedModels);
           // Idempotent: re-issuing the same subtask (replay/retry) reuses it.
           const existing = this.getSubtasks(task).find(

@@ -22,7 +22,7 @@ function makeBaseMetadata(overrides: Partial<TaskMetadata> = {}): TaskMetadata {
     attachmentsDir: '.swarm/tasks/task_test-1/attachments',
     artifactsDir: '.swarm/tasks/task_test-1/artifacts',
     artifactsFile: '.swarm/tasks/task_test-1/artifacts.yaml',
-    runtimeConfig: { model: 'fast', effort: 'off' },
+    runtimeConfig: { model: 'fast', effort: 'off', agent: 'pi' },
     allowedModels: {
       fast: { provider: 'openrouter', modelId: 'test-model', description: 'r' },
       balanced: { provider: 'openrouter', modelId: 'test-model-2', description: 'balanced' },

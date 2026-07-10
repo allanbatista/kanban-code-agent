@@ -6,7 +6,8 @@ import type { Agent } from '../../domain/agent.js';
 import type { Task } from '../../domain/task.js';
 import type { SwarmEvent } from '../../domain/events.js';
 import type { Orquestrator } from '../../application/orquestrator.js';
-import { RunCancelledError, type AgentRunConfig, type AgentRunResult, type CustomToolSpec, type PiAgentClient } from '../../application/pi-client.js';
+import { RunCancelledError, type AgentRunConfig, type AgentRunResult, type CustomToolSpec } from '../../application/pi-client.js';
+import type { AgentClient } from '../../application/agent-client.js';
 import type {
   ScopeSpecItem,
   ProgressLogEntry,
@@ -53,7 +54,7 @@ export class WorkerSupervisor {
   private readonly stopWorkerImpl?: (unitName: string) => void | Promise<void>;
 
   constructor(
-    private readonly piClient: PiAgentClient,
+    private readonly piClient: AgentClient,
     private readonly options: WorkerSupervisorOptions,
   ) {
     this.mode = options.mode ?? 'inproc';

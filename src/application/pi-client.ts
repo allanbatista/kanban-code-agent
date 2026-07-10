@@ -4,6 +4,7 @@ import type { SwarmEvent } from '../domain/events.js';
 import type { Orquestrator } from './orquestrator.js';
 import { buildPrompt } from './prompt-builder.js';
 import type { ScopeSpecItem, ProgressLogEntry, EnvResume } from '../infrastructure/persistence/task-file-store.js';
+import type { AgentClient } from './agent-client.js';
 
 /**
  * Minimal interface for what we need from Pi SDK.
@@ -63,7 +64,7 @@ export interface AgentRunner {
  * `buildPrompt` can access subtask metadata. The prompt building itself
  * is pure — all chat mutation happens in `applyDecision` after the run completes.
  */
-export class PiAgentClient {
+export class PiAgentClient implements AgentClient {
   constructor(
     private readonly runner: AgentRunner,
     private readonly systemPromptBase: string,

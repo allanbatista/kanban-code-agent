@@ -270,6 +270,28 @@ describe('Orquestrator', () => {
       expect(parent.subtaskIds).toContain(subtask.taskId);
     });
 
+    it('subtask inherits parent agent via create_subtask, override respected', async () => {
+      const orc = new Orquestrator(createDeps(dir, createPiClient([])));
+      const parent = orc.createRootTask('Parent', 'agent-tester', { agent: 'codex' });
+      const create = orc.buildAgentTools(parent, true).find((tool) => tool.name === 'create_subtask');
+      if (!create) throw new Error('parent sem create_subtask');
+
+      const inherited = JSON.parse(await create.execute({ assignedTo: 'agent-tester', title: 'Herda', message: 'msg' }));
+      expect(orc.tasks.get(inherited.taskId)?.options.runtimeConfig?.agent).toBe('codex');
+
+      const overridden = JSON.parse(await create.execute({ assignedTo: 'agent-tester', title: 'Override', message: 'msg2', agent: 'pi' }));
+      expect(orc.tasks.get(overridden.taskId)?.options.runtimeConfig?.agent).toBe('pi');
+    });
+
+    it('resolveRuntimeConfig applies defaultAgent option, task overrides', () => {
+      const orc = new Orquestrator(createDeps(dir, createPiClient([])), { defaultAgent: 'codex' });
+      const base = orc.createRootTask('Base', 'agent-tester');
+      expect(orc.resolveRuntimeConfig(base).agent).toBe('codex');
+
+      const overridden = orc.createRootTask('Override', 'agent-tester', { agent: 'pi' });
+      expect(orc.resolveRuntimeConfig(overridden).agent).toBe('pi');
+    });
+
     it('inherits projectIds from parent', () => {
       const client = createPiClient([]);
       const deps = createDeps(dir, client);

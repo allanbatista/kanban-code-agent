@@ -55,6 +55,19 @@ describe('CreateTaskDialog (T06)', () => {
     expect(screen.getByText('Mensagem')).toBeDefined();
     expect(screen.getByText('Model')).toBeDefined();
     expect(screen.getByText('Effort')).toBeDefined();
+    expect(screen.getByText('Agent')).toBeDefined();
+  });
+
+  it('sends default agent in runtimeConfig', async () => {
+    mockCreateTask.mockResolvedValueOnce({ id: 't1' });
+    render(<CreateTaskDialog open={true} onOpenChange={vi.fn()} />);
+    fireEvent.change(screen.getByPlaceholderText('Descreva a tarefa...'), { target: { value: 'fazer X' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Criar' }));
+    await waitFor(() =>
+      expect(mockCreateTask).toHaveBeenCalledWith(
+        expect.objectContaining({ runtimeConfig: expect.objectContaining({ agent: 'pi' }) }),
+      ),
+    );
   });
 
   it('renders Create, Create-and-run and Cancel buttons', () => {

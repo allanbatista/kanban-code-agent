@@ -53,7 +53,7 @@ export const api = {
 
   createTask(data: {
     message: string;
-    runtimeConfig?: { model?: string; effort?: string };
+    runtimeConfig?: { model?: string; effort?: string; agent?: string };
     attachmentPaths?: string[];
     projectIds?: string[];
     execute?: boolean;

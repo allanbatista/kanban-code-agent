@@ -9,6 +9,7 @@ import { TASK_STATUS } from '../../../domain/types.js';
 const runtimeConfigSchema = z.object({
   model: z.enum(['fast', 'balanced', 'deep']).optional(),
   effort: z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
+  agent: z.enum(['pi', 'codex']).optional(),
 });
 
 const createTaskBody = z.object({

@@ -23,6 +23,11 @@ const MODEL_ALIASES = [
   { value: 'deep', label: 'Deep' },
 ];
 
+const AGENTS = [
+  { value: 'pi', label: 'Pi' },
+  { value: 'codex', label: 'Codex' },
+];
+
 interface AgentConfigDialogProps {
   agent: Agent;
   open: boolean;
@@ -34,6 +39,7 @@ export function AgentConfigDialog({ agent, open, onOpenChange }: AgentConfigDial
   const [provider, setProvider] = useState('');
   const [model, setModel] = useState('balanced');
   const [effort, setEffort] = useState('medium');
+  const [agentName, setAgentName] = useState('pi');
   const [systemPrompt, setSystemPrompt] = useState('');
 
   useEffect(() => { fetchSettings(); }, [fetchSettings]);
@@ -92,6 +98,18 @@ export function AgentConfigDialog({ agent, open, onOpenChange }: AgentConfigDial
               <SelectContent>
                 {EFFORT_LEVELS.map(e => (
                   <SelectItem key={e.value} value={e.value}>{e.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex-1">
+            <Select value={agentName} onValueChange={setAgentName}>
+              <SelectTrigger>
+                <SelectValue placeholder="Agent" />
+              </SelectTrigger>
+              <SelectContent>
+                {AGENTS.map(a => (
+                  <SelectItem key={a.value} value={a.value}>{a.label}</SelectItem>
                 ))}
               </SelectContent>
             </Select>

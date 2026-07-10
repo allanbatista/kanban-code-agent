@@ -60,6 +60,10 @@ export class PiSdkAgentRunner implements AgentRunner {
   private settings?: any;
   private typeBox?: any;
 
+  // Resolve a key do provider (ex.: 'deepseek') a partir dos settings; injetado
+  // pela factory. Sem resolver (ou sem key nos settings), cai no envvar.
+  constructor(private readonly apiKeyResolver?: (provider: string) => string | undefined) {}
+
   // Loads TypeBox from the Pi SDK's own dependency tree (it is not a direct dep
   // here). The SDK is ESM-only, so resolve its module URL and walk up to find
   // the sibling `typebox` package that pnpm installed alongside it.
@@ -97,11 +101,12 @@ export class PiSdkAgentRunner implements AgentRunner {
       const auth = piSdk.AuthStorage.inMemory();
       this.registry = piSdk.ModelRegistry.inMemory(auth);
       this.settings = piSdk.SettingsManager.inMemory({});
-      // Set API key for provider from env
+      // Key do provider: settings vence quando não vazia, senão fallback envvar.
       const provider = modelConfig.provider;
       const envKey = provider.toUpperCase() + '_API_KEY';
-      if (process.env[envKey]) {
-        auth.setRuntimeApiKey(provider, process.env[envKey]);
+      const apiKey = this.apiKeyResolver?.(provider) ?? process.env[envKey];
+      if (apiKey) {
+        auth.setRuntimeApiKey(provider, apiKey);
       }
       await this.registry.refresh();
     }

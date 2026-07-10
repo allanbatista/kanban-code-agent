@@ -65,6 +65,14 @@ export const EFFORT_LEVEL = {
 
 export type EffortLevel = typeof EFFORT_LEVEL[keyof typeof EFFORT_LEVEL];
 
+// --- Agent Name ---
+export const AGENT_NAME = {
+  pi: 'pi',
+  codex: 'codex',
+} as const;
+
+export type AgentName = typeof AGENT_NAME[keyof typeof AGENT_NAME];
+
 // --- Task Chat Role ---
 export const TASK_CHAT_ROLE = {
   system: 'system',

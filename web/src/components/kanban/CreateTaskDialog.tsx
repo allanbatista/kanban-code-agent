@@ -15,6 +15,7 @@ export function CreateTaskDialog({ open, onOpenChange }: CreateTaskDialogProps) 
   const [message, setMessage] = useState('');
   const [model, setModel] = useState('balanced');
   const [effort, setEffort] = useState('medium');
+  const [agent, setAgent] = useState('pi');
   const [projectIds, setProjectIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const { createTask } = useKanbanStore();
@@ -34,7 +35,7 @@ export function CreateTaskDialog({ open, onOpenChange }: CreateTaskDialogProps) 
     setMessage('');
     setProjectIds([]);
     try {
-      await createTask({ message: text, runtimeConfig: { model, effort }, projectIds: selectedProjectIds, execute });
+      await createTask({ message: text, runtimeConfig: { model, effort, agent }, projectIds: selectedProjectIds, execute });
     } catch {
       // Rollback + error are surfaced by the store; reopen so the user can retry.
       setMessage(text);
@@ -98,6 +99,18 @@ export function CreateTaskDialog({ open, onOpenChange }: CreateTaskDialogProps) 
                 <SelectItem value="medium">Medium</SelectItem>
                 <SelectItem value="high">High</SelectItem>
                 <SelectItem value="xhigh">X-High</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <Label>Agent</Label>
+            <Select value={agent} onValueChange={setAgent}>
+              <SelectTrigger className="mt-1">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="pi">Pi</SelectItem>
+                <SelectItem value="codex">Codex</SelectItem>
               </SelectContent>
             </Select>
           </div>

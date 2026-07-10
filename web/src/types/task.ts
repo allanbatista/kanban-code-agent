@@ -74,7 +74,7 @@ export interface Task {
   depth: number;
   subtaskIds: string[];
   runId?: string;
-  runtimeConfig: { model: string; effort: string };
+  runtimeConfig: { model: string; effort: string; agent?: string };
   chat: ChatMessage[];
   artifacts: Artifact[];
   attachments: Attachment[];

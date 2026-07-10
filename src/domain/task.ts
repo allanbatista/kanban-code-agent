@@ -1,4 +1,4 @@
-import type { EffortLevel, ModelAlias, TaskChatRole, TaskMessageType, TaskStatus, WaitGroupMode } from './types';
+import type { AgentName, EffortLevel, ModelAlias, TaskChatRole, TaskMessageType, TaskStatus, WaitGroupMode } from './types';
 import type { TaskRun } from './run';
 import type { AgentWaitGroup, WaitGroup } from './wait-group';
 import { canTransition } from './state-machine.js';
@@ -9,6 +9,7 @@ export type TaskWaitingReason = 'subtasks' | 'human' | 'validation';
 export interface RuntimeConfig {
   model?: ModelAlias;
   effort?: EffortLevel;
+  agent?: AgentName;
 }
 
 // --- Attachment Ref ---

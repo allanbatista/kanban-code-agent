@@ -1,77 +1,12 @@
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
-import type { ModelAlias, EffortLevel } from '../../../domain/types.js';
-import { MODEL_ALIAS, EFFORT_LEVEL } from '../../../domain/types.js';
-
-// --- Settings Store ---
-
-interface ProviderConfig {
-  name: string;
-  provider: string;
-  modelId: string;
-  apiKey: string;
-  enabled: boolean;
-}
-
-interface Settings {
-  appearance: {
-    theme: 'light' | 'dark' | 'system';
-    language: string;
-  };
-  providers: ProviderConfig[];
-  advanced: {
-    runTimeoutMs: number;
-    maxTaskDepth: number;
-    maxSubtasksPerTask: number;
-    maxRetries: number;
-    maxTechnicalRetries: number;
-    dataDir: string;
-  };
-}
-
-const defaultSettings: Settings = {
-  appearance: {
-    theme: 'system',
-    language: 'pt-BR',
-  },
-  providers: [
-    {
-      name: 'fast',
-      provider: 'deepseek',
-      modelId: 'deepseek-v4-flash',
-      apiKey: '',
-      enabled: true,
-    },
-    {
-      name: 'balanced',
-      provider: 'deepseek',
-      modelId: 'deepseek-v4-flash',
-      apiKey: '',
-      enabled: true,
-    },
-    {
-      name: 'deep',
-      provider: 'deepseek',
-      modelId: 'deepseek-v4-pro',
-      apiKey: '',
-      enabled: true,
-    },
-  ],
-  advanced: {
-    runTimeoutMs: 300000,
-    maxTaskDepth: 5,
-    maxSubtasksPerTask: 10,
-    maxRetries: 3,
-    maxTechnicalRetries: 2,
-    dataDir: '~/.kca',
-  },
-};
-
-const currentSettings: Settings = JSON.parse(JSON.stringify(defaultSettings));
+import type { Orquestrator } from '../../../application/orquestrator.js';
+import type { Settings, SettingsStore } from '../../persistence/settings-store.js';
 
 // --- Zod Schemas ---
 
 const themeEnum = z.enum(['light', 'dark', 'system']);
+const agentEnum = z.enum(['pi', 'codex']);
 
 const providerConfigSchema = z.object({
   name: z.string().min(1),
@@ -82,6 +17,7 @@ const providerConfigSchema = z.object({
 });
 
 const updateSettingsBody = z.object({
+  agent: agentEnum.optional(),
   appearance: z.object({
     theme: themeEnum.optional(),
     language: z.string().min(1).max(10).optional(),
@@ -107,54 +43,59 @@ function maskApiKey(key: string): string {
 
 function toSettingsResponse(settings: Settings) {
   return {
+    agent: settings.agent,
     appearance: { ...settings.appearance },
-    providers: settings.providers.map((p) => ({
-      ...p,
-      apiKey: maskApiKey(p.apiKey),
-    })),
+    providers: settings.providers.map((p) => ({ ...p, apiKey: maskApiKey(p.apiKey) })),
     advanced: { ...settings.advanced },
   };
 }
 
 // --- Route Registration ---
 
-export function registerSettingsRoutes(fastify: FastifyInstance): void {
-  // GET /api/settings — get all settings
+export interface SettingsRouteDeps {
+  settingsStore: SettingsStore;
+  orquestrator: Orquestrator;
+}
+
+export function registerSettingsRoutes(fastify: FastifyInstance, deps: SettingsRouteDeps): void {
+  const { settingsStore, orquestrator } = deps;
+
+  // GET /api/settings — settings persistidos (keys mascaradas)
   fastify.get('/api/settings', async () => {
-    return toSettingsResponse(currentSettings);
+    return toSettingsResponse(settingsStore.load());
   });
 
-  // PATCH /api/settings — update settings
+  // PATCH /api/settings — valida, persiste e aplica hot (agent default + keys)
   fastify.patch('/api/settings', async (request, reply) => {
     const body = updateSettingsBody.safeParse(request.body);
     if (!body.success) {
       return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
     }
 
+    const settings = settingsStore.load();
+
+    if (body.data.agent) settings.agent = body.data.agent;
+
     if (body.data.appearance) {
-      currentSettings.appearance = {
-        ...currentSettings.appearance,
-        ...body.data.appearance,
-      };
+      settings.appearance = { ...settings.appearance, ...body.data.appearance };
     }
 
     if (body.data.providers) {
-      currentSettings.providers = body.data.providers.map((p) => {
-        const existing = currentSettings.providers.find((ep) => ep.name === p.name);
-        return {
-          ...p,
-          apiKey: p.apiKey || existing?.apiKey || '',
-        };
+      settings.providers = body.data.providers.map((p) => {
+        const existing = settings.providers.find((ep) => ep.name === p.name);
+        // Preserva a key existente quando o cliente envia em branco (mascarada).
+        return { ...p, apiKey: p.apiKey || existing?.apiKey || '' };
       });
     }
 
     if (body.data.advanced) {
-      currentSettings.advanced = {
-        ...currentSettings.advanced,
-        ...body.data.advanced,
-      };
+      settings.advanced = { ...settings.advanced, ...body.data.advanced };
     }
 
-    return toSettingsResponse(currentSettings);
+    settingsStore.save(settings);
+    // Aplica o agent default no runtime; keys são lidas do store pelo resolver.
+    orquestrator.setDefaultAgent(settings.agent);
+
+    return toSettingsResponse(settings);
   });
 }
