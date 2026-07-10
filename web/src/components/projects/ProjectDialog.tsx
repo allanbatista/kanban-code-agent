@@ -21,6 +21,7 @@ export function ProjectDialog({ open, onOpenChange, editProject, onClose }: Proj
   const [description, setDescription] = useState('');
   const [gitUrl, setGitUrl] = useState('');
   const [defaultBranch, setDefaultBranch] = useState('main');
+  const [devcontainerPath, setDevcontainerPath] = useState('');
   const [autoMerge, setAutoMerge] = useState(false);
   const [saving, setSaving] = useState(false);
   const { createProject, updateProject } = useProjectsStore();
@@ -32,6 +33,7 @@ export function ProjectDialog({ open, onOpenChange, editProject, onClose }: Proj
       setDescription(editProject.description);
       setGitUrl(editProject.gitUrl ?? '');
       setDefaultBranch(editProject.defaultBranch);
+      setDevcontainerPath(editProject.devcontainerPath ?? '');
       setAutoMerge(editProject.autoMerge);
     } else {
       setName('');
@@ -39,6 +41,7 @@ export function ProjectDialog({ open, onOpenChange, editProject, onClose }: Proj
       setDescription('');
       setGitUrl('');
       setDefaultBranch('main');
+      setDevcontainerPath('');
       setAutoMerge(false);
     }
   }, [editProject, open]);
@@ -54,6 +57,7 @@ export function ProjectDialog({ open, onOpenChange, editProject, onClose }: Proj
           gitUrl: gitUrl.trim(),
           defaultBranch: defaultBranch.trim() || 'main',
           autoMerge,
+          devcontainerPath: devcontainerPath.trim() || null,
         });
       } else {
         await createProject({
@@ -63,6 +67,7 @@ export function ProjectDialog({ open, onOpenChange, editProject, onClose }: Proj
           gitUrl: gitUrl.trim() || undefined,
           defaultBranch: defaultBranch.trim() || 'main',
           autoMerge,
+          devcontainerPath: devcontainerPath.trim() || undefined,
         });
       }
       onClose();
@@ -97,6 +102,10 @@ export function ProjectDialog({ open, onOpenChange, editProject, onClose }: Proj
           <div className="md:col-span-2">
             <Label htmlFor="git-url">Git URL</Label>
             <Input id="git-url" value={gitUrl} onChange={e => setGitUrl(e.target.value)} placeholder="https://github.com/org/repo.git" className="mt-1" />
+          </div>
+          <div className="md:col-span-2">
+            <Label htmlFor="devcontainer">Devcontainer</Label>
+            <Input id="devcontainer" value={devcontainerPath} onChange={e => setDevcontainerPath(e.target.value)} placeholder=".devcontainer/devcontainer.json" className="mt-1" />
           </div>
           <div className="md:col-span-2">
             <Label htmlFor="desc">Descrição</Label>

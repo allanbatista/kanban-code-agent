@@ -38,6 +38,7 @@
     "vitest": "^3.0.0"
   },
   "dependencies": {
+    "@devcontainers/cli": "^0.87.0",
     "@earendil-works/pi-coding-agent": "^0.79.10",
     "@fastify/cors": "^11.2.0",
     "@fastify/static": "^9.1.3",

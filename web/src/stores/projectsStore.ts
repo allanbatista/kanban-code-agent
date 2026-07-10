@@ -16,6 +16,7 @@ interface ProjectsState {
     gitUrl?: string;
     defaultBranch?: string;
     autoMerge?: boolean;
+    devcontainerPath?: string;
   }) => Promise<Project>;
   updateProject: (id: string, data: {
     name?: string;
@@ -23,6 +24,7 @@ interface ProjectsState {
     gitUrl?: string;
     defaultBranch?: string;
     autoMerge?: boolean;
+    devcontainerPath?: string | null;
   }) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
 

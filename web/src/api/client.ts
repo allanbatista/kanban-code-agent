@@ -159,6 +159,7 @@ export const api = {
     gitUrl?: string;
     defaultBranch?: string;
     autoMerge?: boolean;
+    devcontainerPath?: string;
   }): Promise<ApiProject> {
     return request<ApiProject>('/api/projects', {
       method: 'POST',
@@ -172,7 +173,7 @@ export const api = {
 
   updateProject(
     id: string,
-    data: { name?: string; description?: string; gitUrl?: string; defaultBranch?: string; autoMerge?: boolean },
+    data: { name?: string; description?: string; gitUrl?: string; defaultBranch?: string; autoMerge?: boolean; devcontainerPath?: string | null },
   ): Promise<ApiProject> {
     return request<ApiProject>(`/api/projects/${encodeURIComponent(id)}`, {
       method: 'PATCH',

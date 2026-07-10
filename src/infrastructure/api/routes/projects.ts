@@ -11,6 +11,7 @@ const createProjectBody = z.object({
   gitUrl: z.string().url().optional(),
   defaultBranch: z.string().min(1).max(128).optional(),
   autoMerge: z.boolean().optional(),
+  devcontainerPath: z.string().max(512).optional(),
 });
 
 const updateProjectBody = z.object({
@@ -19,6 +20,7 @@ const updateProjectBody = z.object({
   gitUrl: z.string().url().optional().or(z.literal('')),
   defaultBranch: z.string().min(1).max(128).optional(),
   autoMerge: z.boolean().optional(),
+  devcontainerPath: z.string().max(512).nullable().optional(),
 });
 
 const projectParams = z.object({
@@ -52,6 +54,7 @@ export function registerProjectRoutes(fastify: FastifyInstance, orquestrator: Or
         gitUrl: body.data.gitUrl,
         defaultBranch: body.data.defaultBranch,
         autoMerge: body.data.autoMerge,
+        devcontainerPath: body.data.devcontainerPath,
       });
 
       reply.status(201);
@@ -91,13 +94,22 @@ export function registerProjectRoutes(fastify: FastifyInstance, orquestrator: Or
       return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
     }
 
-    const project = orquestrator.updateProject(params.data.id, {
-      name: body.data.name,
-      description: body.data.description,
-      gitUrl: body.data.gitUrl,
-      defaultBranch: body.data.defaultBranch,
-      autoMerge: body.data.autoMerge,
-    });
+    let project;
+    try {
+      project = orquestrator.updateProject(params.data.id, {
+        name: body.data.name,
+        description: body.data.description,
+        gitUrl: body.data.gitUrl,
+        defaultBranch: body.data.defaultBranch,
+        autoMerge: body.data.autoMerge,
+        devcontainerPath: body.data.devcontainerPath,
+      });
+    } catch (error) {
+      return reply.status(400).send({
+        error: 'Failed to update project',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
 
     if (!project) {
       return reply.status(404).send({ error: 'Project not found' });

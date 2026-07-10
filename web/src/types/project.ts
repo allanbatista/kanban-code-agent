@@ -6,6 +6,7 @@ export interface Project {
   gitUrl?: string;
   defaultBranch: string;
   autoMerge: boolean;
+  devcontainerPath?: string;
   location: string;
   taskCount: number;
   runningCount: number;

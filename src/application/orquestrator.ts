@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { existsSync, lstatSync } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import type { Agent } from '../domain/agent.js';
 import type {
   Task,
@@ -46,6 +46,7 @@ import {
   type UpdateProjectInput,
 } from '../infrastructure/persistence/project-file-store.js';
 import { GitConflictError, GitRepo } from '../infrastructure/git/git-repo.js';
+import { resolveDevcontainerImage } from '../infrastructure/containers/devcontainer.js';
 import { WorkerSupervisor, type IsolationMode } from '../infrastructure/process/worker-supervisor.js';
 import { gitCredentialEnvFromRuntime } from '../infrastructure/security/credentials.js';
 
@@ -1235,6 +1236,28 @@ export class Orquestrator extends EventEmitter {
     }
   }
 
+  /**
+   * Imagem do run: constrói (ou reaproveita do cache) a imagem do devcontainer
+   * do projeto (F3.2). Só em modo docker; sem devcontainer usa a workerImage
+   * padrão do supervisor (retorna undefined). Roda síncrono dentro do run slot,
+   * após os worktrees já existirem. ponytail: build síncrono grande pode comer o
+   * timeout do run; upgrade = build assíncrono com task em QUEUED, não feito aqui.
+   */
+  private resolveRunImage(task: Task): string | undefined {
+    if (this.workerSupervisor.isolationMode !== 'docker') return undefined;
+    for (const projectId of task.projectIds) {
+      const project = this.projects.get(projectId);
+      if (!project?.devcontainerPath) continue;
+      // ponytail: primeiro projeto com devcontainer vence; multi-devcontainer por
+      // task fica para depois (um container por run neste corte).
+      const worktreeDir = this.taskFileStore.getTaskProjectWorkspaceDir(task.taskId, project.slug);
+      const configPath = join(worktreeDir, project.devcontainerPath);
+      if (!existsSync(configPath)) continue;
+      return resolveDevcontainerImage({ workspaceFolder: worktreeDir, configPath, slug: project.slug });
+    }
+    return undefined;
+  }
+
   private commitProjectWorktrees(task: Task, runId: string): void {
     for (const projectId of task.projectIds) {
       const project = this.projects.get(projectId);
@@ -1482,13 +1505,16 @@ export class Orquestrator extends EventEmitter {
     try {
       this.taskFileStore.ensureTaskDir(task.taskId);
       this.prepareProjectWorktrees(task, run.runId);
+      // Imagem do run: devcontainer do projeto (F3.2) construído/cacheado após os
+      // worktrees existirem; undefined => workerImage padrão do supervisor.
+      const runImage = this.resolveRunImage(task);
       this.ensureScopeSpec(task);
       const continuity = {
         scopeSpec: this.taskFileStore.loadScopeSpec(task.taskId),
         progressLog: this.taskFileStore.loadProgressLog(task.taskId),
         envResume: this.taskFileStore.loadEnvResume(task.taskId),
       };
-      const result = await this.workerSupervisor.runAgent(agent, task, this, triggerEvents, controller.signal, continuity);
+      const result = await this.workerSupervisor.runAgent(agent, task, this, triggerEvents, controller.signal, continuity, runImage);
       // If the run was cancelled or the task was moved/superseded mid-flight,
       // discard the result so no phantom output is applied after a pause.
       if (controller.signal.aborted || task.activeRunId !== run.runId || task.status !== TASK_STATUS.RUNNING) {
@@ -1515,6 +1541,7 @@ export class Orquestrator extends EventEmitter {
           error.message,
           error.rawOutput,
           controller.signal,
+          runImage,
         );
         if (controller.signal.aborted || task.activeRunId !== run.runId || task.status !== TASK_STATUS.RUNNING) {
           return;

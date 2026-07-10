@@ -14,6 +14,8 @@ export interface ProjectData {
   gitUrl?: string;
   defaultBranch: string;
   autoMerge: boolean;
+  // Caminho relativo do devcontainer.json dentro do repo do projeto (ex.: ".devcontainer/devcontainer.json").
+  devcontainerPath?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -25,6 +27,7 @@ export interface CreateProjectInput {
   gitUrl?: string;
   defaultBranch?: string;
   autoMerge?: boolean;
+  devcontainerPath?: string;
 }
 
 export interface UpdateProjectInput {
@@ -33,6 +36,7 @@ export interface UpdateProjectInput {
   gitUrl?: string;
   defaultBranch?: string;
   autoMerge?: boolean;
+  devcontainerPath?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +69,7 @@ export class ProjectFileStore {
       gitUrl: normalizeOptionalString(input.gitUrl),
       defaultBranch: normalizeRequiredString(input.defaultBranch, 'main'),
       autoMerge: input.autoMerge ?? false,
+      devcontainerPath: normalizeDevcontainerPath(input.devcontainerPath),
       createdAt: now,
       updatedAt: now,
     };
@@ -95,6 +100,10 @@ export class ProjectFileStore {
       gitUrl: 'gitUrl' in input ? normalizeOptionalString(input.gitUrl) : existing.gitUrl,
       defaultBranch: normalizeRequiredString(input.defaultBranch, existing.defaultBranch),
       autoMerge: input.autoMerge ?? existing.autoMerge,
+      devcontainerPath:
+        'devcontainerPath' in input
+          ? normalizeDevcontainerPath(input.devcontainerPath ?? undefined)
+          : existing.devcontainerPath,
       updatedAt: new Date().toISOString(),
     };
 
@@ -194,6 +203,7 @@ export class ProjectFileStore {
       gitUrl: normalizeOptionalString(raw.gitUrl),
       defaultBranch: normalizeRequiredString(raw.defaultBranch, 'main'),
       autoMerge: raw.autoMerge ?? false,
+      devcontainerPath: normalizeDevcontainerPath(raw.devcontainerPath),
       createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
       updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),
     };
@@ -246,4 +256,19 @@ function normalizeOptionalString(value: string | undefined): string | undefined 
 
 function normalizeRequiredString(value: string | undefined, fallback: string): string {
   return normalizeOptionalString(value) ?? fallback;
+}
+
+// Valida o devcontainerPath como caminho relativo dentro do repo do projeto,
+// rejeitando traversal (mesmo espirito da rejeicao de workspace no task-file-store).
+function normalizeDevcontainerPath(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  const normalized = trimmed.replace(/\\/g, '/');
+  if (normalized.startsWith('/') || /^[a-zA-Z]:/.test(normalized)) {
+    throw new Error(`Invalid devcontainerPath (must be relative): ${trimmed}`);
+  }
+  if (normalized.split('/').some((seg) => seg === '..')) {
+    throw new Error(`Invalid devcontainerPath (path traversal): ${trimmed}`);
+  }
+  return normalized;
 }

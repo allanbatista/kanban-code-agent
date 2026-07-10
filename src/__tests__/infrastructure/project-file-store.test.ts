@@ -120,6 +120,34 @@ describe('ProjectFileStore', () => {
     expect(second.slug).toBe('my-app-2');
   });
 
+  it('round-trips devcontainerPath and clears it on update', () => {
+    const sandbox = new PathSandbox(dir);
+    const store = new ProjectFileStore(sandbox);
+    const project = store.createProject({
+      name: 'Dev',
+      devcontainerPath: '.devcontainer/devcontainer.json',
+    });
+    expect(project.devcontainerPath).toBe('.devcontainer/devcontainer.json');
+
+    // Sobrevive a uma nova instancia (filesystem)
+    const store2 = new ProjectFileStore(sandbox);
+    expect(store2.getProject(project.slug)!.devcontainerPath).toBe('.devcontainer/devcontainer.json');
+
+    // Update sem o campo preserva; null/'' limpa
+    const kept = store2.updateProject(project.slug, { name: 'Dev2' });
+    expect(kept!.devcontainerPath).toBe('.devcontainer/devcontainer.json');
+    const cleared = store2.updateProject(project.slug, { devcontainerPath: null });
+    expect(cleared!.devcontainerPath).toBeUndefined();
+  });
+
+  it('rejects devcontainerPath traversal and absolute paths', () => {
+    const sandbox = new PathSandbox(dir);
+    const store = new ProjectFileStore(sandbox);
+    expect(() => store.createProject({ name: 'T1', devcontainerPath: '../etc/passwd' })).toThrow(/traversal/);
+    expect(() => store.createProject({ name: 'T2', devcontainerPath: '/etc/passwd' })).toThrow(/relative/);
+    expect(() => store.createProject({ name: 'T3', devcontainerPath: 'a/../../b' })).toThrow(/traversal/);
+  });
+
   it('migrates legacy UUID projects into slug folders', () => {
     const legacyDir = join(dir, '.kanban-data/projects');
     mkdirSync(legacyDir, { recursive: true });

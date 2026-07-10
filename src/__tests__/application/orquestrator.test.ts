@@ -810,6 +810,7 @@ describe('Orquestrator', () => {
         slug: 'app',
         gitUrl: 'https://example.com/app.git',
         defaultBranch: 'main',
+        devcontainerPath: '.devcontainer/devcontainer.json',
       });
       const task = orc1.createRootTask('Linked', 'agent-tester', undefined, [], undefined, [project.slug]);
       rmSync(join(dir, '.swarm/state.snapshot.json'), { force: true });
@@ -818,6 +819,7 @@ describe('Orquestrator', () => {
       const orc2 = new Orquestrator(createDeps(dir, createPiClient([])), { stopWhenWaiting: true });
 
       expect(orc2.getProject('app')?.gitUrl).toBe('https://example.com/app.git');
+      expect(orc2.getProject('app')?.devcontainerPath).toBe('.devcontainer/devcontainer.json');
       expect(orc2.tasks.get(task.taskId)?.projectIds).toEqual(['app']);
     });
 

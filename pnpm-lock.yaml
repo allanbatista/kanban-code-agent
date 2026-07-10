@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@devcontainers/cli':
+        specifier: ^0.87.0
+        version: 0.87.0
       '@earendil-works/pi-coding-agent':
         specifier: ^0.79.10
         version: 0.79.10(ws@8.21.0)(zod@4.4.3)
@@ -173,6 +176,11 @@ packages:
   '@babel/runtime@7.29.7':
     resolution: {integrity: sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==}
     engines: {node: '>=6.9.0'}
+
+  '@devcontainers/cli@0.87.0':
+    resolution: {integrity: sha512-OVwjI0LH6cYilo2MXrnqYALtCwKM0dsdphNsIguw0ESRBG8s1wPIjDbPiDO5taxPTe3cLshsQYVZY1UpKtFaJA==}
+    engines: {node: '>=20.0.0'}
+    hasBin: true
 
   '@earendil-works/pi-agent-core@0.79.10':
     resolution: {integrity: sha512-XKxgdjhcPuyjrthCOFSgfzT3xZ1uBrJ1IMVDxci1to6hIN6BIg9J5iY8q0pGXK1DLgATLP23da+1UyZLwA360Q==}
@@ -2199,6 +2207,8 @@ snapshots:
   '@aws/lambda-invoke-store@0.2.4': {}
 
   '@babel/runtime@7.29.7': {}
+
+  '@devcontainers/cli@0.87.0': {}
 
   '@earendil-works/pi-agent-core@0.79.10(ws@8.21.0)(zod@4.4.3)':
     dependencies:

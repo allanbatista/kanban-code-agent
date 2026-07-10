@@ -59,7 +59,7 @@ export interface WorkerSupervisorOptions {
   // single-file. Recebe o prefixo do comando; `--socket <path>` é anexado.
   workerCmd?: string[];
   execFile?: typeof execFileSync;
-  startWorker?: (socketPath: string, unitName: string) => void | Promise<void>;
+  startWorker?: (socketPath: string, unitName: string, image?: string) => void | Promise<void>;
   stopWorker?: (unitName: string) => void | Promise<void>;
 }
 
@@ -86,7 +86,7 @@ export class WorkerSupervisor {
   // mesmo. Com startWorker injetado (testes/extensão), o worker vive no espaço
   // de paths do host, então o payload segue com paths do host.
   private readonly ownsLaunch: boolean;
-  private readonly startWorkerImpl: (socketPath: string, unitName: string) => void | Promise<void>;
+  private readonly startWorkerImpl: (socketPath: string, unitName: string, image?: string) => void | Promise<void>;
   private readonly stopWorkerImpl?: (unitName: string) => void | Promise<void>;
 
   constructor(
@@ -108,7 +108,7 @@ export class WorkerSupervisor {
     this.workerHoldMs = options.workerHoldMs ?? readPositiveInt(process.env.SWARM_WORKER_HOLD_MS);
     this.execFile = options.execFile ?? execFileSync;
     this.ownsLaunch = !options.startWorker;
-    this.startWorkerImpl = options.startWorker ?? ((socketPath, unitName) => this.startDockerWorker(socketPath, unitName));
+    this.startWorkerImpl = options.startWorker ?? ((socketPath, unitName, image) => this.startDockerWorker(socketPath, unitName, image));
     this.stopWorkerImpl = options.stopWorker ?? (options.startWorker ? undefined : (unitName) => this.stopDockerWorker(unitName));
   }
 
@@ -127,13 +127,15 @@ export class WorkerSupervisor {
       progressLog?: ProgressLogEntry[];
       envResume?: EnvResume | null;
     },
+    // Imagem do devcontainer do projeto (F3.2); sem ela usa a workerImage padrão.
+    imageOverride?: string,
   ): Promise<AgentRunResult> {
     if (this.mode === 'inproc') {
       return this.piClient.run(agent, task, orquestrator, triggerEvents, signal, continuity);
     }
     const config = this.piClient.buildRunConfig(agent, task, orquestrator, triggerEvents, undefined, continuity);
     const agentName = orquestrator.resolveRuntimeConfig(task, agent).agent;
-    return this.runInDocker(task.taskId, task.activeRunId ?? 'run', config, agentName, signal);
+    return this.runInDocker(task.taskId, task.activeRunId ?? 'run', config, agentName, signal, imageOverride);
   }
 
   async repairInvalidOutput(
@@ -143,13 +145,14 @@ export class WorkerSupervisor {
     errorMessage: string,
     invalidOutput: string,
     signal?: AbortSignal,
+    imageOverride?: string,
   ): Promise<AgentRunResult> {
     if (this.mode === 'inproc') {
       return this.piClient.repairInvalidOutput(agent, task, orquestrator, errorMessage, invalidOutput, signal);
     }
     const config = this.piClient.buildRepairRunConfig(agent, task, orquestrator, errorMessage, invalidOutput);
     const agentName = orquestrator.resolveRuntimeConfig(task, agent).agent;
-    return this.runInDocker(task.taskId, task.activeRunId ?? 'repair', config, agentName, signal);
+    return this.runInDocker(task.taskId, task.activeRunId ?? 'repair', config, agentName, signal, imageOverride);
   }
 
   /**
@@ -157,7 +160,7 @@ export class WorkerSupervisor {
    * recebe o path traduzido para o container (--socket) e os sockets/workspace
    * chegam pelos mounts. Segredos NUNCA entram no argv — vão no --env-file 0600.
    */
-  buildDockerRunArgs(socketPath: string, containerName = 'kca-worker', envFilePath?: string): string[] {
+  buildDockerRunArgs(socketPath: string, containerName = 'kca-worker', envFilePath?: string, imageOverride?: string): string[] {
     const containerSocketPath = this.toContainer(socketPath);
     const args = [
       'run',
@@ -193,7 +196,8 @@ export class WorkerSupervisor {
     // path do container entra aqui — o binário chega pelo mount, não pelo argv.
     if (this.codexBin) args.push('-e', `SWARM_CODEX_BIN=${this.codexBin}`);
 
-    args.push(this.workerImage);
+    // Imagem do devcontainer do projeto (F3.2) vence; senão a workerImage padrão.
+    args.push(imageOverride ?? this.workerImage);
     args.push(...this.workerCommand(containerSocketPath));
     return args;
   }
@@ -207,9 +211,9 @@ export class WorkerSupervisor {
     }
   }
 
-  startDockerWorker(socketPath: string, containerName: string): void {
+  startDockerWorker(socketPath: string, containerName: string, imageOverride?: string): void {
     const envFilePath = envFileFor(socketPath);
-    const args = this.buildDockerRunArgs(socketPath, containerName, existsSync(envFilePath) ? envFilePath : undefined);
+    const args = this.buildDockerRunArgs(socketPath, containerName, existsSync(envFilePath) ? envFilePath : undefined, imageOverride);
     this.execFile(this.dockerBin, args, { stdio: ['ignore', 'ignore', 'ignore'] });
   }
 
@@ -253,6 +257,7 @@ export class WorkerSupervisor {
     config: AgentRunConfig,
     agentName: AgentName,
     signal?: AbortSignal,
+    imageOverride?: string,
   ): Promise<AgentRunResult> {
     if (signal?.aborted) throw new RunCancelledError();
     const dataDir = this.dataDir;
@@ -275,7 +280,7 @@ export class WorkerSupervisor {
     signal?.addEventListener('abort', cancel);
 
     try {
-      await this.startWorkerImpl(socketPath, containerName);
+      await this.startWorkerImpl(socketPath, containerName, imageOverride);
       await waitForWorker(socketPath);
       const response = await unixJson<{ ok: boolean; result?: AgentRunResult; error?: string }>(socketPath, 'POST', '/run', {
         runId,

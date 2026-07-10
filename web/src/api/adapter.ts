@@ -220,6 +220,7 @@ export function apiProjectToProject(api: ApiProject, taskCount?: number, running
     gitUrl: api.gitUrl,
     defaultBranch: api.defaultBranch,
     autoMerge: api.autoMerge,
+    devcontainerPath: api.devcontainerPath,
     location: '',
     taskCount: taskCount ?? 0,
     runningCount: runningCount ?? 0,

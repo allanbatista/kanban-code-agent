@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -12,6 +12,7 @@ import {
   translateToContainer,
   workerSocketPath,
 } from '../../infrastructure/process/worker-supervisor.js';
+import { resolveDevcontainerImage } from '../../infrastructure/containers/devcontainer.js';
 import { createDeps, createPiClient, createPiClientWithRunner } from '../_helpers/orquestrator-fixture.js';
 import { buildOrquestrator } from '../_helpers/orquestrator-fixture.js';
 import { completedDecision, testAgent, throwingRunner, waitingDecision } from '../_helpers/mock-agent.js';
@@ -369,5 +370,53 @@ describe('WorkerSupervisor', () => {
       }
     },
     60_000,
+  );
+
+  // Smoke real F3.2: constrói uma imagem de devcontainer via CLI real e confirma
+  // que o `docker run` do supervisor a usa (tag capturada pelo execFile injetado,
+  // enquanto a imagem é construída de verdade). SKIP limpo sem docker.
+  (dockerAvailable() ? it : it.skip)(
+    'constrói a imagem do devcontainer via CLI real e o docker run do supervisor a usa',
+    async () => {
+      const projectDir = mkdtempSync(join(tmpdir(), 'kca-devc-int-'));
+      const configPath = join(projectDir, 'devcontainer.json');
+      writeFileSync(configPath, JSON.stringify({ image: 'debian:bookworm-slim' }));
+      let image: string | undefined;
+      try {
+        image = resolveDevcontainerImage({ workspaceFolder: projectDir, configPath, slug: 'smoke' });
+        expect(image).toMatch(/^kca-devc-smoke-[0-9a-f]{12}$/);
+        // A imagem existe de fato no docker.
+        expect(() => execFileSync('docker', ['image', 'inspect', image!], { stdio: 'ignore' })).not.toThrow();
+        // 2a resolução = cache hit, mesma tag.
+        expect(resolveDevcontainerImage({ workspaceFolder: projectDir, configPath, slug: 'smoke' })).toBe(image);
+
+        // docker-mode run usa a tag: captura o argv do `docker run` via execFile injetado.
+        const calls: string[][] = [];
+        const supervisor = new WorkerSupervisor(createPiClient([]), {
+          mode: 'docker',
+          runTimeoutMs: 1000,
+          dataDir: '/host/data',
+          workingDirectory: '/repo',
+          execFile: ((bin: string, args: readonly string[]) => {
+            calls.push([bin, ...args]);
+            return Buffer.from('');
+          }) as unknown as typeof execFileSync,
+        });
+        supervisor.startDockerWorker('/host/data/.swarm/workers/task_1-run.sock', 'kca-devc-smoke', image);
+        const run = calls.find((call) => call[1] === 'run');
+        expect(run).toBeDefined();
+        expect(run).toContain(image);
+      } finally {
+        if (image) {
+          try {
+            execFileSync('docker', ['image', 'rm', '-f', image], { stdio: 'ignore' });
+          } catch {
+            // imagem pode já não existir — ok.
+          }
+        }
+        rmSync(projectDir, { recursive: true, force: true });
+      }
+    },
+    300_000,
   );
 });

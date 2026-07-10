@@ -116,6 +116,31 @@ describe('API route integration (F8.T1/T2)', () => {
     expect(orc.events.some((event) => event.type === SWARM_EVENT_TYPE.TASK_PROJECT_LINKED)).toBe(true);
   });
 
+  it('accepts, clears and validates devcontainerPath on projects', async () => {
+    const created = await server.inject({
+      method: 'POST',
+      url: '/api/projects',
+      payload: { name: 'Dev', slug: 'dev', devcontainerPath: '.devcontainer/devcontainer.json' },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().devcontainerPath).toBe('.devcontainer/devcontainer.json');
+
+    const cleared = await server.inject({
+      method: 'PATCH',
+      url: '/api/projects/dev',
+      payload: { devcontainerPath: null },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().devcontainerPath).toBeUndefined();
+
+    const rejected = await server.inject({
+      method: 'POST',
+      url: '/api/projects',
+      payload: { name: 'Bad', slug: 'bad', devcontainerPath: '../escape.json' },
+    });
+    expect(rejected.statusCode).toBe(400);
+  });
+
   it('manual retry re-opens a cancelled task (F8.T2)', async () => {
     const id = orc.createRootTask('Retry me', 'agent-tester').taskId;
     orc.cancelTask(id);

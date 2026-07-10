@@ -105,6 +105,7 @@ export interface ApiProject {
   gitUrl?: string;
   defaultBranch: string;
   autoMerge: boolean;
+  devcontainerPath?: string;
   createdAt: string;
   updatedAt: string;
 }
