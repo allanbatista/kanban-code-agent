@@ -71,7 +71,10 @@ function createCodexClient(config: SwarmConfig, dataDir: string): CodexAgentClie
   // CODEX_HOME compartilhado; ensureCodexHome (chamado no primeiro spawn do
   // client) cria o dir + config.toml; aqui so derivamos o mesmo path.
   const codexHome = codexHomePath(dataDir);
-  return new CodexAgentClient('', AGENT_TOOLS, allowedModels, 60, { codexHome, dataDir });
+  // SWARM_CODEX_SANDBOX=danger-full-access quando o processo ja roda isolado
+  // (ex.: dentro do container do server) — o bwrap do codex nao funciona la.
+  const sandboxPolicy = process.env.SWARM_CODEX_SANDBOX === 'danger-full-access' ? ('externalSandbox' as const) : undefined;
+  return new CodexAgentClient('', AGENT_TOOLS, allowedModels, 60, { codexHome, dataDir, sandboxPolicy });
 }
 
 // ---------------------------------------------------------------------------
