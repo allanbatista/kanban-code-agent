@@ -34,7 +34,9 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(body.error ?? body.message ?? `HTTP ${response.status}`);
+    // Prioriza `message` (detalhe especifico, ex.: "gitUrl invalida: ...") sobre
+    // `error` (rotulo generico como "Invalid body"), que sozinho nao ajuda o usuario.
+    throw new Error(body.message ?? body.error ?? `HTTP ${response.status}`);
   }
 
   if (response.status === 204) return undefined as T;

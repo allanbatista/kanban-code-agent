@@ -28,6 +28,7 @@ vi.mock('@dnd-kit/core', () => ({
   useSensor: vi.fn(() => ({})),
   useSensors: vi.fn(() => []),
   useDroppable: vi.fn(() => ({ setNodeRef: vi.fn(), isOver: false, active: null })),
+  useDndContext: vi.fn(() => ({ active: null })),
   useDraggable: vi.fn(() => ({ attributes: {}, listeners: {}, setNodeRef: vi.fn(), transform: null, isDragging: false })),
 }));
 

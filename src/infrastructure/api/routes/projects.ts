@@ -4,11 +4,27 @@ import type { Orquestrator } from '../../../application/orquestrator.js';
 
 // --- Zod Schemas ---
 
+// git aceita mais formatos que uma URL RFC: alem de http(s)/ssh/git/file://,
+// aceita o formato scp abreviado (git@host:caminho). z.string().url() rejeita
+// esse formato scp, entao validamos manualmente qualquer coisa que o git aceita.
+const GIT_URL_MESSAGE = 'gitUrl invalida: use http(s)://, ssh://, file:// ou git@host:caminho';
+
+function isValidGitUrl(value: string): boolean {
+  if (!value.trim() || /\s/.test(value)) return false;
+  // esquemas explicitos que o git entende
+  if (/^(https?|ssh|git|file):\/\/.+/.test(value)) return true;
+  // scp curto: user@host:caminho
+  if (/^[\w.-]+@[\w.-]+:.+/.test(value)) return true;
+  return false;
+}
+
+const gitUrl = z.string().refine(isValidGitUrl, { message: GIT_URL_MESSAGE });
+
 const createProjectBody = z.object({
   name: z.string().min(1).max(200),
   slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/).optional(),
   description: z.string().max(2000).optional(),
-  gitUrl: z.string().url().optional(),
+  gitUrl: gitUrl.optional(),
   defaultBranch: z.string().min(1).max(128).optional(),
   autoMerge: z.boolean().optional(),
   devcontainerPath: z.string().max(512).optional(),
@@ -17,7 +33,7 @@ const createProjectBody = z.object({
 const updateProjectBody = z.object({
   name: z.string().min(1).max(200).optional(),
   description: z.string().max(2000).optional(),
-  gitUrl: z.string().url().optional().or(z.literal('')),
+  gitUrl: gitUrl.optional().or(z.literal('')),
   defaultBranch: z.string().min(1).max(128).optional(),
   autoMerge: z.boolean().optional(),
   devcontainerPath: z.string().max(512).nullable().optional(),
@@ -43,7 +59,9 @@ export function registerProjectRoutes(fastify: FastifyInstance, orquestrator: Or
   fastify.post('/api/projects', async (request, reply) => {
     const body = createProjectBody.safeParse(request.body);
     if (!body.success) {
-      return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
+      // Propaga a mensagem especifica da primeira issue (ex.: gitUrl invalida)
+      // para que o front consiga mostra-la em vez do generico "Invalid body".
+      return reply.status(400).send({ error: 'Invalid body', message: body.error.issues[0]?.message, issues: body.error.issues });
     }
 
     try {
@@ -91,7 +109,8 @@ export function registerProjectRoutes(fastify: FastifyInstance, orquestrator: Or
 
     const body = updateProjectBody.safeParse(request.body);
     if (!body.success) {
-      return reply.status(400).send({ error: 'Invalid body', issues: body.error.issues });
+      // Propaga a mensagem especifica da primeira issue (ex.: gitUrl invalida).
+      return reply.status(400).send({ error: 'Invalid body', message: body.error.issues[0]?.message, issues: body.error.issues });
     }
 
     let project;

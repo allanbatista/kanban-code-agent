@@ -116,6 +116,26 @@ describe('API route integration (F8.T1/T2)', () => {
     expect(orc.events.some((event) => event.type === SWARM_EVENT_TYPE.TASK_PROJECT_LINKED)).toBe(true);
   });
 
+  it('accepts scp-style git remotes and rejects garbage gitUrl with a specific message', async () => {
+    // Remote SSH no formato scp (git@host:caminho) que z.string().url() rejeitava.
+    const scp = await server.inject({
+      method: 'POST',
+      url: '/api/projects',
+      payload: { name: 'Scp', slug: 'scp', gitUrl: 'git@github.com:comdado/solucao42-all-in-one.git' },
+    });
+    expect(scp.statusCode).toBe(201);
+    expect(scp.json().gitUrl).toBe('git@github.com:comdado/solucao42-all-in-one.git');
+
+    // Valor claramente invalido → 400 com mensagem especifica (nao o generico).
+    const bad = await server.inject({
+      method: 'POST',
+      url: '/api/projects',
+      payload: { name: 'Bad Git', slug: 'badgit', gitUrl: 'not a url' },
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().message).toContain('gitUrl invalida');
+  });
+
   it('accepts, clears and validates devcontainerPath on projects', async () => {
     const created = await server.inject({
       method: 'POST',

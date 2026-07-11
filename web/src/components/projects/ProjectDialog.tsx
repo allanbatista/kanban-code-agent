@@ -24,6 +24,7 @@ export function ProjectDialog({ open, onOpenChange, editProject, onClose }: Proj
   const [devcontainerPath, setDevcontainerPath] = useState('');
   const [autoMerge, setAutoMerge] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const { createProject, updateProject } = useProjectsStore();
 
   useEffect(() => {
@@ -44,11 +45,13 @@ export function ProjectDialog({ open, onOpenChange, editProject, onClose }: Proj
       setDevcontainerPath('');
       setAutoMerge(false);
     }
+    setError(null);
   }, [editProject, open]);
 
   const handleSave = async () => {
     if (!name.trim()) return;
     setSaving(true);
+    setError(null);
     try {
       if (editProject) {
         await updateProject(editProject.id, {
@@ -72,6 +75,9 @@ export function ProjectDialog({ open, onOpenChange, editProject, onClose }: Proj
       }
       onClose();
       onOpenChange(false);
+    } catch (err) {
+      // Mantem o dialog aberto e mostra a mensagem da API (ex.: gitUrl invalida).
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
@@ -116,6 +122,7 @@ export function ProjectDialog({ open, onOpenChange, editProject, onClose }: Proj
             Auto-merge depois dos gates
           </label>
         </div>
+        {error && <p className="text-sm text-destructive">{error}</p>}
         <DialogFooter>
           <Button variant="outline" onClick={() => { onClose(); onOpenChange(false); }} disabled={saving}>Cancelar</Button>
           <Button onClick={handleSave} disabled={!name.trim() || saving}>{saving ? 'Salvando...' : editProject ? 'Salvar' : 'Criar'}</Button>
