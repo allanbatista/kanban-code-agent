@@ -103,9 +103,11 @@ const AgentPanel = forwardRef<HTMLDivElement, AgentPanelProps>(function AgentPan
       className={cn('relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border/60 shadow-xl shadow-black/20 backdrop-blur-sm', className)}
     >
       <ColumnHeader name={name} icon={icon} color={color} tasks={tasks} onConfig={onConfig} onArchive={onArchive} />
-      {/* Enquanto o overlay está ativo ele passa a ser o droppable da coluna,
-          por isso o corpo só recebe o setNodeRef quando não há área reservada. */}
-      <div ref={showDropZone ? undefined : setNodeRef} className="min-h-0 flex-1 flex flex-col overflow-hidden">
+      {/* O corpo NUNCA é o droppable. Mantendo o setNodeRef sempre no overlay
+          (nó estável) evitamos que o dnd-kit re-registre/re-meça o droppable
+          quando uma atualização durante o arraste (ex.: task movida de coluna
+          via websocket) inverte isSource/showDropZone — a causa do flicker. */}
+      <div className="min-h-0 flex-1 flex flex-col overflow-hidden">
         <ColumnBody taskIds={tasks.map(t => t.id)} isOver={!showDropZone && isOver}>
           {tasks.length === 0 ? (
             <EmptyState title="Sem tasks" className="py-6" />
@@ -114,22 +116,29 @@ const AgentPanel = forwardRef<HTMLDivElement, AgentPanelProps>(function AgentPan
           )}
         </ColumnBody>
       </div>
-      {showDropZone && (
-        // Área de drop reservada: cobre praticamente a coluna inteira, deixando
-        // apenas 15px de margem em todos os lados. pointer-events-none garante
-        // que o div nunca intercepte cliques — o dnd-kit mede o rect direto.
-        <div
-          ref={setNodeRef}
-          className={cn(
-            'pointer-events-none absolute inset-[15px] z-20 flex items-center justify-center rounded-xl border-2 border-dashed transition-colors',
-            isOver ? 'border-primary bg-primary/20' : 'border-primary/40 bg-primary/10'
-          )}
-        >
+      {/* Área de drop reservada: SEMPRE montada e sempre o droppable da coluna
+          (nó estável, mesma identidade por todo o ciclo de vida). A visibilidade
+          é só visual — mudam opacity/cor, nunca a geometria (inset-15px + border-2
+          constantes) —, então alternar origem/alvo no meio do arraste não remonta
+          o nó nem força re-medição: sem flicker. pointer-events-none impede que o
+          div intercepte cliques; o dnd-kit mede o rect diretamente. */}
+      <div
+        ref={setNodeRef}
+        data-dropzone
+        aria-hidden={!showDropZone}
+        className={cn(
+          'pointer-events-none absolute inset-[15px] z-20 flex items-center justify-center rounded-xl border-2 border-dashed transition-[opacity,border-color,background-color] duration-150',
+          showDropZone
+            ? (isOver ? 'opacity-100 border-primary bg-primary/20' : 'opacity-100 border-primary/40 bg-primary/10')
+            : 'opacity-0 border-transparent bg-transparent'
+        )}
+      >
+        {showDropZone && (
           <span className={cn('text-xs font-medium transition-colors', isOver ? 'text-primary' : 'text-primary/60')}>
             Soltar aqui
           </span>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 });

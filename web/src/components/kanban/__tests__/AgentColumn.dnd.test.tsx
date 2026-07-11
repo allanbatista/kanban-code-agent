@@ -66,6 +66,27 @@ describe('AgentColumn drop overlay', () => {
     render(<AgentColumn id="review" name="Revisão" icon="Eye" color="#a78bfa" tasks={[makeTask('t2', 'review')]} />);
     expect(screen.queryByText('Soltar aqui')).toBeNull();
   });
+
+  // Regressão de flicker: o nó de drop deve permanecer montado em todos os
+  // estados (ocioso, origem e alvo). Ele é o droppable estável do dnd-kit —
+  // se sumisse/remontasse ao alternar isSource durante o arraste, o dnd-kit
+  // re-mediria a cada atualização e a tela piscaria. Apenas o texto "Soltar
+  // aqui" (puramente visual) é condicional.
+  it('mantém o nó de drop montado quando ocioso (nó estável, sem flicker)', () => {
+    const { container } = render(<AgentColumn id="review" name="Revisão" icon="Eye" color="#a78bfa" tasks={[makeTask('t1', 'review')]} />);
+    expect(container.querySelector('[data-dropzone]')).not.toBeNull();
+    expect(screen.queryByText('Soltar aqui')).toBeNull();
+  });
+
+  it('mantém o nó de drop montado na coluna de origem durante o arraste', () => {
+    mockActive = { id: 't2' }; // origem: task arrastada mora nesta coluna
+    const { container } = render(<AgentColumn id="review" name="Revisão" icon="Eye" color="#a78bfa" tasks={[makeTask('t2', 'review')]} />);
+    // nó presente e estável, mas oculto (aria-hidden) e sem o texto reservado
+    const dropzone = container.querySelector('[data-dropzone]');
+    expect(dropzone).not.toBeNull();
+    expect(dropzone?.getAttribute('aria-hidden')).toBe('true');
+    expect(screen.queryByText('Soltar aqui')).toBeNull();
+  });
 });
 
 describe('useDragAndDrop drop resolution', () => {
