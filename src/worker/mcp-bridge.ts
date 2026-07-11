@@ -147,8 +147,9 @@ function errMessage(error: unknown): string {
 }
 
 // Entrypoint: espelha worker/main.ts (roda no topo, sem main-guard). O socket
-// por-run chega via env KCA_TOOLS_SOCKET (forwarded pelo app-server via env_vars
-// no config.toml). ponytail: em dev roda sob tsx; F2 troca pelo bundle esbuild.
+// por-run chega via env KCA_TOOLS_SOCKET, injetado pelo app-server a partir da
+// tabela [mcp_servers.kca_tools.env] do config.toml (codex 0.144.1 nao tem
+// `env_vars`). ponytail: em dev roda sob tsx; F2 troca pelo bundle esbuild.
 const socket = process.env.KCA_TOOLS_SOCKET;
 if (!socket) {
   process.stderr.write('KCA_TOOLS_SOCKET obrigatorio\n');

@@ -42,6 +42,10 @@ export interface CodexTurnParams {
   prompt: string;
   /** Socket UDS do tool-callback deste run; vira env KCA_TOOLS_SOCKET no app-server. */
   toolsSocket?: string;
+  /** Disparado UMA vez logo apos o `initialize` resolver (o app-server ja leu o
+   *  config.toml). O caller inproc solta aqui o mutex que serializa
+   *  [escreve config -> spawn -> handshake] (ver codex-client.ts). */
+  onHandshake?: () => void;
   signal?: AbortSignal;
 }
 
@@ -152,6 +156,8 @@ export interface RunCodexTurnOptions {
   outputSchema?: Record<string, unknown>;
   /** Socket UDS do tool-callback deste run (vira KCA_TOOLS_SOCKET no app-server). */
   toolsSocket?: string;
+  /** Disparado apos o handshake initialize (o caller inproc solta o mutex aqui). */
+  onHandshake?: () => void;
   signal?: AbortSignal;
 }
 
@@ -174,6 +180,7 @@ export async function runCodexTurn(
     systemPrompt: config.systemPrompt,
     prompt: config.prompt,
     toolsSocket: opts.toolsSocket,
+    onHandshake: opts.onHandshake,
     signal: opts.signal,
   });
   // ponytail: cost=0 — o app-server nao reporta preco por token (so contagem).
@@ -405,6 +412,11 @@ class CodexSession extends JsonRpcStdioSession {
       clientInfo: CLIENT_INFO,
       capabilities: { experimentalApi: false, optOutNotificationMethods: [], requestAttestation: false },
     });
+    // O app-server ja parseou o config.toml (inclusive [mcp_servers.kca_tools.env])
+    // antes de responder o initialize. Solta aqui o mutex que segura a janela
+    // [escreve config -> spawn -> handshake]: o config pode ser sobrescrito por
+    // outro run sem afetar este processo (env do MCP ja esta capturado em memoria).
+    params.onHandshake?.();
     this.notify('initialized', {});
 
     const started = (await this.request('thread/start', {

@@ -25,8 +25,28 @@ export { DECISION_OUTPUT_SCHEMA };
 // Reusa a montagem de prompts do PiAgentClient para que ambos os agents recebam
 // instrucoes IDENTICAS; a decisao vem estruturada nativa via outputSchema.
 // Tools do Master chegam por MCP bridge (F1.2): aqui so subimos o tool-callback
-// UDS por run e passamos o socket via KCA_TOOLS_SOCKET.
+// UDS por run e injetamos o socket no config.toml ([mcp_servers.kca_tools.env]).
+//
+// CONCORRENCIA: o config.toml vive no CODEX_HOME compartilhado, mas o
+// KCA_TOOLS_SOCKET difere por-run. Sem serializar, o spawn de um run poderia ler
+// o socket escrito por outro. O mutex abaixo cobre APENAS a janela
+// [escreve config.toml deste run -> spawn app-server -> initialize resolve]; os
+// turnos em si seguem concorrentes (o app-server captura o env do MCP em memoria
+// no start, entao o config pode ser sobrescrito assim que o handshake resolve).
 // ---------------------------------------------------------------------------
+
+// Mutex minimal por fila de promessas (sem dependencia). Serializa so a janela de
+// spawn+handshake; ver comentario acima. ponytail: teto — se a serializacao do
+// spawn doer sob alta concorrencia, dar a cada run um CODEX_HOME proprio com
+// symlink de auth.json (decisao de isolamento adiada, ver design).
+let configMutex: Promise<void> = Promise.resolve();
+function acquireConfigMutex(): Promise<() => void> {
+  let release!: () => void;
+  const next = new Promise<void>((resolve) => (release = resolve));
+  const prev = configMutex;
+  configMutex = prev.then(() => next);
+  return prev.then(() => release);
+}
 
 // O AgentRunner do Pi nunca roda no caminho Codex; reusamos o PiAgentClient
 // apenas para montar prompts (buildRunConfig/buildRepairRunConfig).
@@ -56,7 +76,6 @@ export class CodexAgentClient implements AgentClient {
   private readonly runner: CodexRunner;
   private readonly model: string;
   private readonly sandboxPolicy: CodexSandboxPolicy;
-  private homeReady = false;
 
   constructor(
     systemPromptBase: string,
@@ -119,18 +138,22 @@ export class CodexAgentClient implements AgentClient {
   }
 
   async generateTitle(message: string): Promise<string> {
-    // Turno unico, sem outputSchema nem tools (mesmo prompt do Pi).
+    // Turno unico, sem outputSchema nem tools (mesmo prompt do Pi). Sem socket,
+    // mas ainda sob o mutex: o config.toml (sem tabela env) e regravado no
+    // CODEX_HOME compartilhado e nao pode clobberar o config de um run concorrente.
     try {
-      this.ensureHome();
-      const result = await this.runner.runTurn({
-        cwd: process.cwd(),
-        model: this.model,
-        effort: 'low',
-        sandboxPolicy: this.sandboxPolicy,
-        systemPrompt:
-          'Você gera títulos curtos para tarefas. Dada a mensagem do usuário, responda APENAS com um título conciso de no máximo 8 palavras, no idioma da mensagem, sem aspas e sem pontuação final.',
-        prompt: message,
-      });
+      const result = await this.withConfigLock(undefined, (onHandshake) =>
+        this.runner.runTurn({
+          cwd: process.cwd(),
+          model: this.model,
+          effort: 'low',
+          sandboxPolicy: this.sandboxPolicy,
+          systemPrompt:
+            'Você gera títulos curtos para tarefas. Dada a mensagem do usuário, responda APENAS com um título conciso de no máximo 8 palavras, no idioma da mensagem, sem aspas e sem pontuação final.',
+          prompt: message,
+          onHandshake,
+        }),
+      );
       return result.output ?? '';
     } catch {
       // ponytail: fallback por truncamento se o turno de titulo falhar (auth/binario
@@ -139,16 +162,30 @@ export class CodexAgentClient implements AgentClient {
     }
   }
 
-  // Cria o CODEX_HOME (dir 0700 + config.toml do MCP bridge) uma unica vez, antes
-  // do primeiro spawn. Idempotente; nunca toca auth.json.
-  private ensureHome(): void {
-    if (this.homeReady) return;
-    ensureCodexHome(this.options.dataDir);
-    this.homeReady = true;
+  /**
+   * Serializa [regrava config.toml deste run -> spawn app-server -> initialize] sob
+   * o mutex de modulo. Regrava o CODEX_HOME (dir 0700 + config.toml com o socket
+   * deste run) ANTES do spawn — o app-server le o config no start. `spawn` recebe o
+   * onHandshake que solta o lock assim que o initialize resolve; o finally solta de
+   * novo (idempotente) caso o handshake nunca dispare (erro de spawn). Nunca toca auth.json.
+   */
+  private async withConfigLock<T>(toolsSocket: string | undefined, spawn: (onHandshake: () => void) => Promise<T>): Promise<T> {
+    const release = await acquireConfigMutex();
+    let released = false;
+    const releaseOnce = () => {
+      if (released) return;
+      released = true;
+      release();
+    };
+    try {
+      ensureCodexHome(this.options.dataDir, { toolsSocket });
+      return await spawn(releaseOnce);
+    } finally {
+      releaseOnce();
+    }
   }
 
   private async runTurnWithTools(config: AgentRunConfig, task: Task, signal?: AbortSignal): Promise<AgentRunResult> {
-    this.ensureHome();
     const runId = task.activeRunId ?? 'run';
     // Reusa o mesmo tool-callback UDS do supervisor (POST /tool {name, params}).
     // Dir curto sob /tmp (0700), fora do dataDir, p/ o path caber no limite
@@ -158,12 +195,17 @@ export class CodexAgentClient implements AgentClient {
     const socketPath = toolsSocketPath(task.taskId, `${runId}-codex`);
     const toolServer = await listenToolServer(socketPath, config.customTools ?? []);
     try {
-      return await runCodexTurn(this.runner, config, {
-        model: this.model,
-        sandboxPolicy: this.sandboxPolicy,
-        toolsSocket: socketPath,
-        signal,
-      });
+      // O socket deste run entra no config.toml ([mcp_servers.kca_tools.env]) e no
+      // env do app-server (belt-and-suspenders); o mutex segura ate o handshake.
+      return await this.withConfigLock(socketPath, (onHandshake) =>
+        runCodexTurn(this.runner, config, {
+          model: this.model,
+          sandboxPolicy: this.sandboxPolicy,
+          toolsSocket: socketPath,
+          onHandshake,
+          signal,
+        }),
+      );
     } finally {
       await closeServer(toolServer).catch(() => undefined);
       // Remove o dir do run inteiro (t.sock).

@@ -47,7 +47,12 @@ async function runCodexInWorker(
   // roda o bridge direto; source (.ts, dev/tsx) roda sob tsx como o worker.
   const bundle = import.meta.url.endsWith('.mjs');
   const bridgeEntry = fileURLToPath(new URL(bundle ? './mcp-bridge.mjs' : './mcp-bridge.ts', import.meta.url));
-  ensureCodexHomeAt(codexHome, { nodeBin: process.execPath, bridgeEntry, useTsx: !bundle });
+  // toolsSocket entra na tabela [mcp_servers.kca_tools.env] do config.toml — e assim
+  // que o KCA_TOOLS_SOCKET chega ao bridge (o codex 0.144.1 nao tem `env_vars`).
+  // Sem mutex aqui: cada container escreve BYTES IDENTICOS (o callbackSocketPath ja
+  // vem traduzido p/ o path do container /kca/sock/t.sock, igual em todo container),
+  // entao writes concorrentes de containers distintos nao divergem.
+  ensureCodexHomeAt(codexHome, { nodeBin: process.execPath, bridgeEntry, useTsx: !bundle, toolsSocket: callbackSocketPath });
 
   // SWARM_CODEX_BIN (bin montado /kca/bin/bin/codex) e CODEX_HOME vem do env do
   // container; o socket do tool-callback vira KCA_TOOLS_SOCKET no app-server.

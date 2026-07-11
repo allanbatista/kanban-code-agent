@@ -1,4 +1,5 @@
 import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AtomicWriter } from '../filesystem/atomic-writer.js';
@@ -8,11 +9,18 @@ import { AtomicWriter } from '../filesystem/atomic-writer.js';
 // arquivos: auth.json (login do Codex — NUNCA tocado por este modulo) e
 // config.toml (registra o MCP bridge das tools do Master). config.toml e
 // regravado idempotentemente via AtomicWriter, preservando o que nao e nosso: so
-// o bloco [mcp_servers.kca_tools] e substituido; secoes que o codex CLI append em
-// runtime (ex. [projects."..."] trust_level) sobrevivem. O socket do tool-callback
-// muda por-run e chega pelo env KCA_TOOLS_SOCKET (encaminhado via env_vars), por
-// isso nao entra no arquivo. ponytail: merge line-based (ver mergeConfigToml);
-// trocar por parser TOML real se o config crescer alem do nosso unico bloco.
+// o bloco [mcp_servers.kca_tools] (e sua sub-tabela .env) e substituido; secoes
+// que o codex CLI append em runtime (ex. [projects."..."] trust_level) sobrevivem.
+//
+// O socket do tool-callback muda por-run e e injetado no bridge via a sub-tabela
+// [mcp_servers.kca_tools.env] (KCA_TOOLS_SOCKET = "<path>"). BUG DE PRODUCAO
+// corrigido aqui: o codex 0.144.1 NAO tem a chave `env_vars` no config do MCP —
+// o formato real e uma TABELA `env` (verificado via `codex mcp add --env`). Com
+// `env_vars` o app-server spawnava o bridge SEM KCA_TOOLS_SOCKET, ele saia 1
+// ("obrigatorio") e o Codex ficava sem tools. Como o socket difere por-run e o
+// config e compartilhado, o caller inproc serializa [escreve config -> spawn ->
+// handshake] sob mutex (ver codex-client.ts). ponytail: merge line-based (ver
+// mergeConfigToml); trocar por parser TOML real se o config crescer alem do nosso.
 // ---------------------------------------------------------------------------
 
 export const MCP_SERVER_NAME = 'kca_tools';
@@ -24,10 +32,20 @@ export interface EnsureCodexHomeOptions {
    *  modulo): src/worker/mcp-bridge.ts em dev/tsx, dist/worker/mcp-bridge.js
    *  compilado. F2 (worker docker) passa o bundle .mjs explicito. */
   bridgeEntry?: string;
-  /** Roda o bridge via `--import tsx <entry>`. Default derivado do formato deste
+  /** Roda o bridge via `--import <tsx> <entry>`. Default derivado do formato deste
    *  modulo: true sob .ts (dev/tsx), false sob .js compilado (node puro roda o
    *  dist direto). O bundle .mjs (docker) passa useTsx=false explicito. */
   useTsx?: boolean;
+  /** Especificador do `tsx` para `--import` (so quando useTsx=true). Default: 'tsx'
+   *  resolvido para caminho ABSOLUTO. Necessario porque o app-server spawna o bridge
+   *  com cwd = workspace da task (NAO o repo); o `tsx` bare daria ERR_MODULE_NOT_FOUND
+   *  (nao ha node_modules la). Testes pinam isto p/ assertions deterministicas. */
+  tsxImport?: string;
+  /** Socket UDS do tool-callback deste run. Quando presente, renderiza a sub-tabela
+   *  [mcp_servers.kca_tools.env] com KCA_TOOLS_SOCKET — e assim que o app-server
+   *  injeta o socket no bridge (o codex 0.144.1 nao tem `env_vars`; o env e uma
+   *  tabela). Ausente: sem tabela env (turno sem tools, ex. generateTitle). */
+  toolsSocket?: string;
 }
 
 export function codexHomePath(dataDir: string): string {
@@ -61,13 +79,16 @@ export function ensureCodexHomeAt(home: string, options: EnsureCodexHomeOptions 
   const bridgeEntry =
     options.bridgeEntry ?? fileURLToPath(new URL(`../../worker/mcp-bridge${compiled ? '.js' : '.ts'}`, import.meta.url));
   const useTsx = options.useTsx ?? !compiled;
+  // Resolve o `tsx` p/ caminho absoluto so quando useTsx=true (o bundle .mjs nao usa
+  // tsx). O bare 'tsx' quebra pq o app-server spawna o bridge com cwd = workspace da task.
+  const tsxImport = options.tsxImport ?? (useTsx ? resolveTsxImport() : 'tsx');
 
   // Preserva o config.toml existente EXCETO nosso bloco kca_tools (o codex CLI
   // append secoes proprias em runtime, ex. [projects."..."] trust_level; regerar
   // tudo as apagaria). ponytail: merge line-based (tira nosso bloco, re-anexa o
   // fresco); trocar por parser TOML real se o config crescer alem disto.
   const configPath = join(home, 'config.toml');
-  const fresh = renderConfigToml(nodeBin, bridgeEntry, useTsx);
+  const fresh = renderConfigToml(nodeBin, bridgeEntry, useTsx, options.toolsSocket, tsxImport);
   AtomicWriter.write(configPath, mergeConfigToml(readIfExists(configPath), fresh));
   return home;
 }
@@ -93,33 +114,59 @@ function mergeConfigToml(existing: string | undefined, freshBlock: string): stri
 }
 
 /**
- * Remove nosso bloco `[mcp_servers.kca_tools]`: da linha do header (na coluna 0)
- * ate o proximo header de tabela na coluna 0 ou o EOF. Preserva todo o resto.
+ * Remove nosso bloco `[mcp_servers.kca_tools]` E sua sub-tabela `.env`: de cada
+ * header nosso (na coluna 0) ate o proximo header estrangeiro na coluna 0 ou o
+ * EOF. Preserva todo o resto. O `.env` conta como nosso (prefixo
+ * `[mcp_servers.kca_tools.`), senao o regen orfanaria a tabela env estale.
  */
 function stripKcaBlock(existing: string): string {
   const ourHeader = `[mcp_servers.${MCP_SERVER_NAME}]`;
+  const ourSubPrefix = `[mcp_servers.${MCP_SERVER_NAME}.`; // ex.: [...kca_tools.env]
   const out: string[] = [];
   let skipping = false;
   for (const line of existing.split('\n')) {
     if (line.startsWith('[')) {
-      // Header de tabela na coluna 0: (re)avalia se e o nosso (normaliza espacos).
-      skipping = line.replace(/\s+/g, '') === ourHeader;
+      // Header de tabela na coluna 0: (re)avalia se e nosso (normaliza espacos).
+      const norm = line.replace(/\s+/g, '');
+      skipping = norm === ourHeader || norm.startsWith(ourSubPrefix);
     }
     if (!skipping) out.push(line);
   }
   return out.join('\n');
 }
 
-function renderConfigToml(nodeBin: string, bridgeEntry: string, useTsx: boolean): string {
-  const args = useTsx ? ['--import', 'tsx', bridgeEntry] : [bridgeEntry];
-  return [
+/**
+ * Resolve o especificador do `tsx` para caminho ABSOLUTO. O codex app-server spawna
+ * o MCP bridge com cwd = workspace da task (nao o repo), entao `--import tsx` (bare)
+ * falha com ERR_MODULE_NOT_FOUND — nao ha node_modules no cwd da task. O caminho
+ * absoluto carrega de qualquer cwd. Usa createRequire (resolver CJS do Node), que
+ * funciona sob tsx, node compilado E vitest — ao contrario de import.meta.resolve,
+ * que o vite intercepta e faz lancar. So chamado quando useTsx=true (rodando sob
+ * tsx => tsx instalado); fallback p/ bare em caso raro.
+ */
+function resolveTsxImport(): string {
+  try {
+    return createRequire(import.meta.url).resolve('tsx');
+  } catch {
+    return 'tsx';
+  }
+}
+
+function renderConfigToml(nodeBin: string, bridgeEntry: string, useTsx: boolean, toolsSocket: string | undefined, tsxImport: string): string {
+  const args = useTsx ? ['--import', tsxImport, bridgeEntry] : [bridgeEntry];
+  const lines = [
     `[mcp_servers.${MCP_SERVER_NAME}]`,
     `command = ${tomlString(nodeBin)}`,
     `args = [${args.map(tomlString).join(', ')}]`,
-    // O socket por-run vem no env do app-server; env_vars o encaminha ao bridge.
-    'env_vars = ["KCA_TOOLS_SOCKET"]',
-    '',
-  ].join('\n');
+  ];
+  if (toolsSocket) {
+    // Formato real do codex 0.144.1: tabela `env` (NAO `env_vars`). E assim que o
+    // KCA_TOOLS_SOCKET chega ao bridge spawnado pelo app-server. Sub-tabela vem
+    // apos as chaves do bloco pai (ordem TOML).
+    lines.push('', `[mcp_servers.${MCP_SERVER_NAME}.env]`, `KCA_TOOLS_SOCKET = ${tomlString(toolsSocket)}`);
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 function tomlString(value: string): string {
