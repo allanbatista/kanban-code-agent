@@ -66,6 +66,8 @@ describe('project git worktree', () => {
     git(dir, ['init', '--initial-branch=main', origin]);
     git(origin, ['config', 'user.name', 'Test']);
     git(origin, ['config', 'user.email', 'test@example.invalid']);
+    // origin não-bare com main em check-out: aceita o push do default sem mexer no worktree.
+    git(origin, ['config', 'receive.denyCurrentBranch', 'ignore']);
     writeFileSync(join(origin, 'README.md'), 'base\n');
     git(origin, ['add', 'README.md']);
     git(origin, ['commit', '-m', 'base']);
@@ -118,6 +120,9 @@ describe('project git worktree', () => {
     expect(task.status).toBe(TASK_STATUS.COMPLETED);
     expect(git(dir, [`--git-dir=${mirror}`, 'show', 'main:task_2.txt'])).toBe('task_2');
     expect(git(dir, [`--git-dir=${mirror}`, 'show', 'main:task_3.txt'])).toBe('task_3');
+    // Regressão do bug "push sem caller": o merge precisa chegar ao remote real, não só ao mirror.
+    expect(git(origin, ['show', 'main:task_2.txt'])).toBe('task_2');
+    expect(git(origin, ['show', 'main:task_3.txt'])).toBe('task_3');
     const finalMerge = getEvents(orc).find((event) =>
       event.type === SWARM_EVENT_TYPE.BRANCH_MERGED && event.payload?.into === 'main');
     expect(finalMerge?.payload?.from).toBe(branch);
@@ -134,6 +139,8 @@ describe('project git worktree', () => {
     git(dir, ['init', '--initial-branch=main', origin]);
     git(origin, ['config', 'user.name', 'Test']);
     git(origin, ['config', 'user.email', 'test@example.invalid']);
+    // origin não-bare com main em check-out: aceita o push do default sem mexer no worktree.
+    git(origin, ['config', 'receive.denyCurrentBranch', 'ignore']);
     writeFileSync(join(origin, 'README.md'), 'base\n');
     git(origin, ['add', 'README.md']);
     git(origin, ['commit', '-m', 'base']);
@@ -218,5 +225,46 @@ describe('project git worktree', () => {
     const resolver = [...orc.tasks.values()].find((candidate) => candidate.title === 'Resolver conflito app');
     expect(task.status).toBe(TASK_STATUS.WAITING);
     expect(resolver?.parentId).toBe(task.taskId);
+  });
+
+  it('surfaces a push failure and does not complete the task', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'kca-pushfail-'));
+    const origin = join(dir, 'origin');
+    git(dir, ['init', '--initial-branch=main', origin]);
+    git(origin, ['config', 'user.name', 'Test']);
+    git(origin, ['config', 'user.email', 'test@example.invalid']);
+    writeFileSync(join(origin, 'README.md'), 'base\n');
+    git(origin, ['add', 'README.md']);
+    git(origin, ['commit', '-m', 'base']);
+
+    const runner: AgentRunner = {
+      async run(): Promise<AgentRunResult> {
+        return {
+          output: completedDecision('done'),
+          stats: { tokens: { input: 1, output: 1, total: 2 }, cost: 0 },
+        };
+      },
+    };
+    const agents = [
+      { name: 'Manager', role: 'mgr', runtimeConfig: { model: 'fast' as const, effort: 'off' as const }, tools: ['read'] },
+    ];
+    orc = new Orquestrator(createDeps(dir, createPiClientWithRunner(runner), agents));
+    const project = orc.createProject({ name: 'App', slug: 'app', gitUrl: origin, defaultBranch: 'main' });
+
+    const task = orc.createRootTask('Pequena mudança', 'Manager', undefined, [], undefined, [project.slug]);
+
+    await vi.waitFor(() => expect(task.status).toBe(TASK_STATUS.REVIEW));
+    // Quebra o remote real do mirror: o merge local ainda vai, mas o push falha.
+    const mirror = join(dir, '.swarm', 'projects', 'app', 'repo.git');
+    git(dir, [`--git-dir=${mirror}`, 'remote', 'set-url', 'origin', join(dir, 'nao-existe.git')]);
+
+    expect(() => orc!.completeTaskByUser(task.taskId)).toThrow();
+    // Falha de push não pode passar silenciosa e não pode concluir a task.
+    expect(task.status).toBe(TASK_STATUS.REVIEW);
+    const blocked = getEvents(orc).find((event) =>
+      event.type === SWARM_EVENT_TYPE.MERGE_BLOCKED && event.payload?.reason === 'push');
+    expect(blocked?.payload?.into).toBe('main');
+    expect(getEvents(orc).some((event) =>
+      event.type === SWARM_EVENT_TYPE.TASK_COMPLETED && event.taskId === task.taskId)).toBe(false);
   });
 });

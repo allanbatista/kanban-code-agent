@@ -4,6 +4,7 @@ services:
     image: kanban-code-agent
     container_name: kanban-code-agent
     restart: unless-stopped
+    init: true # PID 1 = tini, colhe zumbis dos processos codex reparentados
     ports:
       - '35000:35000'
     env_file: .env

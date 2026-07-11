@@ -283,6 +283,31 @@ describe('Orquestrator', () => {
       expect(orc.tasks.get(overridden.taskId)?.options.runtimeConfig?.agent).toBe('pi');
     });
 
+    it('create_subtask enforces maxSubtasksPerTask=10 counting real children (rejects the 11th, across runs)', async () => {
+      const orc = new Orquestrator(createDeps(dir, createPiClient([])));
+      const parent = orc.createRootTask('Parent', 'agent-tester');
+      const create = orc.buildAgentTools(parent, true).find((tool) => tool.name === 'create_subtask');
+      if (!create) throw new Error('parent sem create_subtask');
+
+      // Os 10 permitidos passam (titulos distintos p/ escapar da idempotencia).
+      for (let i = 0; i < 10; i++) {
+        await create.execute({ assignedTo: 'agent-tester', title: `Sub ${i}`, message: `msg ${i}` });
+      }
+      expect(orc.getSubtasks(parent).length).toBe(10);
+
+      // O 11o e rejeitado com mensagem clara que o agente pode reagir.
+      await expect(
+        create.execute({ assignedTo: 'agent-tester', title: 'Sub 11', message: 'msg 11' }),
+      ).rejects.toThrow(/Limite de 10 subtasks/);
+
+      // "Across runs": mesmo com subtaskIds stale (replay sem snapshot nao repopula
+      // o array), o cap conta os filhos reais no mapa e ainda rejeita o proximo.
+      parent.subtaskIds = [];
+      await expect(
+        create.execute({ assignedTo: 'agent-tester', title: 'Sub 12', message: 'msg 12' }),
+      ).rejects.toThrow(/Limite de 10 subtasks/);
+    });
+
     it('resolveRuntimeConfig applies defaultAgent option, task overrides', () => {
       const orc = new Orquestrator(createDeps(dir, createPiClient([])), { defaultAgent: 'codex' });
       const base = orc.createRootTask('Base', 'agent-tester');
@@ -1560,5 +1585,32 @@ describe('Orquestrator user lifecycle', () => {
     expect(orc.tasks.has(task.taskId)).toBe(false);
     expect(orc.rootTaskIds).not.toContain(task.taskId);
     expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_ARCHIVED, task.taskId)).toBeDefined();
+  });
+
+  it('fails a Manager root after exactly 3 delegation-guard re-prompts when it never delegates', async () => {
+    // Runner sempre responde completed sem criar subtasks → dispara o guard toda vez.
+    const orc = new Orquestrator(managerDeps(createPiClientWithRunner(makeRunner([]))));
+    // Mensagem longa (>=60 chars) → nao e "simple task", o guard nao e isento.
+    const longMsg = 'Implemente um sistema completo de autenticacao de usuarios com testes e documentacao.';
+    const task = orc.createRootTask('Auth', 'Manager', undefined, [], longMsg);
+
+    await settle(task);
+
+    expect(task.status).toBe(TASK_STATUS.FAILED);
+    expect(task.failureReason).toBe('attempts');
+    expect(task.delegationGuardCount).toBe(3);
+
+    const events = getEvents(orc);
+    const reprompts = events.filter(
+      (e) =>
+        e.type === SWARM_EVENT_TYPE.TASK_RETRY_REQUESTED &&
+        e.taskId === task.taskId &&
+        typeof e.payload?.reason === 'string' &&
+        (e.payload.reason as string).includes('delegar'),
+    );
+    expect(reprompts.length).toBe(3);
+
+    const failed = findEvent(events, SWARM_EVENT_TYPE.TASK_FAILED, task.taskId);
+    expect(String(failed?.payload?.error)).toContain('Manager nao delegou apos 3 tentativas');
   });
 });

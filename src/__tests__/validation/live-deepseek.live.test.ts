@@ -58,5 +58,11 @@ describe.skipIf(!hasApiKey || !hasValidationFlag)('Live validation: DeepSeek v4 
     // Verify task was created
     expect(task.taskId).toBeDefined();
     expect(task.status).toBe('QUEUED');
+
+    // ponytail: createRootTask agenda um run async; sem cancelar, esse run in-proc
+    // continua depois do fim do teste e falha (dir temporario ja removido). Cancela
+    // para levar a task a um estado terminal de forma deterministica.
+    orc.cancelTask(task.taskId);
+    expect(task.status).toBe('CANCELLED');
   });
 });

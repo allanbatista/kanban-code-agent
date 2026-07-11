@@ -89,6 +89,8 @@ export class RoutingAgentClient implements AgentClient {
   constructor(
     private readonly makePi: () => AgentClient,
     private readonly makeCodex: () => AgentClient,
+    // Mantido por compat com call sites; titulos nao usam mais o agent default
+    // (vao sempre pro pi), mas run/select continuam roteando por task.
     private readonly resolveDefaultAgent: () => AgentName,
   ) {}
 
@@ -145,9 +147,16 @@ export class RoutingAgentClient implements AgentClient {
     return this.select(agent, task, orquestrator).buildRepairRunConfig(agent, task, orquestrator, errorMessage, invalidOutput, signal);
   }
 
-  generateTitle(message: string): Promise<string> {
-    // Sem task: usa o agent default global (settings).
-    return this.forName(this.resolveDefaultAgent()).generateTitle(message);
+  async generateTitle(message: string): Promise<string> {
+    // ponytail: titulo nao justifica um app-server spawn do codex (~9s/~30k tokens).
+    // Sempre roteia titulos para o pi (chamada in-process ao fast-model, barata),
+    // mesmo quando o agent default e codex. Se o pi falhar (ex.: sem key deepseek),
+    // cai no truncamento — a mesma heuristica do CodexAgentClient.generateTitle.
+    try {
+      return await this.forName('pi').generateTitle(message);
+    } catch {
+      return message.split('\n')[0].slice(0, 60);
+    }
   }
 }
 

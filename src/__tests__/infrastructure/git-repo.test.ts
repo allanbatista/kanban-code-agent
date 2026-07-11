@@ -85,4 +85,28 @@ describe('GitRepo', () => {
     expect(log).toContain('secret-token');
     expect(log).not.toContain('config');
   });
+
+  it('escopa safe.directory=* via env em toda invocação (dubious ownership)', () => {
+    dir = mkdtempSync(join(tmpdir(), 'kca-git-safedir-'));
+    const gitBin = join(dir, 'git');
+    const logPath = join(dir, 'git-env.json');
+    writeFileSync(
+      gitBin,
+      [
+        '#!/bin/sh',
+        `printf '{"count":"%s","key":"%s","value":"%s"}\\n' "$GIT_CONFIG_COUNT" "$GIT_CONFIG_KEY_0" "$GIT_CONFIG_VALUE_0" > "${logPath}"`,
+        'exit 0',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(gitBin, 0o700);
+
+    const repo = new GitRepo({ gitBin });
+    repo.push('/tmp/worktree');
+
+    const log = JSON.parse(readFileSync(logPath, 'utf-8'));
+    expect(log.count).toBe('1');
+    expect(log.key).toBe('safe.directory');
+    expect(log.value).toBe('*');
+  });
 });

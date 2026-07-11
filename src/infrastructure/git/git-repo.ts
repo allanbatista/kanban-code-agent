@@ -98,7 +98,10 @@ export class GitRepo {
   }
 
   push(worktreeDir: string, remote = 'origin', ref = 'HEAD'): void {
-    this.git(['-C', worktreeDir, 'push', remote, ref]);
+    // O mirror interno é clonado com --mirror, o que liga remote.<remote>.mirror=true
+    // e faz o git recusar refspecs ("--mirror can't be combined with refspecs").
+    // Desligamos o modo mirror só nesta invocação para publicar um ref específico.
+    this.git(['-C', worktreeDir, '-c', `remote.${remote}.mirror=false`, 'push', remote, ref]);
   }
 
   head(worktreeDir: string): string {
@@ -113,7 +116,16 @@ export class GitRepo {
     try {
       return execFileSync(this.gitBin, args, {
         encoding: 'utf-8',
-        env: { ...process.env, ...this.env },
+        env: {
+          ...process.env,
+          ...this.env,
+          // kca roda git só em paths que o próprio kca gerencia (mirrors/worktrees),
+          // então escopamos safe.directory=* via env — evita "dubious ownership" quando
+          // o container roda como root e os repos pertencem a outro uid. Sem gitconfig global.
+          GIT_CONFIG_COUNT: '1',
+          GIT_CONFIG_KEY_0: 'safe.directory',
+          GIT_CONFIG_VALUE_0: '*',
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (error) {

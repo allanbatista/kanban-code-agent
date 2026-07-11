@@ -155,6 +155,10 @@ const MAX_TASK_DEPTH = readPositiveIntegerEnv('SWARM_MAX_TASK_DEPTH', 5);
 const MAX_SUBTASKS_PER_TASK = readPositiveIntegerEnv('SWARM_MAX_SUBTASKS_PER_TASK', 10);
 const MAX_TASK_RETRIES = readPositiveIntegerEnv('SWARM_MAX_TASK_RETRIES', 3);
 const MAX_TECHNICAL_RETRIES = readPositiveIntegerEnv('SWARM_MAX_TECHNICAL_RETRIES', 2);
+// Quantas vezes o guard re-prompta um Manager a delegar antes de falhar a task.
+// Sem bound, um Manager que insiste em responder direto gera um loop que queima
+// tokens (300k+ observados). Constante fixa — sem plumbing de config.
+const MAX_DELEGATION_GUARD_RETRIES = 3;
 const DEFAULT_RUN_TIMEOUT_MS = readPositiveIntegerEnv('SWARM_RUN_TIMEOUT_MS', 300000);
 const DEFAULT_MAX_CONCURRENT_RUNS = readPositiveIntegerEnv('SWARM_MAX_CONCURRENT_RUNS', 4);
 const DEFAULT_ISOLATION: IsolationMode = process.env.SWARM_ISOLATION === 'docker' ? 'docker' : 'inproc';
@@ -992,7 +996,11 @@ export class Orquestrator extends EventEmitter {
     if (parentTask.depth >= MAX_TASK_DEPTH) {
       throw new Error(`Depth maximo ${MAX_TASK_DEPTH} atingido para task ${parentTask.taskId}`);
     }
-    if (parentTask.subtaskIds.length >= MAX_SUBTASKS_PER_TASK) {
+    // Conta os filhos REAIS (parentId no mapa), nao o array subtaskIds: o replay
+    // sem snapshot reconstroi cada subtask mas nao repovoa parentTask.subtaskIds,
+    // entao confiar no array deixava o cap furar (Manager criou 40 filhos no x99).
+    // Este e o unico ponto por onde toda criacao de subtask passa.
+    if (this.countChildren(parentTask.taskId) >= MAX_SUBTASKS_PER_TASK) {
       throw new Error(`Limite de ${MAX_SUBTASKS_PER_TASK} subtasks atingido para task ${parentTask.taskId}`);
     }
 
@@ -1120,6 +1128,16 @@ export class Orquestrator extends EventEmitter {
     return task.subtaskIds
       .map((tid) => this.tasks.get(tid))
       .filter((subtask): subtask is Task => Boolean(subtask));
+  }
+
+  // Filhos reais no mapa (fonte autoritativa do cap de subtasks): independe de
+  // subtaskIds, que pode ficar desatualizado apos replay sem snapshot.
+  private countChildren(parentTaskId: string): number {
+    let count = 0;
+    for (const task of this.tasks.values()) {
+      if (task.options.parentId === parentTaskId) count += 1;
+    }
+    return count;
   }
 
   private requireDirectSubtask(parentTask: Task, subtaskId: string): Task {
@@ -1355,6 +1373,26 @@ export class Orquestrator extends EventEmitter {
           task,
           payload: { slug: project.slug, from: this.gitBranchForTask(task), into: project.defaultBranch, sha },
         });
+        // O merge acima vive só no mirror interno; publicamos o default no remote
+        // real do projeto (push() já injeta o GIT_ASKPASS). Sem isto o trabalho
+        // aprovado nunca chega ao origin. Dentro do lock de merge serializado.
+        try {
+          this.gitRepo.push(mergeDir, 'origin', project.defaultBranch);
+        } catch (pushError) {
+          // Falha de push não pode passar silenciosa: emite MERGE_BLOCKED (erro já
+          // redigido por git()) e propaga para o caller não marcar COMPLETED.
+          this.recordEvent(SWARM_EVENT_TYPE.MERGE_BLOCKED, {
+            task,
+            payload: {
+              slug: project.slug,
+              from: this.gitBranchForTask(task),
+              into: project.defaultBranch,
+              reason: 'push',
+              error: pushError instanceof Error ? pushError.message : String(pushError),
+            },
+          });
+          throw pushError;
+        }
       } catch (error) {
         if (error instanceof GitConflictError) {
           this.recordEvent(SWARM_EVENT_TYPE.MERGE_BLOCKED, {
@@ -2226,11 +2264,26 @@ export class Orquestrator extends EventEmitter {
     // but returned completed without creating ANY subtasks, force a retry with
     // stronger delegation instructions. Simple one-liner tasks are exempt.
     const isManagerRoot = !task.options.parentId && task.options.assignedTo === MANAGER_AGENT;
-    if (isManagerRoot && task.subtaskIds.length === 0 && task.runs.length <= 1) {
+    if (isManagerRoot && task.subtaskIds.length === 0) {
       const firstUserMsg = task.chat.find((m) => m.role === 'user')?.text ?? '';
       const isSimpleTask = firstUserMsg.length < 60 && !firstUserMsg.includes('\n');
       if (!isSimpleTask) {
+        // Bound anti-loop: o contador persiste no estado da task (sobrevive a
+        // restart). Apos N re-prompts sem delegar, falha pela maquinaria de
+        // falha existente em vez de re-promptar indefinidamente (loop de tokens).
+        if (task.delegationGuardCount >= MAX_DELEGATION_GUARD_RETRIES) {
+          this.markEventsProcessed(task, triggerEvents);
+          this.failTask(
+            task,
+            run,
+            `Manager nao delegou apos ${MAX_DELEGATION_GUARD_RETRIES} tentativas`,
+            'attempts',
+          );
+          this.persist();
+          return;
+        }
         // Force retry with delegation instruction
+        task.delegationGuardCount += 1;
         task.retryCount += 1;
         task.setStatus(TASK_STATUS.PENDING, { waitingReason: undefined });
         this.appendUserInstruction(

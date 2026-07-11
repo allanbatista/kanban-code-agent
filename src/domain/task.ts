@@ -82,6 +82,7 @@ export interface SerializedTask {
   artifacts?: TaskArtifact[];
   retryCount?: number;
   technicalRetryCount?: number;
+  delegationGuardCount?: number;
   metrics?: TaskMetrics;
   evaluationVerdict?: EvaluationVerdict;
 }
@@ -179,6 +180,8 @@ export class Task {
   artifacts: TaskArtifact[] = [];
   retryCount = 0;
   technicalRetryCount = 0;
+  /** Quantas vezes o guard de delegação re-promptou este Manager root (persistido; bound anti-loop). */
+  delegationGuardCount = 0;
   metrics: TaskMetrics = this.createEmptyMetrics();
   /** Latest independent-evaluation verdict (set when this is a QA/Code Reviewer subtask). */
   evaluationVerdict?: EvaluationVerdict;
@@ -250,6 +253,7 @@ export class Task {
       artifacts: this.artifacts,
       retryCount: this.retryCount,
       technicalRetryCount: this.technicalRetryCount,
+      delegationGuardCount: this.delegationGuardCount,
       metrics: this.metrics,
       evaluationVerdict: this.evaluationVerdict,
     };
@@ -268,6 +272,7 @@ export class Task {
     task.artifacts = serialized.artifacts ?? [];
     task.retryCount = serialized.retryCount ?? 0;
     task.technicalRetryCount = serialized.technicalRetryCount ?? 0;
+    task.delegationGuardCount = serialized.delegationGuardCount ?? 0;
     task.metrics = serialized.metrics ?? task.createEmptyMetrics();
     task.evaluationVerdict = serialized.evaluationVerdict;
     return task;
