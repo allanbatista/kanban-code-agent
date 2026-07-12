@@ -116,9 +116,10 @@ export class PiAgentClient implements AgentClient {
     const guardrailBlock = agent.mustNot?.length
       ? `\nVOCE NAO DEVE (guardrails do papel):\n${agent.mustNot.map((g) => `- ${g}`).join('\n')}`
       : '';
+    const personaPrompt = agent.systemPrompt?.trim() || agent.role;
 
     const commonHeader = [
-      agent.role + guardrailBlock,
+      personaPrompt + guardrailBlock,
       orquestrator.buildTaskMetadataBlock(task, metadata),
       '',
       'COMO VOCE SE COMUNICA',

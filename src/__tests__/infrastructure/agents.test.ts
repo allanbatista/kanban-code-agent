@@ -51,6 +51,24 @@ describe('Agent definitions', () => {
     }
   });
 
+  it('defines a distinct specialized system prompt for each agent', () => {
+    const focusByAgent = {
+      Manager: 'subtarefas',
+      Produto: 'regras de negócio',
+      Architecture: 'trade-offs',
+      Engineer: 'causa raiz',
+      'Code Reviewer': 'severidade',
+      QA: 'cenários',
+      Generic: 'tarefas simples',
+    } as const;
+
+    expect(getAgentNames()).toEqual(Object.keys(focusByAgent));
+    expect(new Set(AGENTS.map((agent) => agent.systemPrompt)).size).toBe(AGENTS.length);
+    for (const [name, focus] of Object.entries(focusByAgent)) {
+      expect(getAgentDefinition(name)?.systemPrompt).toContain(focus);
+    }
+  });
+
   it('getAgentDefinition returns agent by name', () => {
     expect(getAgentDefinition('Manager')).toBeDefined();
     expect(getAgentDefinition('NonExistent')).toBeUndefined();
