@@ -30,7 +30,8 @@ coverage/
 #graphify
 graphify-runs/
 graphify-out/
-!graphify-out/graph.json
+.changelog/
+.sdd/
 .env
 data/
 !.env.example
