@@ -34,3 +34,5 @@ graphify-out/
 .env
 data/
 !.env.example
+.playwright-mcp/
+.serena/
