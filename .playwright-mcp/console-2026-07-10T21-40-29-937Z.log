@@ -1,5 +1,0 @@
-[     484ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:8843/node_modules/.vite/deps/react-dom_client.js?v=0c0fa4ec:14336
-[     793ms] [INFO] [ws] connecting to ws://127.0.0.1:35043/ws @ http://localhost:8843/src/api/ws-client.ts:29
-[     794ms] [WARNING] WebSocket connection to 'ws://127.0.0.1:35043/ws' failed: WebSocket is closed before the connection is established. @ http://localhost:8843/src/api/ws-client.ts:101
-[     797ms] [INFO] [ws] connecting to ws://127.0.0.1:35043/ws @ http://localhost:8843/src/api/ws-client.ts:29
-[     846ms] [INFO] [ws] connected ws://127.0.0.1:35043/ws @ http://localhost:8843/src/api/ws-client.ts:33

@@ -9,6 +9,7 @@ import type {
   ApiCodexStatus,
   ApiCodexDeviceLogin,
   ApiHealth,
+  ApiUserProfile,
 } from '@/types/api';
 
 // Same-origin by default (empty base = relative '/api/...'): in dev the Vite
@@ -219,6 +220,20 @@ export const api = {
 
   codexLogout(): Promise<{ ok: boolean }> {
     return request('/api/settings/codex/logout', { method: 'POST' });
+  },
+
+  // --- Auth ---
+
+  authLogin(provider: string): string {
+    return `/api/auth/${provider}/login`;
+  },
+
+  authMe(): Promise<ApiUserProfile | null> {
+    return request<ApiUserProfile>('/api/auth/me');
+  },
+
+  authLogout(): Promise<void> {
+    return request<void>('/api/auth/logout', { method: 'POST' });
   },
 
   // --- Health ---

@@ -148,6 +148,14 @@ export interface ApiCodexDeviceLogin {
   userCode: string;
 }
 
+export interface ApiUserProfile {
+  id: number;
+  login: string;
+  name: string | null;
+  avatar_url: string;
+  provider: string;
+}
+
 export interface ApiHealth {
   status: string;
   uptime: number;

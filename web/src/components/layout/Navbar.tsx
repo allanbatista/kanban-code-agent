@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Workflow, Command, Keyboard } from 'lucide-react';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Workflow, Command, Keyboard, LogIn } from 'lucide-react';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useKanbanStore } from '@/stores/kanbanStore';
+import { useAuthStore } from '@/stores/authStore';
 
 const NAV_ITEMS = [
   { path: '/', label: 'Kanban' },
@@ -18,6 +19,7 @@ export function Navbar() {
   const [commandOpen, setCommandOpen] = useState(false);
   const tasks = useKanbanStore(s => s.tasks);
   const wsConnected = useKanbanStore(s => s.wsConnected);
+  const user = useAuthStore(s => s.user);
 
   return (
     <>
@@ -73,9 +75,21 @@ export function Navbar() {
             </kbd>
           </Button>
 
-          <Avatar className="h-8 w-8">
-            <AvatarFallback className="bg-primary/10 text-primary text-xs">U</AvatarFallback>
-          </Avatar>
+          {user ? (
+            <Avatar className="h-8 w-8">
+              <AvatarImage src={user.avatar_url} alt={user.login} />
+              <AvatarFallback className="bg-primary/10 text-primary text-xs">
+                {user.login.charAt(0).toUpperCase()}
+              </AvatarFallback>
+            </Avatar>
+          ) : (
+            <Link to="/login">
+              <Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground">
+                <LogIn className="h-4 w-4" />
+                <span className="hidden sm:inline text-xs">Login</span>
+              </Button>
+            </Link>
+          )}
         </div>
       </nav>
 

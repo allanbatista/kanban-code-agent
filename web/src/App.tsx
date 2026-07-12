@@ -4,13 +4,18 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { Navbar } from '@/components/layout/Navbar';
 import { AnimatedGradientBackground } from '@/components/background/AnimatedGradientBackground';
 import { useKanbanStore } from '@/stores/kanbanStore';
+import { useAuthStore } from '@/stores/authStore';
 import { createWsClient } from '@/api/ws-client';
 import { metadataToTask } from '@/api/adapter';
 
 export function App() {
   const { fetchTasks, fetchAgents, setTasks } = useKanbanStore();
+  const checkSession = useAuthStore(s => s.checkSession);
 
   useEffect(() => {
+    // Restore auth session from stored token
+    checkSession();
+
     // Fetch initial data
     fetchTasks();
     fetchAgents();

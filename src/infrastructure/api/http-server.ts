@@ -10,7 +10,7 @@ import type { Orquestrator } from '../../application/orquestrator.js';
 import type { Logger } from '../logging/logger.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { requestLogger } from './middleware/request-logger.js';
-import { makeAuthHook } from './middleware/auth.js';
+import { makeAuthHook, makeJwtHook } from './middleware/auth.js';
 import { registerTaskRoutes } from './routes/tasks.js';
 import { registerAgentRoutes } from './routes/agents.js';
 import { registerProjectRoutes } from './routes/projects.js';
@@ -18,6 +18,8 @@ import { registerSettingsRoutes } from './routes/settings.js';
 import { SettingsStore } from '../persistence/settings-store.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerReportRoutes } from './routes/reports.js';
+import { registerAuthRoutes } from './routes/auth.js';
+import { OAuthService } from '../security/oauth.js';
 import { registerWebSocket } from './ws-server.js';
 
 // --- Types ---
@@ -133,6 +135,13 @@ export function createServer(
   registerSettingsRoutes(fastify, { settingsStore, orquestrator });
   registerEventRoutes(fastify, orquestrator);
   registerReportRoutes(fastify, orquestrator);
+
+  // --- Auth Routes (OAuth + JWT) ---
+  const oauthService = new OAuthService();
+  // Optional JWT hook: attaches request.user when a valid JWT is present
+  // Never blocks requests, works alongside SWARM_AUTH_TOKEN
+  fastify.addHook('onRequest', makeJwtHook(oauthService));
+  registerAuthRoutes(fastify, oauthService);
 
   // The @fastify/websocket onRoute hook only tags routes registered AFTER the
   // plugin has loaded. Registering the plugin and the /ws route together in an
