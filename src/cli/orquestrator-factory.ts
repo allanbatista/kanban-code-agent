@@ -27,6 +27,7 @@ function createAgents(): Agent[] {
   return AGENTS.map((def) => ({
     name: def.name,
     role: def.role,
+    systemPrompt: def.systemPrompt,
     runtimeConfig: def.runtimeConfig,
     tools: def.tools,
     mustNot: def.guardrails.mustNot,

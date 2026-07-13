@@ -21,7 +21,7 @@ const MODELS = {
   balanced: { provider: 'deepseek', modelId: 'deepseek-v4-flash', description: 'y' },
   deep: { provider: 'deepseek', modelId: 'deepseek-v4-pro', description: 'z' },
 };
-const agent: Agent = { name: 'agent-tester', role: 'Test.', runtimeConfig: { model: 'fast', effort: 'off' }, tools: ['read'] };
+const agent: Agent = { name: 'agent-tester', role: 'Test.', systemPrompt: 'Prompt inicial.', runtimeConfig: { model: 'fast', effort: 'off' }, tools: ['read'] };
 const manager: Agent = { name: 'Manager', role: 'Manager.', runtimeConfig: { model: 'fast', effort: 'off' }, tools: ['read'] };
 
 function build(dir: string): { orc: Orquestrator; server: FastifyInstance } {
@@ -31,7 +31,7 @@ function build(dir: string): { orc: Orquestrator; server: FastifyInstance } {
     snapshotStore: new SnapshotStore(sandbox),
     taskFileStore: new TaskFileStore(sandbox),
     sandbox,
-    agents: [agent, manager],
+    agents: [{ ...agent }, { ...manager }],
     piClient: new PiAgentClient(makeRunner([]), '', ['read'], MODELS, 60),
     models: MODELS,
   }, { stopWhenWaiting: true });
@@ -59,6 +59,28 @@ describe('API route integration (F8.T1/T2)', () => {
     expect(body.status).toBe('ok');
     expect(body.operations).toBeDefined();
     expect(typeof body.operations.queueDepth).toBe('number');
+  });
+
+  it('reads, updates and validates an agent systemPrompt', async () => {
+    const current = await server.inject({ method: 'GET', url: '/api/agents/agent-tester' });
+    expect(current.statusCode).toBe(200);
+    expect(current.json().systemPrompt).toBe('Prompt inicial.');
+
+    const updated = await server.inject({
+      method: 'PATCH',
+      url: '/api/agents/agent-tester',
+      payload: { systemPrompt: '  Prompt atualizado.  ' },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json().systemPrompt).toBe('Prompt atualizado.');
+    expect(orc.agents.get('agent-tester')?.systemPrompt).toBe('Prompt atualizado.');
+
+    const invalid = await server.inject({
+      method: 'PATCH',
+      url: '/api/agents/agent-tester',
+      payload: { systemPrompt: '   ' },
+    });
+    expect(invalid.statusCode).toBe(400);
   });
 
   it('creates, lists, gets and cancels a task', async () => {

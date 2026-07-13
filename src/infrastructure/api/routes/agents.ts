@@ -12,6 +12,7 @@ const updateAgentBody = z.object({
     effort: z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
   }).optional(),
   role: z.string().min(1).max(200).optional(),
+  systemPrompt: z.string().trim().min(1).max(10_000).optional(),
 });
 
 const agentParams = z.object({
@@ -24,6 +25,7 @@ function toAgentResponse(agent: Agent) {
   return {
     name: agent.name,
     role: agent.role,
+    systemPrompt: agent.systemPrompt,
     runtimeConfig: agent.runtimeConfig,
     tools: agent.tools,
   };
@@ -59,7 +61,7 @@ export function registerAgentRoutes(
     return toAgentResponse(agent);
   });
 
-  // PATCH /api/agents/:name — update agent runtime config
+  // PATCH /api/agents/:name — update agent configuration
   fastify.patch('/api/agents/:name', async (request, reply) => {
     const params = agentParams.safeParse(request.params);
     if (!params.success) {
@@ -84,6 +86,9 @@ export function registerAgentRoutes(
     }
     if (body.data.role !== undefined) {
       agent.role = body.data.role;
+    }
+    if (body.data.systemPrompt !== undefined) {
+      agent.systemPrompt = body.data.systemPrompt;
     }
 
     return toAgentResponse(agent);
