@@ -1575,6 +1575,20 @@ describe('Orquestrator user lifecycle', () => {
     expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_CANCELLED, task.taskId)).toBeDefined();
   });
 
+  it('cancelTask changes a FAILED task to CANCELLED and persists it', () => {
+    const orc = new Orquestrator(managerDeps(createPiClient([])), { resetState: true, stopWhenWaiting: true });
+    const task = orc.addTask({ message: 'Root', title: 'Root' });
+    task.setStatus(TASK_STATUS.FAILED, { force: true, failureReason: 'attempts' });
+
+    orc.cancelTask(task.taskId);
+
+    expect(task.status).toBe(TASK_STATUS.CANCELLED);
+    expect(findEvent(getEvents(orc), SWARM_EVENT_TYPE.TASK_CANCELLED, task.taskId)).toBeDefined();
+
+    const reloaded = new Orquestrator(managerDeps(createPiClient([])), { stopWhenWaiting: true });
+    expect(reloaded.tasks.get(task.taskId)?.status).toBe(TASK_STATUS.CANCELLED);
+  });
+
   it('archiveByStatus removes tasks from state and emits TASK_ARCHIVED', async () => {
     const orc = new Orquestrator(managerDeps(createPiClient([completedDecision()])));
     const task = orc.createRootTask('Root', 'Manager');

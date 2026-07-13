@@ -715,14 +715,14 @@ export class Orquestrator extends EventEmitter {
   cancelTask(taskId: string): Task {
     const task = this.tasks.get(taskId);
     if (!task) throw new Error(`Task ${taskId} não encontrada`);
-    if (isTerminalTaskStatus(task.status)) return task;
+    if (isTerminalTaskStatus(task.status) && task.status !== TASK_STATUS.FAILED) return task;
     this.dequeue(taskId);
     // Cascade cancel: aborting the parent aborts the whole active family so no
     // child worker is left running (orphan-run). Reuses dequeue→cancelActiveRun.
     const familyIds = this.collectFamilyIds(task);
     for (const id of familyIds) {
       const member = this.tasks.get(id);
-      if (!member || isTerminalTaskStatus(member.status)) continue;
+      if (!member || (isTerminalTaskStatus(member.status) && member.status !== TASK_STATUS.FAILED)) continue;
       this.dequeue(id);
       member.setStatus(TASK_STATUS.CANCELLED, { force: true, failureReason: 'cancelled_by_user', waitingReason: undefined });
       member.activeRunId = undefined;
