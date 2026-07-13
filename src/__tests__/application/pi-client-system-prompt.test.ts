@@ -29,13 +29,14 @@ const orquestrator = {
 
 const task = new Task({ taskId: 'task_1', title: 'Teste', assignedTo: 'Engineer', depth: 0 });
 
-function buildSystemPrompt(systemPrompt?: string): string {
+function buildSystemPrompt(systemPrompt?: string, mustNot?: string[]): string {
   const agent: Agent = {
     name: 'Engineer',
     role: 'papel curto',
     systemPrompt,
     runtimeConfig: { model: 'fast', effort: 'off' },
     tools: ['read'],
+    mustNot,
   };
   return client.buildRunConfig(agent, task, orquestrator, []).systemPrompt;
 }
@@ -45,5 +46,11 @@ describe('PiAgentClient system prompt', () => {
     expect(buildSystemPrompt('  prompt especializado  ')).toMatch(/^prompt especializado\n/);
     expect(buildSystemPrompt('   ')).toMatch(/^papel curto\n/);
     expect(buildSystemPrompt()).toMatch(/^papel curto\n/);
+  });
+
+  it('preserves role guardrails with a specialized prompt', () => {
+    const prompt = buildSystemPrompt('prompt especializado', ['omitir erros']);
+    expect(prompt).toContain('VOCE NAO DEVE (guardrails do papel):');
+    expect(prompt).toContain('- omitir erros');
   });
 });

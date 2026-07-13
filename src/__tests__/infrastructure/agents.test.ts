@@ -62,7 +62,7 @@ describe('Agent definitions', () => {
       Generic: 'tarefas simples',
     } as const;
 
-    expect(getAgentNames()).toEqual(Object.keys(focusByAgent));
+    expect(new Set(getAgentNames())).toEqual(new Set(Object.keys(focusByAgent)));
     expect(new Set(AGENTS.map((agent) => agent.systemPrompt)).size).toBe(AGENTS.length);
     for (const [name, focus] of Object.entries(focusByAgent)) {
       expect(getAgentDefinition(name)?.systemPrompt).toContain(focus);

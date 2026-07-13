@@ -13,6 +13,7 @@ Manter o mapa das personas executoras e de como suas instruções especializadas
 - [Code Reviewer](./CODE_REVIEWER.md)
 - [QA](./QA.md)
 - [Generic](./GENERIC.md)
+- [API](./API.md)
 
 ## Relações
 
@@ -20,6 +21,7 @@ Manter o mapa das personas executoras e de como suas instruções especializadas
 flowchart LR
   Registry[AGENTS registry] --> Factory[createAgents]
   Factory --> Runtime[Agent.systemPrompt]
+  Runtime --> API[GET e PATCH /api/agents]
   Runtime --> Prompt[PiAgentClient systemPrompt]
   Prompt --> Runner[Pi ou Codex]
 ```
@@ -32,3 +34,4 @@ O `role` mantém a descrição curta. O `systemPrompt` contém a instrução esp
 - `src/domain/agent.ts`
 - `src/cli/orquestrator-factory.ts`
 - `src/application/pi-client.ts`
+- `src/infrastructure/api/routes/agents.ts`
